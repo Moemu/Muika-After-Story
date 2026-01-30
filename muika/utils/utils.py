@@ -18,7 +18,7 @@ from nonebot.internal.matcher import current_event
 from nonebot.log import default_filter, logger_id
 from nonebot_plugin_userinfo import get_user_info
 
-from ..config import plugin_config
+from ..config import mas_config
 from ..models import Resource
 from .adapters import ADAPTER_CLASSES
 
@@ -119,13 +119,13 @@ async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optiona
 
         url = f"https://api.telegram.org/file/bot{bot.bot_config.token}/{file.file_path}"  # type: ignore
         # filename = file.file_path.split("/")[1]
-        return await download_file(url, proxy=plugin_config.telegram_proxy)
+        return await download_file(url, proxy=mas_config.telegram_proxy)
 
     return None
 
 
 def init_logger():
-    console_handler_level = plugin_config.log_level
+    console_handler_level = mas_config.log_level
 
     log_dir = "logs"
     if not os.path.exists(log_dir):
@@ -255,3 +255,8 @@ def guess_mimetype(resource: Resource) -> Optional[str]:
         return guess_type(resource.path)[0]
 
     return None
+
+
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    """限制值在最小和最大值之间"""
+    return max(min_value, min(value, max_value))

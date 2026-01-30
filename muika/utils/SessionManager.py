@@ -5,14 +5,14 @@ from nonebot import logger
 from nonebot.adapters import Event
 from nonebot_plugin_alconna.uniseg import UniMessage, UniMsg
 
-from ..config import plugin_config
+from ..config import mas_config
 
 
 class SessionManager:
     def __init__(self) -> None:
         self.sessions: Dict[str, List[UniMsg]] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._timeout = plugin_config.input_timeout
+        self._timeout = mas_config.input_timeout
 
     async def _put(self, sid: str, msg: UniMsg) -> None:
         async with self._lock:

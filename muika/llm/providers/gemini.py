@@ -24,7 +24,7 @@ from google.genai.types import (
 )
 from httpx import ConnectError
 from nonebot import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from muika.models import Resource
 
@@ -85,7 +85,7 @@ class Gemini(BaseLLM):
         )
 
     def _build_gemini_config(
-        self, tools: Optional[List[dict]], response_format: Optional[Type[BaseModel]]
+        self, tools: Optional[List[dict]], response_format: Optional[Union[Type[BaseModel], TypeAdapter, dict]]
     ) -> GenerateContentConfig:
         gemini_config = self.gemini_config.model_copy()
         format_tools = []
@@ -108,8 +108,13 @@ class Gemini(BaseLLM):
 
         # build response format
         if response_format:
+            schema = response_format
+            if isinstance(response_format, TypeAdapter):
+                # 将 TypeAdapter 转换为 json schema dict
+                schema = response_format.json_schema()
+
             gemini_config.response_mime_type = "application/json"
-            gemini_config.response_schema = response_format
+            gemini_config.response_schema = schema
 
         return gemini_config
 
@@ -149,7 +154,7 @@ class Gemini(BaseLLM):
         self,
         messages: list[ContentOrDict],
         tools: Optional[List[dict]],
-        response_format: Optional[Type[BaseModel]],
+        response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
         total_tokens: int = 0,
     ) -> ModelCompletions:
         gemini_config = self._build_gemini_config(tools, response_format)
@@ -217,7 +222,7 @@ class Gemini(BaseLLM):
         self,
         messages: list,
         tools: Optional[List[dict]],
-        response_format: Optional[Type[BaseModel]],
+        response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
         total_tokens: int = 0,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         gemini_config = self._build_gemini_config(tools, response_format)

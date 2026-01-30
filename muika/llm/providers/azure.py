@@ -26,6 +26,7 @@ from azure.ai.inference.models import (
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 from nonebot import logger
+from pydantic import TypeAdapter
 
 from .. import (
     BaseLLM,
@@ -320,9 +321,14 @@ class Azure(BaseLLM):
         tools = self.__build_tools_definition(request.tools) if request.tools else []
 
         if request.format == "json" and request.json_schema:
+            if isinstance(request.json_schema, TypeAdapter):
+                schema = request.json_schema.json_schema()
+            else:
+                schema = request.json_schema.model_json_schema()
+
             response_format = JsonSchemaFormat(
                 name="Recipe_JSON_Schema",
-                schema=request.json_schema.model_json_schema(),
+                schema=schema,
                 description=request.prompt,
                 strict=True,
             )

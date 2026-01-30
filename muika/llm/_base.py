@@ -70,15 +70,6 @@ class BaseLLM(ABC):
         """
         raise NotImplementedError
 
-    def load(self) -> bool:
-        """
-        加载模型（通常是耗时操作，在线模型如无需校验可直接返回 true）
-
-        :return: 是否加载成功
-        """
-        self.is_running = True
-        return True
-
     async def _ask_sync(
         self, messages: list, tools: Any, response_format: Any, total_tokens: int = 0
     ) -> "ModelCompletions":
@@ -126,10 +117,10 @@ class EmbeddingModel(ABC):
     """
 
     def __init__(self, config: EmbeddingConfig):
-        from ..config import plugin_config
+        from ..config import mas_config
 
         self.config = config
-        self.enable_embedding_cache = plugin_config.enable_embedding_cache
+        self.enable_embedding_cache = mas_config.enable_embedding_cache
 
         if self.enable_embedding_cache:
             self.cache_dir = get_plugin_data_dir() / "embedding"

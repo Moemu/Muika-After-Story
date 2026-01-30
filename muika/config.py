@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, List, Literal, Optional
 
 import yaml as yaml_
-from nonebot import get_plugin_config, logger
+from nonebot import get_driver, get_plugin_config, logger
 from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -17,79 +17,34 @@ from watchdog.observers.api import BaseObserver
 from .llm import EmbeddingConfig, ModelConfig
 
 MODELS_CONFIG_PATH = Path("configs/models.yml").resolve()
-SCHEDULES_CONFIG_PATH = Path("configs/schedules.yml").resolve()
 EMBEDDINGS_CONFIG_PATH = Path("configs/embeddings.yml").resolve()
 
 _model_config_manager: Optional["ModelConfigManager"] = None
 _embeddings_configs: dict[str, EmbeddingConfig] = {}
 
 
-class PluginConfig(BaseModel):
-    log_level: str = "INFO"
-    """日志等级"""
-    muice_nicknames: list = ["muice"]
-    """沐雪的自定义昵称，作为消息前缀条件响应信息事件"""
-    telegram_proxy: str | None = None
-    """telegram代理，这个配置项用于获取图片时使用"""
+class MASConfig(BaseModel):
+    master_id: str = get_driver().config.superusers.pop()
+    """对话目标ID"""
+
     enable_builtin_plugins: bool = True
     """启用内嵌插件"""
-    max_history_epoch: int = 0
-    """最大历史轮数"""
-    enable_adapters: list = ["nonebot.adapters.onebot.v11", "nonebot.adapters.onebot.v12"]
-    """启用的 Nonebot 适配器"""
     input_timeout: int = 0
     """输入等待时间"""
-    default_template: Optional[str] = "Muice"
+    default_template: Optional[str] = "Muika"
     """默认使用人设模板名称"""
     thought_process_mode: Literal[0, 1, 2] = 2
     """针对 Deepseek-R1 等思考模型的思考过程提取模式"""
     enable_embedding_cache: bool = True
     """启用嵌入缓存"""
 
-
-plugin_config = get_plugin_config(PluginConfig)
-
-
-class Schedule(BaseModel):
-    id: str
-    """调度器 ID"""
-    trigger: Literal["cron", "interval"]
-    """调度器类别"""
-    ask: Optional[str] = None
-    """向大语言模型询问的信息"""
-    say: Optional[str] = None
-    """直接输出的信息"""
-    args: dict[str, int]
-    """调度器参数"""
-    target: str
-    """目标id；若为群聊则为 group_id 或者 channel_id，若为私聊则为 user_id"""
-    probability: int = 1
-    """触发几率"""
+    log_level: str = "INFO"
+    """日志等级"""
+    telegram_proxy: Optional[str] = None
+    """telegram代理，这个配置项用于获取图片时使用"""
 
 
-def get_schedule_configs() -> List[Schedule]:
-    """
-    从配置文件 `configs/schedules.yml` 中获取所有调度器配置
-
-    如果没有该文件，返回空列表
-    """
-    if not os.path.isfile(SCHEDULES_CONFIG_PATH):
-        return []
-
-    with open(SCHEDULES_CONFIG_PATH, "r", encoding="utf-8") as f:
-        configs = yaml_.safe_load(f)
-
-    if not configs:
-        return []
-
-    schedule_configs = []
-
-    for schedule_id, config in configs.items():
-        config["id"] = schedule_id
-        schedule_config = Schedule(**config)
-        schedule_configs.append(schedule_config)
-
-    return schedule_configs
+mas_config = get_plugin_config(MASConfig)
 
 
 class ConfigFileHandler(FileSystemEventHandler):
@@ -163,7 +118,7 @@ class ModelConfigManager:
         for name, config in configs_dict.items():
             self.configs[name] = ModelConfig(**config)
             # 未指定模板时，使用默认模板
-            self.configs[name].template = self.configs[name].template or plugin_config.default_template
+            self.configs[name].template = self.configs[name].template or mas_config.default_template
             if config.get("default"):
                 self.default_config = self.configs[name]
 

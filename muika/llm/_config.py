@@ -1,19 +1,16 @@
 from importlib.util import find_spec
 from typing import Any, List, Literal, Optional
-from warnings import warn
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator
 
 
 class ModelConfig(BaseModel):
     provider: str
     """所使用模型提供者的名称，位于 llm/providers 下"""
-    loader: Optional[str] = None
-    """[弃用] 所使用加载器的名称，位于 llm 文件夹下，loader 开头必须大写"""
     default: bool = False
     """是否默认启用"""
 
-    template: Optional[str] = "Muice"
+    template: Optional[str] = "Muika"
     """使用的人设模板名称"""
     template_mode: Literal["system", "user"] = "system"
     """模板嵌入模式: `system` 为嵌入到系统提示; `user` 为嵌入到用户提示中"""
@@ -85,14 +82,6 @@ class ModelConfig(BaseModel):
             raise ValueError(f"指定的模型加载器 '{provider}' 不存在于 llm 目录中")
 
         return provider
-
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_old_field(cls, values: dict):
-        if "provider" not in values and "loader" in values:
-            values["provider"] = values["loader"]
-            warn("配置文件中的 'loader' 字段已弃用，请使用 'provider' 字段。", DeprecationWarning)
-        return values
 
 
 class EmbeddingConfig(BaseModel):

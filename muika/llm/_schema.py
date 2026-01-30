@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Literal, Optional, Type
+from typing import TYPE_CHECKING, List, Literal, Optional, Type, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from ..models import Message, Resource
 
@@ -23,7 +23,7 @@ class ModelRequest:
     tools: Optional[List[dict]] = field(default_factory=list)
     system: Optional[str] = None
     format: Literal["string", "json"] = "string"
-    json_schema: Optional[Type[BaseModel]] = None
+    json_schema: Optional[Union[Type[BaseModel], TypeAdapter]] = None
 
 
 @dataclass

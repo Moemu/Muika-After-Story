@@ -1,7 +1,7 @@
 import base64
 import json
 from io import BytesIO
-from typing import AsyncGenerator, List, Literal, Union, overload
+from typing import Any, AsyncGenerator, List, Literal, Union, overload
 
 import openai
 from nonebot import logger
@@ -11,6 +11,7 @@ from openai.types.shared_params.response_format_json_schema import (
     JSONSchema,
     ResponseFormatJSONSchema,
 )
+from pydantic import TypeAdapter
 
 from muika.models import Resource
 
@@ -126,23 +127,23 @@ class Openai(BaseLLM):
         self,
         messages: list,
         tools: Union[List[ChatCompletionToolParam], NotGiven],
-        response_format: Union[ResponseFormatJSONSchema, NotGiven],
+        response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
         total_tokens: int = 0,
     ) -> ModelCompletions:
         completions = ModelCompletions()
 
         try:
             response = await self.client.chat.completions.create(
-                audio=self.audio,
+                audio=self.audio,  # type:ignore
                 model=self.model,
-                modalities=self.modalities,
+                modalities=self.modalities,  # type:ignore
                 messages=messages,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 stream=False,
-                tools=tools,
+                tools=tools,  # type:ignore
                 extra_body=self.extra_body,
-                response_format=response_format,
+                response_format=response_format,  # type:ignore
             )
 
             logger.debug(f"OpenAI response: id={response.id}, choices={response.choices}, usage={response.usage}")
@@ -206,7 +207,7 @@ class Openai(BaseLLM):
         self,
         messages: list,
         tools: Union[List[ChatCompletionToolParam], NotGiven],
-        response_format: Union[ResponseFormatJSONSchema, NotGiven],
+        response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
         total_tokens: int = 0,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         is_insert_think_label = False
@@ -217,17 +218,17 @@ class Openai(BaseLLM):
 
         try:
             response = await self.client.chat.completions.create(
-                audio=self.audio,
+                audio=self.audio,  # type:ignore
                 model=self.model,
-                modalities=self.modalities,
+                modalities=self.modalities,  # type:ignore
                 messages=messages,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 stream=True,
                 stream_options={"include_usage": True},
-                tools=tools,
+                tools=tools,  # type:ignore
                 extra_body=self.extra_body,
-                response_format=response_format,
+                response_format=response_format,  # type:ignore
             )
 
             async for chunk in response:
@@ -359,8 +360,13 @@ class Openai(BaseLLM):
 
         messages = self._build_messages(request)
         if request.format == "json" and request.json_schema:
+            if isinstance(request.json_schema, TypeAdapter):
+                schema = request.json_schema.json_schema()
+            else:
+                schema = request.json_schema.model_json_schema()
+
             response_format = ResponseFormatJSONSchema(
-                type="json_schema", json_schema=JSONSchema(**request.json_schema.model_json_schema(), strict=True)
+                type="json_schema", json_schema=JSONSchema(**schema, strict=True)
             )
         else:
             response_format = NOT_GIVEN

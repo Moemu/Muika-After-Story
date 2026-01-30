@@ -3,6 +3,7 @@ from typing import Any, AsyncGenerator, List, Literal, Optional, Union, overload
 import ollama
 from nonebot import logger
 from ollama import ResponseError
+from pydantic import TypeAdapter
 
 from .. import (
     BaseLLM,
@@ -35,16 +36,13 @@ class Ollama(BaseLLM):
         self.frequency_penalty = self.config.frequency_penalty or 1
         self.stream = self.config.stream
 
-    def load(self) -> bool:
         try:
             self.client = ollama.AsyncClient(host=self.host)
             self.is_running = True
-        except ResponseError as e:
-            logger.error(f"加载 Ollama 加载器时发生错误： {e}")
-        except ConnectionError as e:
-            logger.error(f"加载 Ollama 加载器时发生错误： {e}")
-        finally:
-            return self.is_running
+        except (ResponseError, ConnectionError) as e:
+            text = f"加载 Ollama 加载器时发生错误： {e}"
+            logger.error(text)
+            raise RuntimeError(text) from e
 
     def __build_multi_messages(self, request: ModelRequest) -> dict:
         """
@@ -205,7 +203,10 @@ class Ollama(BaseLLM):
         tools = request.tools if request.tools else []
         messages = self._build_messages(request)
         if request.format == "json" and request.json_schema:
-            format = request.json_schema.model_json_schema()
+            if isinstance(request.json_schema, TypeAdapter):
+                format = request.json_schema.json_schema()
+            else:
+                format = request.json_schema.model_json_schema()
         else:
             format = None
 

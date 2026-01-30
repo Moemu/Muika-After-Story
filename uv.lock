@@ -1193,6 +1193,7 @@ dependencies = [
     { name = "nonebot-adapter-onebot" },
     { name = "nonebot-plugin-alconna" },
     { name = "nonebot-plugin-orm" },
+    { name = "nonebot-plugin-session" },
     { name = "nonebot-plugin-userinfo" },
     { name = "nonebot2" },
     { name = "openai" },
@@ -1231,6 +1232,7 @@ requires-dist = [
     { name = "nonebot-adapter-onebot", specifier = ">=2.4.6" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.60.4" },
     { name = "nonebot-plugin-orm", specifier = ">=0.8.3" },
+    { name = "nonebot-plugin-session", specifier = ">=0.3.2" },
     { name = "nonebot-plugin-userinfo", specifier = ">=0.2.6" },
     { name = "nonebot2", specifier = ">=2.4.4" },
     { name = "ollama", marker = "extra == 'standard'", specifier = ">=0.4.7" },
@@ -1482,6 +1484,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9c/70/06e8fffd9b7f88513507e0455806bc772dfbf150eafee10474dad7f5110f/nonebot_plugin_orm-0.8.3.tar.gz", hash = "sha256:c51918f6d39761c5e78185f58745dec888b95a7795b77c345bf97f08406f878d", size = 26491, upload-time = "2026-01-01T11:40:52.285Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3d/ce/b14c6b5ced478403b7e7aaab24944e3071ca0bb30f62bb9c150a92800bb6/nonebot_plugin_orm-0.8.3-py3-none-any.whl", hash = "sha256:d64f01500a0eca1e25502347923fa54d0bff3cbe2531720adc1b0f485cd2d701", size = 31770, upload-time = "2026-01-01T11:40:50.854Z" },
+]
+
+[[package]]
+name = "nonebot-plugin-session"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nonebot2" },
+    { name = "strenum" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/1a/95a465074f566a1552c00a0045d9e67fea41401eaf6af3f7c88b644da0f1/nonebot_plugin_session-0.3.2.tar.gz", hash = "sha256:da0dabe9108151052a6e83d9923068d2ec43a93810ad37b264ed65aee2c69f93", size = 10378, upload-time = "2024-08-03T07:22:50.307Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/81/07c38c920dc6bab000a12d79af78482dcf0695f8a6e0b7b85fd993ef7483/nonebot_plugin_session-0.3.2-py3-none-any.whl", hash = "sha256:785e74ff656e46d84c4dbbac125f9a9adebcc4b9ff7db700527e6e47d47aabd6", size = 14815, upload-time = "2024-08-03T07:22:49.046Z" },
 ]
 
 [[package]]
