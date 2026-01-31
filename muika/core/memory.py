@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
+import aiofiles
 from nonebot import logger
 from pydantic import BaseModel, Field
 
@@ -43,22 +44,27 @@ class MemoryManager:
         self.recent_turns: deque[ConversationTurn] = deque(maxlen=max_turns)
         self.memory: dict[str, MemoryItem] = {}
 
-    def _save(self):
+    async def _save(self):
         """持久化记忆到磁盘"""
+        # Ensure directory exists
+        if not self.storage_path.parent.exists():
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+
         data = {
             "memory": {k: v.model_dump(mode="json") for k, v in self.memory.items()},
             # recent_turns 通常不需要持久化，或者只持久化最后几条用于热启动
         }
-        with open(self.storage_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        async with aiofiles.open(self.storage_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(data, indent=2, ensure_ascii=False))
 
-    def _load(self):
+    async def load(self):
         """从磁盘加载记忆"""
         if not self.storage_path.exists():
             return
         try:
-            with open(self.storage_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            async with aiofiles.open(self.storage_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                data = json.loads(content)
                 for k, v in data.get("memory", {}).items():
                     self.memory[k] = MemoryItem(**v)
         except Exception as e:
@@ -87,7 +93,7 @@ class MemoryManager:
                 )
             )
 
-    def record_memory(self, intent: MemoryIntent):
+    async def record_memory(self, intent: MemoryIntent):
         key = self._build_key(intent.category, intent.key)
         if intent.type == "remember" and intent.value:
             # 只有 confidence 足够高才覆盖
@@ -107,7 +113,7 @@ class MemoryManager:
             if key in self.memory:
                 del self.memory[key]
 
-        self._save()
+        await self._save()
 
     def get_prompt_memory(self) -> str:
         """

@@ -45,9 +45,9 @@ class Muika:
 
         self.state = MuikaState()
         self.memory = MemoryManager()
-        self.executor = Executor()
         self.intent_adapter: TypeAdapter[CognitiveResult] = TypeAdapter(CognitiveResult)
         self.event_queue: asyncio.Queue[Event] = asyncio.Queue()
+        self.executor = Executor(self.event_queue)
 
         # 初始化模型类
         self.model_config = get_model_config()
@@ -280,7 +280,7 @@ class Muika:
                 self.state.active_intent = intent.action
 
             if intent and intent.memory and intent.memory.type != "noop":
-                self.memory.record_memory(intent.memory)
+                await self.memory.record_memory(intent.memory)
 
             if self.state.active_intent and self.should_execute(self.state.active_intent):
                 await self.executor.execute(self.state.active_intent, self.state)
@@ -296,4 +296,5 @@ class Muika:
 
         self.is_alive = True
         logger.info("Wake up...")
+        await self.memory.load()
         await self.loop()

@@ -69,12 +69,12 @@ class ActionPlan:
 
 
 class Executor:
-    def __init__(self) -> None:
+    def __init__(self, event_queue: asyncio.Queue) -> None:
         self.master_id = mas_config.master_id
 
         self._cooldown: dict[str, datetime] = {}
         """记录各意图的冷却时间戳"""
-        self.scheduler = Scheduler(event_queue=asyncio.Queue())
+        self.scheduler = Scheduler(event_queue=event_queue)
 
     async def send_message(self, message: str):
         """
