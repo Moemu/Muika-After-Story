@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from .action import Intent
+from .intents import Intent
 
 
 @dataclass

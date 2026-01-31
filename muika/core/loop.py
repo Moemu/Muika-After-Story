@@ -19,13 +19,9 @@ from muika.llm.utils.json_utils import extract_json_from_text
 from muika.llm.utils.thought_processor import general_processor
 from muika.utils.utils import clamp
 
-from .action import (
-    DoNothingIntent,
-    Executor,
-    Intent,
-    SendMessageIntent,
-)
 from .events import Event, TimeTickEvent
+from .executor import Executor
+from .intents import DoNothingIntent, Intent, SendMessageIntent
 from .memory import MemoryIntent, MemoryManager
 from .state import MuikaState
 

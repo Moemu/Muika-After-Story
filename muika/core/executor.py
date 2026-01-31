@@ -2,15 +2,20 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from random import random
-from typing import Annotated, Literal, Optional, TypeAlias, Union
+from typing import Literal, Optional, TypeAlias
 
 from nonebot import get_bot
 from nonebot_plugin_alconna.uniseg import Target, UniMessage
-from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.utils.utils import clamp
 
+from .intents import (
+    CheckRSSUpdateIntent,
+    Intent,
+    PlanFutureEventIntent,
+    SendMessageIntent,
+)
 from .scheduler import Scheduler
 from .state import MuikaState
 
@@ -19,46 +24,6 @@ ACTION_DEFAULT_TTL = {
     "delay_message": 3600,
     "check_rss_update": 10,
 }
-
-
-class SendMessageIntent(BaseModel):
-    name: Literal["send_message"] = "send_message"
-    confidence: float
-    reason: Optional[str] = None
-    content: str
-
-
-class DoNothingIntent(BaseModel):
-    name: Literal["do_nothing"] = "do_nothing"
-    confidence: float
-    reason: Optional[str] = None
-
-
-class CheckRSSUpdateIntent(BaseModel):
-    name: Literal["check_rss_update"] = "check_rss_update"
-    confidence: float
-    reason: Optional[str] = None
-    rss_source: str
-
-
-class PlanFutureEventIntent(BaseModel):
-    name: Literal["plan_future_event"] = "plan_future_event"
-    confidence: float
-    reason: Optional[str] = None
-    when: str = Field(
-        ..., description="Natural language time description, e.g., 'in 10 minutes', 'tomorrow at 8am', 'tonight'."
-    )
-    what: str = Field(
-        ...,
-        description=(
-            "The content or topic to bring up later. " "E.g., 'Remind him to drink water', 'Ask how the meeting went'."
-        ),
-    )
-
-
-Intent: TypeAlias = Annotated[
-    Union[SendMessageIntent, DoNothingIntent, CheckRSSUpdateIntent, PlanFutureEventIntent], Field(discriminator="name")
-]
 
 
 @dataclass
@@ -166,7 +131,10 @@ class Executor:
             return CheckRSSUpdatePlan(payload=CheckRSSUpdatePayload(source=intent.rss_source), ttl=ttl)
 
         elif isinstance(intent, PlanFutureEventIntent):
-            return PlanFutureEventPlan(payload=PlanFutureEventPayload(when=intent.when, what=intent.what), ttl=ttl)
+            return PlanFutureEventPlan(
+                payload=PlanFutureEventPayload(when=intent.when, what=intent.what),
+                ttl=ttl,
+            )
 
         return None
 

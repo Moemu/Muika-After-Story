@@ -5,8 +5,8 @@ from typing import Optional
 import dateparser
 from nonebot import logger
 
-from .action import PlanFutureEventIntent
 from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
+from .intents import PlanFutureEventIntent
 
 
 class Scheduler:

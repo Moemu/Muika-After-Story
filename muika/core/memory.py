@@ -9,8 +9,8 @@ import aiofiles
 from nonebot import logger
 from pydantic import BaseModel, Field
 
-from .action import Intent, SendMessageIntent
 from .events import Event
+from .intents import Intent, SendMessageIntent
 
 
 @dataclass
