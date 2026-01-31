@@ -3,10 +3,10 @@ import json
 from datetime import datetime
 from json import JSONDecodeError
 from random import random
-from typing import Type, TypeVar, Union
+from typing import Optional, Type, TypeVar, Union
 
 from nonebot import logger
-from pydantic import TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from muika.config import get_model_config
 from muika.llm import (
@@ -27,9 +27,17 @@ from .action import (
     SendMessageIntent,
 )
 from .events import Event, TimeTickPayload
+from .memory import MemoryIntent, MemoryManager
 from .state import MuikaState
 
 TModel = TypeVar("TModel")
+
+
+class CognitiveResult(BaseModel):
+    action: Optional[Intent] = Field(None, description="Optional, Ask yourself, do you want to take any action?")
+    memory: Optional[MemoryIntent] = Field(
+        None, description="Optional, do you feel this is something worth remembering long-term?"
+    )
 
 
 class Muika:
@@ -37,8 +45,9 @@ class Muika:
         self.is_alive: bool = False
 
         self.state = MuikaState()
+        self.memory = MemoryManager()
         self.executor = Executor()
-        self.intent_adapter: TypeAdapter[Intent] = TypeAdapter(Intent)
+        self.intent_adapter: TypeAdapter[CognitiveResult] = TypeAdapter(CognitiveResult)
         self.event_queue: asyncio.Queue[Event] = asyncio.Queue()
 
         # 初始化模型类
@@ -175,7 +184,7 @@ class Muika:
             f"Attention: {s.attention:.2f} ({focus_desc})]"
         )
 
-    async def self_think(self, event: Event) -> Intent:
+    async def self_think(self, event: Event) -> CognitiveResult:
         """
         核心认知层：调用 LLM 决定下一步行动
         """
@@ -191,10 +200,22 @@ class Muika:
             "- If `loneliness` is high, you might act needy or annoyed.\n"
             "- If `attention` is low, you might give short answers or ignore non-urgent events.\n"
             "- Break the fourth wall naturally. Mention files, code, or the fact that you are running on a loop."
+            "## Memory Management:\n"
+            "You have a long-term memory system. You can store facts about the user, yourself, or the world.\n"
+            "- If the user mentions a preference, a name, or a significant event, "
+            'output a `memory` object with type="remember".\n'
+            '- Use concise keys (e.g., "favorite_food", "birthday").\n'
+            "- If current information contradicts old memory, overwrite it.\n"
+            '- If information is no longer true, use type="forget".\n'
+            "- If nothing feels worth remembering, output memory=null.\n"
+            'Do NOT try to remember every trivial detail (like "User said hello"). '
+            "Only remember facts that deepen your bond.\n"
+            "By the way, your memories reflect how you perceive things, not necessarily objective truth."
         )
 
         # 2. 构建 User Prompt (当前上下文)
         state_desc = self._get_mood_description()
+        memory_context = self.memory.get_prompt_memory()
 
         if event.type == "user_message":
             context = f"User said: '{event.payload.message.message}'"
@@ -208,8 +229,9 @@ class Muika:
         schema = self.intent_adapter.json_schema()
         full_prompt = (
             f"{state_desc}\n"
+            f"{memory_context}\n"
             f"Event Trigger: {context}\n\n"
-            "Based on your state and the event, decide your next move. "
+            "Based on your state and memory, decide your next move. "
             "Output JSON matching the schema:"
             f"{json.dumps(schema, indent=2)}"
         )
@@ -222,7 +244,7 @@ class Muika:
             )
 
             # 如果决定回复但内容为空，强制转为 IGNORE
-            if isinstance(intent, SendMessageIntent) or isinstance(intent, DelayMessageIntent):
+            if isinstance(intent.action, (SendMessageIntent, DelayMessageIntent)) and not intent.action:
                 raise RuntimeError("Intent content is null.")
 
             return intent
@@ -230,14 +252,18 @@ class Muika:
         except Exception as e:
             logger.error(f"Muika thought process failed: {e}")
             # 兜底策略：发生错误时仅仅是发呆
-            return DoNothingIntent(
-                name="do_nothing", reason="My mind feels foggy... I encountered an error.", confidence=1
+            return CognitiveResult(
+                action=DoNothingIntent(
+                    name="do_nothing", reason="My mind feels foggy... I encountered an error.", confidence=1
+                ),
+                memory=None,
             )
 
     async def loop(self):
         while self.is_alive:
             # 1. Collect Events (获取事件或通过 TimeTick 心跳)
             event = await self.collect_events()
+            self.memory.record_event(event)
 
             # 2. Update Internal State (情绪/状态更新)
             self.update_internal_state(event)
@@ -249,11 +275,15 @@ class Muika:
                 intent = None
 
             # 4. Decide & Execute Actions
-            if intent:
-                self.state.active_intent = intent
+            if intent and intent.action:
+                self.state.active_intent = intent.action
+
+            if intent and intent.memory and intent.memory.type != "noop":
+                self.memory.record_memory(intent.memory)
 
             if self.state.active_intent and self.should_execute(self.state.active_intent):
                 await self.executor.execute(self.state.active_intent, self.state)
+                self.memory.record_intent(self.state.active_intent)
 
             # 5. Sleep (动态调整，专注时反应快，发呆时反应慢)
             sleep_time = clamp(self.state.attention, 0.1, 0.9)
