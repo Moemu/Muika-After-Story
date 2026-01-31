@@ -25,8 +25,8 @@ from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 from nonebot_plugin_session import SessionIdType, extract_session
 
 from .config import load_embedding_model_config, mas_config
-from .core import Event as MuikaEvent
 from .core import UserMessagePayload, muika
+from .core.events import UserMessageEvent
 from .llm import ModelCompletions, ModelStreamCompletions
 from .models import Message, Resource
 from .plugin import load_plugins
@@ -264,4 +264,4 @@ async def handle_supported_adapters(
 
     message = Message(message=message_text, userid=userid, groupid=group_id, resources=message_resource)
 
-    await muika.create_event(MuikaEvent("user_message", UserMessagePayload(message)))
+    await muika.create_event(UserMessageEvent(UserMessagePayload(message)))

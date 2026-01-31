@@ -6,7 +6,7 @@ import dateparser
 from nonebot import logger
 
 from .action import PlanFutureEventIntent
-from .events import Event, ScheduledTriggerPayload
+from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
 
 
 class Scheduler:
@@ -44,7 +44,5 @@ class Scheduler:
         await asyncio.sleep(delay)
 
         # 时间到了！生产一个事件回传给 Muika
-        event = Event(
-            type="scheduled_trigger", payload=payload, timestamp=datetime.now()  # e.g. "Remind him to drink water"
-        )
+        event = ScheduledTriggerEvent(payload=payload)
         await self.event_queue.put(event)

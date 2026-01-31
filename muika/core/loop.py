@@ -25,7 +25,7 @@ from .action import (
     Intent,
     SendMessageIntent,
 )
-from .events import Event, TimeTickPayload
+from .events import Event, TimeTickEvent
 from .memory import MemoryIntent, MemoryManager
 from .state import MuikaState
 
@@ -102,7 +102,7 @@ class Muika:
             # 等待事件，超时则产生 TimeTick（心跳）
             return await asyncio.wait_for(self.event_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
-            return Event(type="time_tick", payload=TimeTickPayload())
+            return TimeTickEvent()
 
     async def create_event(self, event: Event):
         """

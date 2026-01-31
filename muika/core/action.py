@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from random import random
-from typing import Annotated, Any, Literal, Optional, TypeAlias, Union
+from typing import Annotated, Literal, Optional, TypeAlias, Union
 
 from nonebot import get_bot
 from nonebot_plugin_alconna.uniseg import Target, UniMessage
@@ -62,10 +62,56 @@ Intent: TypeAlias = Annotated[
 
 
 @dataclass
-class ActionPlan:
-    name: str
-    payload: dict[str, Any]
+class SendMessagePayload:
+    content: str
+
+
+@dataclass
+class DelayMessagePayload:
+    content: str
+    delay: int
+
+
+@dataclass
+class CheckRSSUpdatePayload:
+    source: str
+
+
+@dataclass
+class PlanFutureEventPayload:
+    when: str
+    what: str
+
+
+@dataclass(frozen=True)
+class SendMessagePlan:
+    payload: SendMessagePayload
     ttl: int
+    name: Literal["send_message"] = "send_message"
+
+
+@dataclass(frozen=True)
+class DelayMessagePlan:
+    payload: DelayMessagePayload
+    ttl: int
+    name: Literal["delay_message"] = "delay_message"
+
+
+@dataclass(frozen=True)
+class CheckRSSUpdatePlan:
+    payload: CheckRSSUpdatePayload
+    ttl: int
+    name: Literal["check_rss_update"] = "check_rss_update"
+
+
+@dataclass(frozen=True)
+class PlanFutureEventPlan:
+    payload: PlanFutureEventPayload
+    ttl: int
+    name: Literal["plan_future_event"] = "plan_future_event"
+
+
+ActionPlan: TypeAlias = SendMessagePlan | DelayMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan
 
 
 class Executor:
@@ -114,25 +160,13 @@ class Executor:
         ttl = ACTION_DEFAULT_TTL.get(intent.name, 1)
 
         if isinstance(intent, SendMessageIntent):
-            return ActionPlan(
-                name="send_message",
-                payload={"content": intent.content},
-                ttl=ttl,
-            )
+            return SendMessagePlan(payload=SendMessagePayload(content=intent.content), ttl=ttl)
 
         elif isinstance(intent, CheckRSSUpdateIntent):
-            return ActionPlan(
-                name="check_rss_update",
-                payload={"source": intent.rss_source},
-                ttl=ttl,
-            )
+            return CheckRSSUpdatePlan(payload=CheckRSSUpdatePayload(source=intent.rss_source), ttl=ttl)
 
         elif isinstance(intent, PlanFutureEventIntent):
-            return ActionPlan(
-                name="plan_future_event",
-                payload={"when": intent.when, "what": intent.what},
-                ttl=ttl,
-            )
+            return PlanFutureEventPlan(payload=PlanFutureEventPayload(when=intent.when, what=intent.what), ttl=ttl)
 
         return None
 
@@ -153,7 +187,7 @@ class Executor:
         self._cooldown[plan.name] = datetime.now()
 
         if plan.name == "send_message":
-            await self.send_message(plan.payload["content"])
+            await self.send_message(plan.payload.content)
 
             # 行为反作用
             state.loneliness *= 0.7
@@ -162,8 +196,8 @@ class Executor:
         elif plan.name == "delay_message":
             asyncio.create_task(
                 self._delayed_send(
-                    plan.payload["content"],
-                    plan.payload["delay"],
+                    plan.payload.content,
+                    plan.payload.delay,
                 )
             )
 
@@ -172,8 +206,8 @@ class Executor:
                 PlanFutureEventIntent(
                     name="plan_future_event",
                     confidence=plan.ttl,
-                    when=plan.payload["when"],
-                    what=plan.payload["what"],
+                    when=plan.payload.when,
+                    what=plan.payload.what,
                 )
             )
 
