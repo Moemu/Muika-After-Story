@@ -28,13 +28,14 @@ class InternalReflection:
     """内在独白"""
 
 
+@dataclass
+class ScheduledTriggerPayload:
+    when: str
+    what: str
+
+
 @dataclass(frozen=True)
 class Event:
-    type: Literal[
-        "user_message",
-        "rss_update",
-        "time_tick",
-        "internal_reflection",
-    ]
+    type: Literal["user_message", "rss_update", "time_tick", "internal_reflection", "scheduled_trigger"]
     payload: Any
     timestamp: datetime = field(default_factory=datetime.now)

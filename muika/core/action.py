@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from muika.config import mas_config
 from muika.utils.utils import clamp
 
+from .scheduler import Scheduler
 from .state import MuikaState
 
 ACTION_DEFAULT_TTL = {
@@ -33,16 +34,6 @@ class DoNothingIntent(BaseModel):
     reason: Optional[str] = None
 
 
-class DelayMessageIntent(BaseModel):
-    name: Literal["delay_message"] = "delay_message"
-    confidence: float
-    reason: Optional[str] = None
-    content: str
-    target_time: datetime = Field(
-        description="The planned time to send the message. Use a valid datetime format, e.g., '2024-12-31 23:59:59'."
-    )
-
-
 class CheckRSSUpdateIntent(BaseModel):
     name: Literal["check_rss_update"] = "check_rss_update"
     confidence: float
@@ -50,8 +41,23 @@ class CheckRSSUpdateIntent(BaseModel):
     rss_source: str
 
 
+class PlanFutureEventIntent(BaseModel):
+    name: Literal["plan_future_event"] = "plan_future_event"
+    confidence: float
+    reason: Optional[str] = None
+    when: str = Field(
+        ..., description="Natural language time description, e.g., 'in 10 minutes', 'tomorrow at 8am', 'tonight'."
+    )
+    what: str = Field(
+        ...,
+        description=(
+            "The content or topic to bring up later. " "E.g., 'Remind him to drink water', 'Ask how the meeting went'."
+        ),
+    )
+
+
 Intent: TypeAlias = Annotated[
-    Union[SendMessageIntent, DoNothingIntent, DelayMessageIntent, CheckRSSUpdateIntent], Field(discriminator="name")
+    Union[SendMessageIntent, DoNothingIntent, CheckRSSUpdateIntent, PlanFutureEventIntent], Field(discriminator="name")
 ]
 
 
@@ -68,6 +74,7 @@ class Executor:
 
         self._cooldown: dict[str, datetime] = {}
         """记录各意图的冷却时间戳"""
+        self.scheduler = Scheduler(event_queue=asyncio.Queue())
 
     async def send_message(self, message: str):
         """
@@ -113,22 +120,17 @@ class Executor:
                 ttl=ttl,
             )
 
-        if isinstance(intent, DelayMessageIntent):
-            delay = (intent.target_time - datetime.now()).seconds
-
-            return ActionPlan(
-                name="delay_message",
-                payload={
-                    "content": intent.content,
-                    "delay": clamp(delay, 10, 86400),  # 86400 = 24 hours
-                },
-                ttl=ttl,
-            )
-
-        if isinstance(intent, CheckRSSUpdateIntent):
+        elif isinstance(intent, CheckRSSUpdateIntent):
             return ActionPlan(
                 name="check_rss_update",
                 payload={"source": intent.rss_source},
+                ttl=ttl,
+            )
+
+        elif isinstance(intent, PlanFutureEventIntent):
+            return ActionPlan(
+                name="plan_future_event",
+                payload={"when": intent.when, "what": intent.what},
                 ttl=ttl,
             )
 
@@ -162,6 +164,16 @@ class Executor:
                 self._delayed_send(
                     plan.payload["content"],
                     plan.payload["delay"],
+                )
+            )
+
+        elif plan.name == "plan_future_event":
+            await self.scheduler.schedule(
+                PlanFutureEventIntent(
+                    name="plan_future_event",
+                    confidence=plan.ttl,
+                    when=plan.payload["when"],
+                    what=plan.payload["what"],
                 )
             )
 

@@ -20,7 +20,6 @@ from muika.llm.utils.thought_processor import general_processor
 from muika.utils.utils import clamp
 
 from .action import (
-    DelayMessageIntent,
     DoNothingIntent,
     Executor,
     Intent,
@@ -223,6 +222,8 @@ class Muika:
             context = "A quiet moment passed. No input from user."
         elif event.type == "rss_update":
             context = f"rss update: {event.payload.title}: {event.payload.content}"
+        elif event.type == "scheduled_trigger":
+            context = f"Reminder/Task triggered: '{event.payload.what}'"
         else:
             context = f"Unknown event: {event.type}"
 
@@ -244,7 +245,7 @@ class Muika:
             )
 
             # 如果决定回复但内容为空，强制转为 IGNORE
-            if isinstance(intent.action, (SendMessageIntent, DelayMessageIntent)) and not intent.action:
+            if isinstance(intent.action, SendMessageIntent) and not intent.action:
                 raise RuntimeError("Intent content is null.")
 
             return intent
