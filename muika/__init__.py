@@ -1,12 +1,11 @@
 from nonebot import logger, require
 from nonebot.plugin import PluginMetadata, inherit_supported_adapters
 
-from .config import MASConfig
-
 require("nonebot_plugin_alconna")
 require("nonebot_plugin_localstore")
-require("nonebot_plugin_apscheduler")
 require("nonebot_plugin_orm")
+
+from .config import MASConfig  # noqa: E402
 
 __plugin_meta__ = PluginMetadata(
     name="Muika-After-Story",

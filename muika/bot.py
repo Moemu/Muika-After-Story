@@ -24,7 +24,7 @@ from nonebot_plugin_alconna import (
 from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 from nonebot_plugin_session import SessionIdType, extract_session
 
-from .config import load_embedding_model_config, mas_config
+from .config import load_embedding_model_config
 from .core import UserMessagePayload, muika
 from .core.events import UserMessageEvent
 from .llm import ModelCompletions, ModelStreamCompletions
@@ -51,11 +51,11 @@ def startup_plugins():
         logger.info("加载外部插件...")
         load_plugins("./plugins")
 
-    if mas_config.enable_builtin_plugins:
-        logger.info("加载 MAS 内嵌插件...")
-        builtin_plugins_path = Path(__file__).parent / "builtin_plugins"
-        muicebot_plugins_path = Path(__file__).resolve().parent.parent
-        load_plugins(builtin_plugins_path, base_path=muicebot_plugins_path)
+    # if mas_config.enable_builtin_plugins:
+    #     logger.info("加载 MAS 内嵌插件...")
+    #     builtin_plugins_path = Path(__file__).parent / "builtin_plugins"
+    #     muicebot_plugins_path = Path(__file__).resolve().parent.parent
+    #     load_plugins(builtin_plugins_path, base_path=muicebot_plugins_path)
 
 
 # 启动时唤醒 Muika

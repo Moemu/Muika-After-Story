@@ -13,7 +13,7 @@ def extract_json_from_text(text: str) -> Union[dict, list, Any]:
 
     # 1. 尝试直接解析
     try:
-        return json.loads(cleaned_result)
+        return json.loads(cleaned_result, strict=False)
     except json.JSONDecodeError:
         pass
 
@@ -50,7 +50,7 @@ def extract_json_from_text(text: str) -> Union[dict, list, Any]:
         raise ValueError("无法在文本中识别 JSON 结构")
 
     try:
-        return json.loads(json_str)
+        return json.loads(json_str, strict=False)
     except json.JSONDecodeError as e:
         # 如果提取出来的部分还是无法解析
         raise ValueError(f"提取的内容不是有效的 JSON: {e}") from e
