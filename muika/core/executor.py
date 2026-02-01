@@ -19,12 +19,6 @@ from .intents import (
 from .scheduler import Scheduler
 from .state import MuikaState
 
-ACTION_DEFAULT_TTL = {
-    "send_message": 1,
-    "delay_message": 3600,
-    "check_rss_update": 10,
-}
-
 
 @dataclass
 class SendMessagePayload:
@@ -51,28 +45,24 @@ class PlanFutureEventPayload:
 @dataclass(frozen=True)
 class SendMessagePlan:
     payload: SendMessagePayload
-    ttl: int
     name: Literal["send_message"] = "send_message"
 
 
 @dataclass(frozen=True)
 class DelayMessagePlan:
     payload: DelayMessagePayload
-    ttl: int
     name: Literal["delay_message"] = "delay_message"
 
 
 @dataclass(frozen=True)
 class CheckRSSUpdatePlan:
     payload: CheckRSSUpdatePayload
-    ttl: int
     name: Literal["check_rss_update"] = "check_rss_update"
 
 
 @dataclass(frozen=True)
 class PlanFutureEventPlan:
     payload: PlanFutureEventPayload
-    ttl: int
     name: Literal["plan_future_event"] = "plan_future_event"
 
 
@@ -91,7 +81,7 @@ class Executor:
         """
         发送消息给用户
         """
-        target = Target(self.master_id)
+        target = Target(self.master_id, private=True)
         await UniMessage(message).send(target=target, bot=get_bot())
 
     async def _delayed_send(self, content: str, delay: int):
@@ -122,18 +112,15 @@ class Executor:
         """
         生成执行计划
         """
-        ttl = ACTION_DEFAULT_TTL.get(intent.name, 1)
-
         if isinstance(intent, SendMessageIntent):
-            return SendMessagePlan(payload=SendMessagePayload(content=intent.content), ttl=ttl)
+            return SendMessagePlan(payload=SendMessagePayload(content=intent.content))
 
         elif isinstance(intent, CheckRSSUpdateIntent):
-            return CheckRSSUpdatePlan(payload=CheckRSSUpdatePayload(source=intent.rss_source), ttl=ttl)
+            return CheckRSSUpdatePlan(payload=CheckRSSUpdatePayload(source=intent.rss_source))
 
         elif isinstance(intent, PlanFutureEventIntent):
             return PlanFutureEventPlan(
                 payload=PlanFutureEventPayload(when=intent.when, what=intent.what),
-                ttl=ttl,
             )
 
         return None
@@ -173,7 +160,7 @@ class Executor:
             await self.scheduler.schedule(
                 PlanFutureEventIntent(
                     name="plan_future_event",
-                    confidence=plan.ttl,
+                    confidence=1.0,
                     when=plan.payload.when,
                     what=plan.payload.what,
                 )

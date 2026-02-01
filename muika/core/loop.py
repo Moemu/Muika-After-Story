@@ -291,6 +291,7 @@ class Muika:
                 logger.info(f"Executing intent: {self.state.active_intent}")
                 await self.executor.execute(self.state.active_intent, self.state)
                 self.memory.record_intent(self.state.active_intent)
+                self.state.active_intent = None
 
             # 5. Sleep (动态调整，专注时反应快，发呆时反应慢)
             sleep_time = clamp(self.state.attention, 0.1, 0.9)
