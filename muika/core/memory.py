@@ -2,10 +2,10 @@ import json
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Literal, Optional
 
 import aiofiles
+import nonebot_plugin_localstore as store
 from nonebot import logger
 from pydantic import BaseModel, Field
 
@@ -38,8 +38,8 @@ class MemoryItem(BaseModel):
 
 
 class MemoryManager:
-    def __init__(self, max_turns: int = 16, storage_path: str | Path = "./data/muika_memory.json"):
-        self.storage_path = Path(storage_path)
+    def __init__(self, max_turns: int = 16):
+        self.storage_path = store.get_plugin_data_dir() / "memory.json"
 
         self.recent_turns: deque[ConversationTurn] = deque(maxlen=max_turns)
         self.memory: dict[str, MemoryItem] = {}
