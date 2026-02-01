@@ -29,7 +29,9 @@ TModel = TypeVar("TModel")
 
 
 class CognitiveResult(BaseModel):
-    action: Optional[Intent] = Field(None, description="Optional, Ask yourself, do you want to take any action?")
+    action: Intent = Field(
+        ..., description="Required, Ask yourself, do you want to take any action? If not, return DoNothingIntent."
+    )
     memory: Optional[MemoryIntent] = Field(
         None, description="Optional, do you feel this is something worth remembering long-term?"
     )
@@ -73,7 +75,10 @@ class Muika:
         self, prompt: str, system: str, response_model: Union[Type[TModel], TypeAdapter[TModel]]
     ) -> TModel:
         # 如果是 BaseModel 类型，转换为 TypeAdapter 统一处理
-        adapter: TypeAdapter[TModel] = TypeAdapter(response_model)
+        if isinstance(response_model, TypeAdapter):
+            adapter = response_model
+        else:
+            adapter = TypeAdapter(response_model)
 
         request = ModelRequest(prompt, system=system, format="json", json_schema=adapter)
         completions = await self.current_model.ask(request)
@@ -259,17 +264,21 @@ class Muika:
     async def loop(self):
         while self.is_alive:
             # 1. Collect Events (获取事件或通过 TimeTick 心跳)
+            logger.debug("Collecting events...")
             event = await self.collect_events()
+            logger.debug(f"Event collected: {event.type}")
             self.memory.record_event(event)
 
             # 2. Update Internal State (情绪/状态更新)
             self.update_internal_state(event)
+            logger.debug(f"Internal state updated: {self.state}")
 
             # 3. Self Think (决策 - 关键逻辑)
             if self.should_think(event):
                 intent = await self.self_think(event)
             else:
                 intent = None
+            logger.debug(f"Intent decided: {intent}")
 
             # 4. Decide & Execute Actions
             if intent and intent.action:
@@ -279,11 +288,13 @@ class Muika:
                 await self.memory.record_memory(intent.memory)
 
             if self.state.active_intent and self.should_execute(self.state.active_intent):
+                logger.info(f"Executing intent: {self.state.active_intent}")
                 await self.executor.execute(self.state.active_intent, self.state)
                 self.memory.record_intent(self.state.active_intent)
 
             # 5. Sleep (动态调整，专注时反应快，发呆时反应慢)
             sleep_time = clamp(self.state.attention, 0.1, 0.9)
+            logger.debug(f"Sleeping for {sleep_time:.2f} seconds...")
             await asyncio.sleep(sleep_time * 0.5)
 
     async def start(self):

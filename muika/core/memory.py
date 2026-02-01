@@ -33,7 +33,7 @@ class MemoryItem(BaseModel):
     category: Literal["user", "self", "world"]
     key: str
     value: str
-    confidence: float = Field(..., ge=0, le=1)
+    confidence: float = Field(..., ge=0, le=1, description="How important the memory is (0 to 1)")
     last_updated: datetime
 
 
