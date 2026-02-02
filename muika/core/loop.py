@@ -21,7 +21,7 @@ from muika.utils.utils import clamp
 
 from .events import Event, TimeTickEvent
 from .executor import Executor
-from .intents import DoNothingIntent, Intent, SendMessageIntent
+from .intents import DoNothingIntent, Intent, Persistence, SendMessageIntent
 from .memory import MemoryIntent, MemoryManager
 from .state import MuikaState
 
@@ -150,10 +150,6 @@ class Muika:
             return False
 
         elif intent.confidence < 0.3:
-            # return DoNothingIntent(
-            #     name="do_nothing", reason="I don't feel like doing anything right now.",
-            # confidence=1 - intent.confidence
-            # )
             return False
 
         return True
@@ -183,6 +179,24 @@ class Muika:
             f"[Mood: {s.mood}, Loneliness: {s.loneliness:.2f} ({lonely_desc}), "
             f"Attention: {s.attention:.2f} ({focus_desc})]"
         )
+
+    def _select_best_intent(self, intents: list[Intent]) -> Optional[Intent]:
+        # 1. 先选 STICKY
+        sticky = [i for i in intents if i.persistence == Persistence.STICKY]
+        if sticky:
+            return sticky[0]
+
+        # 2. 再选 SHORT_TERM
+        short = [i for i in intents if i.persistence == Persistence.SHORT_TERM]
+        if short:
+            return short[0]
+
+        # 3. 最后 EPHEMERAL
+        ephemeral = [i for i in intents if i.persistence == Persistence.EPHEMERAL]
+        if ephemeral:
+            return ephemeral[0]
+
+        return None
 
     async def self_think(self, event: Event) -> CognitiveResult:
         """
@@ -270,27 +284,31 @@ class Muika:
             self.memory.record_event(event)
 
             # 2. Update Internal State (情绪/状态更新)
+            self.state.tick_intents()
             self.update_internal_state(event)
             logger.debug(f"Internal state updated: {self.state}")
 
             # 3. Self Think (决策 - 关键逻辑)
             if self.should_think(event):
                 intent = await self.self_think(event)
+                if intent.action.name != "do_nothing" and intent.action.confidence > 0.3:
+                    self.state.pending_intents.append(intent.action)
+                if intent.memory and intent.memory.type != "noop":
+                    await self.memory.record_memory(intent.memory)
             else:
                 intent = None
-            logger.debug(f"Intent decided: {intent}")
+            logger.debug(f"Intent created: {intent}")
 
             # 4. Decide & Execute Actions
-            if intent and intent.action:
-                self.state.active_intent = intent.action
-
-            if intent and intent.memory and intent.memory.type != "noop":
-                await self.memory.record_memory(intent.memory)
+            target_intent = self._select_best_intent(self.state.pending_intents)
+            if target_intent:
+                self.state.active_intent = target_intent
 
             if self.state.active_intent and self.should_execute(self.state.active_intent):
                 logger.info(f"Executing intent: {self.state.active_intent}")
                 await self.executor.execute(self.state.active_intent, self.state)
                 self.memory.record_intent(self.state.active_intent)
+                self.state.pending_intents.remove(self.state.active_intent)
                 self.state.active_intent = None
 
             # 5. Sleep (动态调整，专注时反应快，发呆时反应慢)

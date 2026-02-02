@@ -26,12 +26,6 @@ class SendMessagePayload:
 
 
 @dataclass
-class DelayMessagePayload:
-    content: str
-    delay: int
-
-
-@dataclass
 class CheckRSSUpdatePayload:
     source: str
 
@@ -49,12 +43,6 @@ class SendMessagePlan:
 
 
 @dataclass(frozen=True)
-class DelayMessagePlan:
-    payload: DelayMessagePayload
-    name: Literal["delay_message"] = "delay_message"
-
-
-@dataclass(frozen=True)
 class CheckRSSUpdatePlan:
     payload: CheckRSSUpdatePayload
     name: Literal["check_rss_update"] = "check_rss_update"
@@ -66,7 +54,7 @@ class PlanFutureEventPlan:
     name: Literal["plan_future_event"] = "plan_future_event"
 
 
-ActionPlan: TypeAlias = SendMessagePlan | DelayMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan
+ActionPlan: TypeAlias = SendMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan
 
 
 class Executor:
@@ -147,14 +135,6 @@ class Executor:
             # 行为反作用
             state.loneliness *= 0.7
             state.attention = min(1.0, state.attention + 0.1)
-
-        elif plan.name == "delay_message":
-            asyncio.create_task(
-                self._delayed_send(
-                    plan.payload.content,
-                    plan.payload.delay,
-                )
-            )
 
         elif plan.name == "plan_future_event":
             await self.scheduler.schedule(
