@@ -57,6 +57,18 @@ class PlanFutureEventPlan:
 ActionPlan: TypeAlias = SendMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan
 
 
+@dataclass
+class ActionResult:
+    success: bool
+    output: str
+
+
+@dataclass
+class ExecutionOutcome:
+    executed: bool
+    result: Optional[ActionResult] = None
+
+
 class Executor:
     def __init__(self, event_queue: asyncio.Queue) -> None:
         self.master_id = mas_config.master_id
@@ -126,7 +138,7 @@ class Executor:
         probability = clamp(state.attention, 0.2, 0.9)
         return random() < probability
 
-    async def _perform(self, plan: ActionPlan, state: MuikaState) -> None:
+    async def _perform(self, plan: ActionPlan, state: MuikaState) -> str:
         self._cooldown[plan.name] = datetime.now()
 
         if plan.name == "send_message":
@@ -135,6 +147,8 @@ class Executor:
             # 行为反作用
             state.loneliness *= 0.7
             state.attention = min(1.0, state.attention + 0.1)
+
+            return "Message sent."
 
         elif plan.name == "plan_future_event":
             await self.scheduler.schedule(
@@ -145,26 +159,38 @@ class Executor:
                     what=plan.payload.what,
                 )
             )
+            return "Future event planned."
 
         elif plan.name == "check_rss_update":
             ...  # TODO
 
-    async def execute(self, intent: Intent, state: MuikaState) -> None:
+        raise NotImplementedError(f"Action for plan {plan.name} is not implemented.")
+
+    async def execute(self, intent: Intent, state: MuikaState) -> ExecutionOutcome:
         """
         执行事件
         """
         # 0. 基本校验
         if not self._validate_intent(intent, state):
-            return
+            return ExecutionOutcome(executed=False)
 
         # 1. 生成 ActionPlan
         plan = self._make_plan(intent, state)
         if not plan:
-            return
+            return ExecutionOutcome(executed=False)
 
         # 2. 决定是否提交（最后一道闸门）
         if not self._should_commit(plan, state):
-            return
+            return ExecutionOutcome(executed=False)
 
         # 3. 执行
-        await self._perform(plan, state)
+        try:
+            perform_result = await self._perform(plan, state)
+            action_result = ActionResult(success=True, output=str(perform_result))
+        except Exception as e:
+            action_result = ActionResult(success=False, output=str(e))
+
+        return ExecutionOutcome(
+            executed=True,
+            result=action_result,
+        )

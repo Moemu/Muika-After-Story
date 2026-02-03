@@ -393,7 +393,7 @@ class Dashscope(BaseLLM):
         tools = request.tools if request.tools else []
         messages = self._build_messages(request)
         if request.format == "json" and request.json_schema:
-            logger.warning("该模型加载器不支持传入 Json Schema 模型，请确保您已经在模型提示词中传入了相关 json 字段")
+            # logger.warning("该模型加载器不支持传入 Json Schema 模型，请确保您已经在模型提示词中传入了相关 json 字段")
             response_format = {"type": "json_object"}
         else:
             response_format = None

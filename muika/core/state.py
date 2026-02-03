@@ -21,6 +21,8 @@ class MuikaState:
     """最近一次交流时间"""
     active_intent: Optional[Intent] = None
     """目前的想法"""
+    last_executed_intent: Optional[Intent] = None
+    """上一次执行的想法"""
     pending_intents: list[Intent] = field(default_factory=list)
     """未执行的念头"""
 

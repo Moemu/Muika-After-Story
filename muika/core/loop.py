@@ -19,7 +19,7 @@ from muika.llm.utils.json_utils import extract_json_from_text
 from muika.llm.utils.thought_processor import general_processor
 from muika.utils.utils import clamp
 
-from .events import Event, TimeTickEvent
+from .events import ActionFeedbackEvent, ActionFeedbackPayload, Event, TimeTickEvent
 from .executor import Executor
 from .intents import DoNothingIntent, Intent, Persistence, SendMessageIntent
 from .memory import MemoryIntent, MemoryManager
@@ -133,14 +133,14 @@ class Muika:
             self.state.attention *= 0.6
 
     def should_think(self, event: Event) -> bool:
-        if event.type == "user_message":
-            return True
-
         if event.type == "time_tick":
             # 当 loneliness > 30% 时，loneliness 越高，越可能主动对话
             return self.state.loneliness > 0.3 and random() < self.state.loneliness
 
-        return False
+        if isinstance(event, ActionFeedbackEvent):
+            return event.payload.intent.name not in {"do_nothing", "send_message"}
+
+        return True
 
     def should_execute(self, intent: Intent) -> bool:
         """
@@ -231,6 +231,14 @@ class Muika:
         state_desc = self._get_mood_description()
         memory_context = self.memory.get_prompt_memory()
 
+        last_intent_desc = ""
+        if self.state.last_executed_intent:
+            last_intent_desc = (
+                f"Your last intention was '{self.state.last_executed_intent.name}'. "
+                f"You chose it because: "
+                f"{self.state.last_executed_intent.reason or 'no explicit reason'}.\n"
+            )
+
         if event.type == "user_message":
             context = f"User said: '{event.payload.message.message}'"
         elif event.type == "time_tick":
@@ -239,6 +247,16 @@ class Muika:
             context = f"rss update: {event.payload.title}: {event.payload.content}"
         elif event.type == "scheduled_trigger":
             context = f"Reminder/Task triggered: '{event.payload.what}'"
+        elif event.type == "action_feedback":
+            reason = f" (reason: {event.payload.intent.reason})" if event.payload.intent.reason else ""
+            context = f"Action Feedback received for intent '{event.payload.intent.name}'{reason}: "
+            if event.payload.result:
+                if event.payload.result.success:
+                    context += f"Success - {event.payload.result.output}"
+                else:
+                    context += f"Failure - {event.payload.result.output}"
+            else:
+                context += "No result available."
         else:
             context = f"Unknown event: {event.type}"
 
@@ -246,6 +264,7 @@ class Muika:
         full_prompt = (
             f"{state_desc}\n"
             f"{memory_context}\n"
+            f"{last_intent_desc}\n"
             f"Event Trigger: {context}\n\n"
             "Based on your state and memory, decide your next move. "
             "Output JSON matching the schema:"
@@ -295,21 +314,51 @@ class Muika:
                     self.state.pending_intents.append(intent.action)
                 if intent.memory and intent.memory.type != "noop":
                     await self.memory.record_memory(intent.memory)
+                logger.debug(f"Intent created: {intent}")
             else:
                 intent = None
-            logger.debug(f"Intent created: {intent}")
 
             # 4. Decide & Execute Actions
+            # Decide whether to execute an intent
             target_intent = self._select_best_intent(self.state.pending_intents)
             if target_intent:
                 self.state.active_intent = target_intent
+                logger.debug(f"Selected intent for execution: {target_intent}")
 
-            if self.state.active_intent and self.should_execute(self.state.active_intent):
-                logger.info(f"Executing intent: {self.state.active_intent}")
-                await self.executor.execute(self.state.active_intent, self.state)
-                self.memory.record_intent(self.state.active_intent)
-                self.state.pending_intents.remove(self.state.active_intent)
+            if not self.state.active_intent or not self.should_execute(self.state.active_intent):
+                logger.debug("No active intent to execute.")
+                continue
+
+            # Execute the intent
+            current_intent = self.state.active_intent
+            logger.info(f"Executing intent: {current_intent}")
+            execute_result = await self.executor.execute(current_intent, self.state)
+            if not execute_result.executed:
+                logger.debug("Intent execution skipped.")
+                continue
+
+            if execute_result.result and execute_result.result.success:
+                logger.success("Intent executed successfully.")
+                self.memory.record_intent(current_intent)
+                self.state.pending_intents.remove(current_intent)
                 self.state.active_intent = None
+            else:
+                failed_reason = execute_result.result.output if execute_result.result else "Unknown error"
+                logger.warning(f"Intent execution failed: {failed_reason}")
+                current_intent.failure_count += 1
+                if current_intent.failure_count >= 3:
+                    logger.warning("Intent failed too many times, discarding.")
+                    self.state.pending_intents.remove(current_intent)
+                    self.state.active_intent = None
+
+            action_feedback_event = ActionFeedbackEvent(
+                payload=ActionFeedbackPayload(
+                    intent=current_intent,
+                    result=execute_result.result,
+                )
+            )
+            self.state.last_executed_intent = current_intent
+            await self.create_event(action_feedback_event)
 
             # 5. Sleep (动态调整，专注时反应快，发呆时反应慢)
             sleep_time = clamp(self.state.attention, 0.1, 0.9)

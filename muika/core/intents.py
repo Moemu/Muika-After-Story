@@ -32,12 +32,13 @@ class IntentBase(BaseModel):
     reason: Optional[str] = None
     persistence: SkipJsonSchema[Persistence] = Field(default=Persistence.EPHEMERAL, exclude=True)
     missed_cycles: SkipJsonSchema[int] = Field(default=0, exclude=True)
+    failure_count: SkipJsonSchema[int] = Field(default=0, exclude=True)
 
 
 class SendMessageIntent(IntentBase):
     name: Literal["send_message"] = "send_message"
     content: str
-    persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
+    persistence: SkipJsonSchema[Persistence] = Field(default=Persistence.SHORT_TERM, exclude=True)
 
 
 class DoNothingIntent(IntentBase):
