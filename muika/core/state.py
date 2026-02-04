@@ -9,6 +9,14 @@ from .intents import Intent, Persistence
 if TYPE_CHECKING:
     from .events import Event
 
+# 定义情绪充满所需的时间（秒）
+TIME_TO_FULL_LONELINESS = 3600.0  # 1小时
+TIME_TO_FULL_BOREDOM = 7200.0  # 2小时
+
+# 计算每秒增长率
+LONELINESS_RATE = 1.0 / TIME_TO_FULL_LONELINESS
+BOREDOM_RATE = 1.0 / TIME_TO_FULL_BOREDOM
+
 
 @dataclass
 class MuikaState:
@@ -33,28 +41,22 @@ class MuikaState:
     pending_intents: list[Intent] = field(default_factory=list)
     """未执行的念头"""
 
-    def tick_state(self, event: "Event"):
+    def tick_state(self, event: "Event", dt: float):
         # 1. 随着时间流逝，注意力下降
         self.attention = max(0.0, self.attention - 0.05)
 
         if not self.active_intent:
-            self.loneliness = min(1.0, self.loneliness + 0.02)
-            self.boredom = min(1.0, self.boredom + 0.03)
+            self.loneliness = min(1.0, self.loneliness + (LONELINESS_RATE * dt))
+            self.boredom = min(1.0, self.boredom + (BOREDOM_RATE * dt))
+            self.curiosity *= 0.99  # 探索欲缓慢下降
 
         # 2. 基于规则的状态机
         now = datetime.now()
 
         if event.type == "user_message":
-            self.loneliness *= 0.6
-            self.attention = max(0.5, self.attention + 0.1)
+            self.loneliness = 0.0
+            self.attention = 1.0
             self.last_interaction = now
-
-        elif event.type == "time_tick":
-            # 随时间增加孤独感
-            silence_duration = (now - self.last_interaction).seconds
-            if silence_duration > 3600 or self.loneliness > 0.8:  # 1小时没理她
-                self.loneliness = min(1.0, self.loneliness + 0.1)
-                self.mood = "bored"
 
     def tick_intents(self):
         """

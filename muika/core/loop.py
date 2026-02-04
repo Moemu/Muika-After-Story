@@ -1,4 +1,5 @@
 import asyncio
+import time
 from random import random
 from typing import Optional
 
@@ -11,10 +12,15 @@ from .intents import DoNothingIntent, Intent, Persistence
 from .memory import MemoryManager
 from .state import MuikaState
 
+CURIOSITY_THRESHOLD = 0.6
+CURIOSITY_DRIVE_INCREASE = 0.01
+
 
 class Muika:
     def __init__(self) -> None:
         self.is_alive: bool = False
+        self.curiosity_drive: float = 0.0
+        """好奇驱动槽"""
 
         self.state = MuikaState()
         self.memory = MemoryManager()
@@ -47,8 +53,9 @@ class Muika:
                 logger.debug("Trigger: Boredom threshold breached.")
                 return True
             # 随机闪念 (Random Thought)
-            if random() < (self.state.curiosity * 0.05):
+            if self.curiosity_drive > CURIOSITY_THRESHOLD and random() < 0.3:
                 logger.info("Trigger: Random thought occurred.")
+                self.curiosity_drive = 0.0
                 return True
             return False
 
@@ -88,7 +95,12 @@ class Muika:
         return None
 
     async def loop(self):
+        last_tick_time = time.time()
+
         while self.is_alive:
+            current_time = time.time()
+            dt = current_time - last_tick_time
+            last_tick_time = current_time
             # 1. Collect Events (获取事件或通过 TimeTick 心跳)
             logger.debug("Collecting events...")
             event = await self.collect_events()
@@ -96,7 +108,7 @@ class Muika:
             self.memory.record_event(event)
 
             # 2. Update Internal State (情绪/状态更新)
-            self.state.tick_state(event)
+            self.state.tick_state(event, dt)
             logger.debug(f"Internal state updated: {self.state}")
 
             # 3. Self Think (决策 - 关键逻辑)
@@ -153,6 +165,7 @@ class Muika:
             await self.create_event(action_feedback_event)
 
             # 5. Sleep
+            self.curiosity_drive += self.state.curiosity * CURIOSITY_DRIVE_INCREASE * dt
             await asyncio.sleep(0.2)
 
     async def start(self):
