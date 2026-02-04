@@ -7,11 +7,8 @@ from typing import Optional, Type, TypeVar, Union
 from nonebot import logger
 from pydantic import BaseModel, Field, TypeAdapter
 
-from muika.config import get_model_config
 from muika.llm import (
-    MODEL_DEPENDENCY_MAP,
     ModelRequest,
-    get_missing_dependencies,
     load_model,
 )
 from muika.llm.utils.json_utils import extract_json_from_text
@@ -46,28 +43,7 @@ class Muika:
         self.executor = Executor(self.event_queue)
 
         # 初始化模型类
-        self.model_config = get_model_config()
-        try:
-            self.current_model = load_model(self.model_config)
-
-        except (ImportError, ModuleNotFoundError) as e:
-            import sys
-
-            logger.critical(f"加载模型加载器 '{self.model_config.provider}' 失败：{e}")
-            dependencies = MODEL_DEPENDENCY_MAP.get(self.model_config.provider, [])
-            missing = get_missing_dependencies(dependencies)
-            if missing:
-                install_command = "pip install " + " ".join(missing)
-                logger.critical(f"缺少依赖库：{', '.join(missing)}\n请运行以下命令安装缺失项：\n\n{install_command}")
-            sys.exit(1)
-
-    async def completions(self, prompt: str, system: str) -> str:
-        request = ModelRequest(prompt, system=system)
-        completions = await self.current_model.ask(request)
-        if not completions.succeed:
-            raise RuntimeError(f"模型调用失败: {completions.text}")
-        _, result = general_processor(completions.text)
-        return result
+        self.model = load_model()
 
     async def completions_format(
         self, prompt: str, system: str, response_model: Union[Type[TModel], TypeAdapter[TModel]]
@@ -79,10 +55,11 @@ class Muika:
             adapter = TypeAdapter(response_model)
 
         request = ModelRequest(prompt, system=system, format="json", json_schema=adapter)
-        completions = await self.current_model.ask(request)
+        completions = await self.model.ask(request)
         if not completions.succeed:
             raise RuntimeError(f"模型调用失败: {completions.text}")
 
+        # Remove think tags.
         _, result = general_processor(completions.text)
 
         try:
