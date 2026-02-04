@@ -214,6 +214,8 @@ class Muika:
                 context += " (The atmosphere is calm.)"
         elif event.type == "rss_update":
             context = f"rss update: {event.payload.title}: {event.payload.content}"
+        elif event.type == "web_content_fetch":
+            context = f"Web content fetched from {event.url}: {event.content[:3000]}..."
         elif event.type == "scheduled_trigger":
             context = f"Reminder/Task triggered: '{event.payload.what}'"
         elif event.type == "action_feedback":

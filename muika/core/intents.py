@@ -4,6 +4,8 @@ from typing import Annotated, Literal, Optional, TypeAlias, Union
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 
+from .actions.rss import AVAILABLE_RSS_SOURCES
+
 
 class Persistence(str, Enum):
     """
@@ -47,7 +49,19 @@ class DoNothingIntent(IntentBase):
 
 class CheckRSSUpdateIntent(IntentBase):
     name: Literal["check_rss_update"] = "check_rss_update"
-    rss_source: str
+    rss_source: str = Field(
+        ...,
+        description=f"RSS source identifier. Available sources: {AVAILABLE_RSS_SOURCES}",
+    )
+    persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
+
+
+class FetchWebContentIntent(IntentBase):
+    name: Literal["fetch_web_content"] = "fetch_web_content"
+    url: str = Field(
+        ...,
+        description="The URL of the web content to fetch.",
+    )
     persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
 
 
@@ -72,6 +86,7 @@ Intent: TypeAlias = Annotated[
         DoNothingIntent,
         CheckRSSUpdateIntent,
         PlanFutureEventIntent,
+        FetchWebContentIntent,
     ],
     Field(discriminator="name"),
 ]

@@ -4,14 +4,21 @@ from datetime import datetime
 from random import random
 from typing import Literal, Optional, TypeAlias
 
-from nonebot import get_bot
+from nonebot import get_bot, logger
 from nonebot_plugin_alconna.uniseg import Target, UniMessage
 
 from muika.config import mas_config
 from muika.utils.utils import clamp
 
+from .actions.rss import (
+    RSS_SOURCES,
+    extract_web_content,
+    fetch_web_content,
+    parse_rss_feed,
+)
 from .intents import (
     CheckRSSUpdateIntent,
+    FetchWebContentIntent,
     Intent,
     PlanFutureEventIntent,
     SendMessageIntent,
@@ -36,6 +43,11 @@ class PlanFutureEventPayload:
     what: str
 
 
+@dataclass
+class FetchWebContentPayload:
+    url: str
+
+
 @dataclass(frozen=True)
 class SendMessagePlan:
     payload: SendMessagePayload
@@ -54,7 +66,13 @@ class PlanFutureEventPlan:
     name: Literal["plan_future_event"] = "plan_future_event"
 
 
-ActionPlan: TypeAlias = SendMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan
+@dataclass(frozen=True)
+class FetchWebContentPlan:
+    payload: FetchWebContentPayload
+    name: Literal["fetch_web_content"] = "fetch_web_content"
+
+
+ActionPlan: TypeAlias = SendMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan | FetchWebContentPlan
 
 
 @dataclass
@@ -123,6 +141,11 @@ class Executor:
                 payload=PlanFutureEventPayload(when=intent.when, what=intent.what),
             )
 
+        elif isinstance(intent, FetchWebContentIntent):
+            return FetchWebContentPlan(
+                payload=FetchWebContentPayload(url=intent.url),
+            )
+
         return None
 
     def _should_commit(self, plan: ActionPlan, state: MuikaState) -> bool:
@@ -162,9 +185,32 @@ class Executor:
             return "Future event planned."
 
         elif plan.name == "check_rss_update":
+            rss_source = RSS_SOURCES.get(plan.payload.source)
+            if not rss_source:
+                logger.warning(f"Unknown RSS source: {plan.payload.source}")
+                raise ValueError(f"Unknown RSS source: {plan.payload.source}")
+
+            logger.debug(f"Checking RSS feed: {rss_source.url}")
+            feed_data = await fetch_web_content(rss_source.url)
+            feed_contents = parse_rss_feed(feed_data)
+            logger.debug(f"Fetched {len(feed_contents)} entries from RSS feed.")
+
+            feed_outlines = [f"# RSS Feed Update from {rss_source.name}: \n"]
+            for entry in feed_contents:
+                outline = (
+                    f"- title: {entry.title}; description: {entry.description};"
+                    f" link: {entry.link}; published: {entry.published}\n"
+                )
+                feed_outlines.append(outline)
+
+            # 行为反作用
             state.boredom *= 0.7
             state.attention = min(1.0, state.attention + 0.1)
-            # TODO: 实际检查 RSS 逻辑
+            return "\n".join(feed_outlines)
+
+        elif plan.name == "fetch_web_content":
+            web_content = await extract_web_content(plan.payload.url)
+            return web_content
 
         raise NotImplementedError(f"Action for plan {plan.name} is not implemented.")
 

@@ -66,6 +66,14 @@ class RSSUpdateEvent:
 
 
 @dataclass(frozen=True)
+class WebContentFetchEvent:
+    url: str
+    content: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["web_content_fetch"] = "web_content_fetch"
+
+
+@dataclass(frozen=True)
 class InternalReflectionEvent:
     payload: InternalReflection
     timestamp: datetime = field(default_factory=datetime.now)
@@ -93,4 +101,5 @@ Event: TypeAlias = (
     | InternalReflectionEvent
     | ScheduledTriggerEvent
     | ActionFeedbackEvent
+    | WebContentFetchEvent
 )
