@@ -10,11 +10,6 @@ class ModelConfig(BaseModel):
     default: bool = False
     """是否默认启用"""
 
-    template: Optional[str] = "Muika"
-    """使用的人设模板名称"""
-    template_mode: Literal["system", "user"] = "system"
-    """模板嵌入模式: `system` 为嵌入到系统提示; `user` 为嵌入到用户提示中"""
-
     max_tokens: int = 4096
     """最大回复 Tokens """
     temperature: float = 0.75
@@ -33,8 +28,6 @@ class ModelConfig(BaseModel):
     """是否使用流式输出"""
     online_search: bool = False
     """是否启用联网搜索（原生实现）"""
-    function_call: bool = False
-    """是否启用工具调用"""
     content_security: bool = False
     """是否启用内容安全"""
 

@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Callable, List, Literal, Optional
+from typing import Callable, List, Optional
 
 import yaml as yaml_
 from nonebot import get_driver, get_plugin_config, logger
@@ -27,14 +27,8 @@ class MASConfig(BaseModel):
     master_id: str = get_driver().config.superusers.pop()
     """对话目标ID"""
 
-    enable_builtin_plugins: bool = True
-    """启用内嵌插件"""
     input_timeout: int = 0
     """输入等待时间"""
-    default_template: Optional[str] = "Muika"
-    """默认使用人设模板名称"""
-    thought_process_mode: Literal[0, 1, 2] = 2
-    """针对 Deepseek-R1 等思考模型的思考过程提取模式"""
     enable_embedding_cache: bool = True
     """启用嵌入缓存"""
 
@@ -117,8 +111,6 @@ class ModelConfigManager:
         self.configs = {}
         for name, config in configs_dict.items():
             self.configs[name] = ModelConfig(**config)
-            # 未指定模板时，使用默认模板
-            self.configs[name].template = self.configs[name].template or mas_config.default_template
             if config.get("default"):
                 self.default_config = self.configs[name]
 
