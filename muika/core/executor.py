@@ -2,77 +2,19 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from random import random
-from typing import Literal, Optional, TypeAlias
+from typing import Optional
 
-from nonebot import get_bot, logger
+from nonebot import get_bot
 from nonebot_plugin_alconna.uniseg import Target, UniMessage
 
 from muika.config import mas_config
 from muika.utils.utils import clamp
 
-from .actions.rss import (
-    RSS_SOURCES,
-    extract_web_content,
-    fetch_web_content,
-    parse_rss_feed,
-)
-from .intents import (
-    CheckRSSUpdateIntent,
-    FetchWebContentIntent,
-    Intent,
-    PlanFutureEventIntent,
-    SendMessageIntent,
-)
+from .actions import bootstrap as _actions_bootstrap  # noqa: F401
+from .actions._registry import get_action_handler, invoke_action
+from .intents import Intent
 from .scheduler import Scheduler
 from .state import MuikaState
-
-
-@dataclass
-class SendMessagePayload:
-    content: str
-
-
-@dataclass
-class CheckRSSUpdatePayload:
-    source: str
-
-
-@dataclass
-class PlanFutureEventPayload:
-    when: str
-    what: str
-
-
-@dataclass
-class FetchWebContentPayload:
-    url: str
-
-
-@dataclass(frozen=True)
-class SendMessagePlan:
-    payload: SendMessagePayload
-    name: Literal["send_message"] = "send_message"
-
-
-@dataclass(frozen=True)
-class CheckRSSUpdatePlan:
-    payload: CheckRSSUpdatePayload
-    name: Literal["check_rss_update"] = "check_rss_update"
-
-
-@dataclass(frozen=True)
-class PlanFutureEventPlan:
-    payload: PlanFutureEventPayload
-    name: Literal["plan_future_event"] = "plan_future_event"
-
-
-@dataclass(frozen=True)
-class FetchWebContentPlan:
-    payload: FetchWebContentPayload
-    name: Literal["fetch_web_content"] = "fetch_web_content"
-
-
-ActionPlan: TypeAlias = SendMessagePlan | CheckRSSUpdatePlan | PlanFutureEventPlan | FetchWebContentPlan
 
 
 @dataclass
@@ -126,93 +68,26 @@ class Executor:
 
         return True
 
-    def _make_plan(self, intent: Intent, state: MuikaState) -> Optional[ActionPlan]:
-        """
-        生成执行计划
-        """
-        if isinstance(intent, SendMessageIntent):
-            return SendMessagePlan(payload=SendMessagePayload(content=intent.content))
-
-        elif isinstance(intent, CheckRSSUpdateIntent):
-            return CheckRSSUpdatePlan(payload=CheckRSSUpdatePayload(source=intent.rss_source))
-
-        elif isinstance(intent, PlanFutureEventIntent):
-            return PlanFutureEventPlan(
-                payload=PlanFutureEventPayload(when=intent.when, what=intent.what),
-            )
-
-        elif isinstance(intent, FetchWebContentIntent):
-            return FetchWebContentPlan(
-                payload=FetchWebContentPayload(url=intent.url),
-            )
-
-        return None
-
-    def _should_commit(self, plan: ActionPlan, state: MuikaState) -> bool:
+    def _should_commit(self, intent: Intent, state: MuikaState) -> bool:
         """
         决定是否执行该计划
         """
 
         # 太孤独时，允许主动
-        if plan.name == "send_message" and state.loneliness > 0.6:
+        if intent.name == "send_message" and state.loneliness > 0.6:
             return True
 
         # 正常情况下，随机性 + attention
         probability = clamp(state.attention, 0.2, 0.9)
         return random() < probability
 
-    async def _perform(self, plan: ActionPlan, state: MuikaState) -> str:
-        self._cooldown[plan.name] = datetime.now()
+    async def _perform(self, intent: Intent, state: MuikaState) -> str:
+        handler = get_action_handler(intent.name)
+        if not handler:
+            raise NotImplementedError(f"Action for intent {intent.name} is not implemented.")
 
-        if plan.name == "send_message":
-            await self.send_message(plan.payload.content)
-
-            # 行为反作用
-            state.loneliness *= 0.5
-            state.attention = min(1.0, state.attention + 0.2)
-
-            return "Message sent."
-
-        elif plan.name == "plan_future_event":
-            await self.scheduler.schedule(
-                PlanFutureEventIntent(
-                    name="plan_future_event",
-                    confidence=1.0,
-                    when=plan.payload.when,
-                    what=plan.payload.what,
-                )
-            )
-            return "Future event planned."
-
-        elif plan.name == "check_rss_update":
-            rss_source = RSS_SOURCES.get(plan.payload.source)
-            if not rss_source:
-                logger.warning(f"Unknown RSS source: {plan.payload.source}")
-                raise ValueError(f"Unknown RSS source: {plan.payload.source}")
-
-            logger.debug(f"Checking RSS feed: {rss_source.url}")
-            feed_data = await fetch_web_content(rss_source.url)
-            feed_contents = parse_rss_feed(feed_data)
-            logger.debug(f"Fetched {len(feed_contents)} entries from RSS feed.")
-
-            feed_outlines = [f"# RSS Feed Update from {rss_source.name}: \n"]
-            for entry in feed_contents:
-                outline = (
-                    f"- title: {entry.title}; description: {entry.description};"
-                    f" link: {entry.link}; published: {entry.published}\n"
-                )
-                feed_outlines.append(outline)
-
-            # 行为反作用
-            state.boredom *= 0.7
-            state.attention = min(1.0, state.attention + 0.1)
-            return "\n".join(feed_outlines)
-
-        elif plan.name == "fetch_web_content":
-            web_content = await extract_web_content(plan.payload.url)
-            return web_content
-
-        raise NotImplementedError(f"Action for plan {plan.name} is not implemented.")
+        self._cooldown[intent.name] = datetime.now()
+        return await invoke_action(handler, intent, state, self)
 
     async def execute(self, intent: Intent, state: MuikaState) -> ExecutionOutcome:
         """
@@ -222,18 +97,13 @@ class Executor:
         if not self._validate_intent(intent, state):
             return ExecutionOutcome(executed=False)
 
-        # 1. 生成 ActionPlan
-        plan = self._make_plan(intent, state)
-        if not plan:
+        # 1. 决定是否提交（最后一道闸门）
+        if not self._should_commit(intent, state):
             return ExecutionOutcome(executed=False)
 
-        # 2. 决定是否提交（最后一道闸门）
-        if not self._should_commit(plan, state):
-            return ExecutionOutcome(executed=False)
-
-        # 3. 执行
+        # 2. 执行
         try:
-            perform_result = await self._perform(plan, state)
+            perform_result = await self._perform(intent, state)
             action_result = ActionResult(success=True, output=str(perform_result))
         except Exception as e:
             action_result = ActionResult(success=False, output=str(e))
