@@ -1,10 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from nonebot import logger
 
 from .intents import Intent, Persistence
+
+if TYPE_CHECKING:
+    from .events import Event
 
 
 @dataclass
@@ -13,10 +16,14 @@ class MuikaState:
     """情绪"""
     attention: float = 1.0
     """专注度"""
+
     loneliness: float = 0.0
     """陪伴需求"""
     curiosity: float = 0.5
     """探索欲"""
+    boredom: float = 0.0
+    """无聊程度"""
+
     last_interaction: datetime = field(default_factory=datetime.now)
     """最近一次交流时间"""
     active_intent: Optional[Intent] = None
@@ -25,6 +32,29 @@ class MuikaState:
     """上一次执行的想法"""
     pending_intents: list[Intent] = field(default_factory=list)
     """未执行的念头"""
+
+    def tick_state(self, event: "Event"):
+        # 1. 随着时间流逝，注意力下降
+        self.attention = max(0.0, self.attention - 0.05)
+
+        if not self.active_intent:
+            self.loneliness = min(1.0, self.loneliness + 0.02)
+            self.boredom = min(1.0, self.boredom + 0.03)
+
+        # 2. 基于规则的状态机
+        now = datetime.now()
+
+        if event.type == "user_message":
+            self.loneliness *= 0.6
+            self.attention = max(0.5, self.attention + 0.1)
+            self.last_interaction = now
+
+        elif event.type == "time_tick":
+            # 随时间增加孤独感
+            silence_duration = (now - self.last_interaction).seconds
+            if silence_duration > 3600 or self.loneliness > 0.8:  # 1小时没理她
+                self.loneliness = min(1.0, self.loneliness + 0.1)
+                self.mood = "bored"
 
     def tick_intents(self):
         """

@@ -145,8 +145,8 @@ class Executor:
             await self.send_message(plan.payload.content)
 
             # 行为反作用
-            state.loneliness *= 0.7
-            state.attention = min(1.0, state.attention + 0.1)
+            state.loneliness *= 0.5
+            state.attention = min(1.0, state.attention + 0.2)
 
             return "Message sent."
 
@@ -162,7 +162,9 @@ class Executor:
             return "Future event planned."
 
         elif plan.name == "check_rss_update":
-            ...  # TODO
+            state.boredom *= 0.7
+            state.attention = min(1.0, state.attention + 0.1)
+            # TODO: 实际检查 RSS 逻辑
 
         raise NotImplementedError(f"Action for plan {plan.name} is not implemented.")
 

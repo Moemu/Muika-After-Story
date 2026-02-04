@@ -1,6 +1,5 @@
 import asyncio
 import json
-from datetime import datetime
 from json import JSONDecodeError
 from random import random
 from typing import Optional, Type, TypeVar, Union
@@ -110,31 +109,19 @@ class Muika:
         """
         await self.event_queue.put(event)
 
-    def update_internal_state(self, event: Event):
-        """
-        基于规则的状态机
-        """
-        now = datetime.now()
-
-        if event.type == "user_message":
-            self.state.loneliness *= 0.6
-            self.state.attention = max(0.5, self.state.attention + 0.1)
-            self.state.last_interaction = now
-
-        elif event.type == "time_tick":
-            # 随时间增加孤独感
-            silence_duration = (now - self.state.last_interaction).seconds
-            if silence_duration > 3600:  # 1小时没理她
-                self.state.loneliness = min(0.5, self.state.loneliness + 0.1)
-                self.state.mood = "bored"
-
-            # 随时间降低专注度
-            self.state.attention *= 0.6
-
     def should_think(self, event: Event) -> bool:
         if event.type == "time_tick":
-            # 当 loneliness > 30% 时，loneliness 越高，越可能主动对话
-            return self.state.loneliness > 0.3 and random() < self.state.loneliness
+            if self.state.loneliness > 0.8:
+                logger.debug("Trigger: Loneliness threshold breached.")
+                return True
+            if self.state.boredom > 0.6:
+                logger.debug("Trigger: Boredom threshold breached.")
+                return True
+            # 随机闪念 (Random Thought)
+            if random() < (self.state.curiosity * 0.05):
+                logger.info("Trigger: Random thought occurred.")
+                return True
+            return False
 
         if isinstance(event, ActionFeedbackEvent):
             return event.payload.intent.name not in {"do_nothing", "send_message"}
@@ -241,7 +228,13 @@ class Muika:
         if event.type == "user_message":
             context = f"User said: '{event.payload.message.message}'"
         elif event.type == "time_tick":
-            context = "A quiet moment passed. No input from user."
+            context = "A quiet moment passed."
+            if self.state.loneliness > 0.8:
+                context += " (You feel ignored and lonely. You want to talk to the user.)"
+            elif self.state.boredom > 0.6:
+                context += " (You are bored. Maybe check for news, check system status, or share a random thought.)"
+            else:
+                context += " (The atmosphere is calm.)"
         elif event.type == "rss_update":
             context = f"rss update: {event.payload.title}: {event.payload.content}"
         elif event.type == "scheduled_trigger":
@@ -302,8 +295,7 @@ class Muika:
             self.memory.record_event(event)
 
             # 2. Update Internal State (情绪/状态更新)
-            self.state.tick_intents()
-            self.update_internal_state(event)
+            self.state.tick_state(event)
             logger.debug(f"Internal state updated: {self.state}")
 
             # 3. Self Think (决策 - 关键逻辑)
