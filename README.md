@@ -29,34 +29,47 @@
 
 - [X] 支持调用 MCP 服务（支持 stdio、SSE 和 Streamable HTTP 传输方式）
 
-- [ ] Muika 主交互逻辑开发
+- [X] Muika 主交互逻辑开发
 
 - [ ] 系统交互层开发
 
 - [ ] (Pending) 动态模型配置，可随时切换模型配置文件
 
+## Core Logic🧠
 
-## SDK Support📌
+1. **启动阶段**：加载配置（模型/Embedding/MCP 等），初始化 LLM Provider、记忆与数据库层、调度器与插件系统，并注册可用的 Actions/Tools。
+2. **消息进入**：Nonebot2 收到平台消息后进入 Muika 的事件循环，由会话管理器聚合上下文（用户、群组、历史片段等）。
+3. **意图与状态**：核心大脑根据当前状态与消息内容生成本轮意图（Intents）与执行计划（是否需要检索/调用工具/读取网页等）。
+4. **模型推理**：将上下文与系统提示组装成请求，调用已配置的 LLM（可多模态），并解析输出（包含普通回复或工具调用）。
+5. **动作执行**：若触发工具调用，由执行器按参数调度 Actions（如抓取网页、检查 RSS、调用 MCP 服务等），并把结果回填到上下文中，必要时再次让模型进行总结/二次推理。
+6. **记忆沉淀**：将本轮对话与关键事实写入记忆/数据库（包含可检索的向量化内容），为后续长期一致性提供支持。
+7. **输出与调度**：最终消息回传至平台；同时调度器可触发定时事件（新闻/RSS 更新等），以“外部事件”形式再次进入上述闭环。
 
-| Python SDK  | MultiModal | Thinking | Tool Call | Online Search |
-| ----------- | ---------- | -------- | --------- | ------------- |
-| `Azure`     | 🎶🖼️/❌       | ⭕        | ✅         | ❌             |
-| `Dashscope` | 🎶🖼️/❌       | ✅        | ⭕         | ✅             |
-| `Gemini`    | ✅/🖼️        | ⭕        | ✅         | ✅             |
-| `Ollama`    | 🖼️/❌        | ✅        | ✅         | ❌             |
-| `Openai`    | ✅/🎶        | ✅        | ✅         | ❌             |
+## Configuration⚙️
 
-✅：表示此加载器能很好地支持该功能并且 `Muika-After-Story` 已实现
+**Nonebot 配置项(.env)**
 
-⭕：表示此加载器虽支持该功能，但使用时可能遇到问题
+| 配置项            | 类型(默认值)                               | 说明                                                       |
+| ----------------- | ------------------------------------------ | ---------------------------------------------------------- |
+| `master_id`       | str = get_driver().config.superusers.pop() | 对话目标ID。目前仅支持一对一对话。                         |
+| `INPUT_TIMEOUT`   | int = 0                                    | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用 |
+| `LOG_LEVEL`       | str = "INFO"                               | 日志等级                                                   |
+| `TELEGRAM_PROXY`  | Optional[str] = None                       | tg适配器代理，并使用该代理下载文件                         |
+| `ENABLE_ADAPTERS` | list = ["~.onebot.v11", "~.onebot.v12"]    | 在入口文件中启用的 Nonebot 适配器(仅 Debug 环境)           |
 
-🚧：表示此加载器虽然支持该功能，但 `Muika-After-Story` 未实现或正在实现中
+**模型配置项(configs/models.yml)**
 
-❓：表示 Maintainer 暂不清楚此加载器是否支持此项功能，可能需要进一步翻阅文档和检查源码
+支持的模型和具体配置内容可参考 [Muicebot 的模型配置](https://bot.snowy.moe/guide/model)
 
-❌：表示此加载器不支持该功能
+不支持的字段: `template`, `template_mode`, `stream`, `function_call`
 
-多模态标记：🎶表示音频；🎞️ 表示视频；🖼️ 表示图像；📄表示文件；✅ 表示完全支持
+**嵌入配置项(configs/embeddings.yml)**
+
+*Not Supported yet.*
+
+## Quick Start🚀
+
+*Work In Progress.*
 
 ## About🎗️
 
@@ -67,5 +80,7 @@
 本项目基于 [BSD 3](https://github.com/Moemu/Muika-After-Story/blob/main/LICENSE) 许可证提供，涉及到再分发时请保留许可文件的副本。
 
 本项目隶属于 [MuikaAI](https://github.com/MuikaAI)
+
+项目初期使用了 [Muicebot](https://github.com/Moemu/Muicebot) 的基本框架实现，部分存在于 Muicebot 的配置可能不可用或过时。
 
 <a href="https://www.afdian.com/a/Moemu" target="_blank"><img src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt="afadian" style="height: 45px !important;width: 163px !important;"></a>
