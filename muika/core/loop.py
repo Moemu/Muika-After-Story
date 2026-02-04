@@ -17,7 +17,6 @@ from muika.llm import (
 )
 from muika.llm.utils.json_utils import extract_json_from_text
 from muika.llm.utils.thought_processor import general_processor
-from muika.utils.utils import clamp
 
 from .events import ActionFeedbackEvent, ActionFeedbackPayload, Event, TimeTickEvent
 from .executor import Executor
@@ -360,10 +359,8 @@ class Muika:
             self.state.last_executed_intent = current_intent
             await self.create_event(action_feedback_event)
 
-            # 5. Sleep (动态调整，专注时反应快，发呆时反应慢)
-            sleep_time = clamp(self.state.attention, 0.1, 0.9)
-            logger.debug(f"Sleeping for {sleep_time:.2f} seconds...")
-            await asyncio.sleep(sleep_time * 0.5)
+            # 5. Sleep
+            await asyncio.sleep(0.2)
 
     async def start(self):
         if self.is_alive:
