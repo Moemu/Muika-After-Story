@@ -5,8 +5,6 @@ from typing import Optional
 
 from nonebot import logger
 
-from muika.config import get_model_config
-
 from ._base import BaseLLM, EmbeddingModel
 from ._config import EmbeddingConfig, ModelConfig
 from ._dependencies import MODEL_DEPENDENCY_MAP, get_missing_dependencies
@@ -20,6 +18,8 @@ def load_model(config: Optional[ModelConfig] = None) -> BaseLLM:
     """
     获得一个 LLM 实例
     """
+    from muika.config import get_model_config  # 避免循环导入
+
     config = config or get_model_config()
     provider = config.provider.lower()
 
