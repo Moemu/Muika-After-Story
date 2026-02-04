@@ -59,21 +59,6 @@ class TimeTickEvent:
 
 
 @dataclass(frozen=True)
-class RSSUpdateEvent:
-    payload: RSSUpdate
-    timestamp: datetime = field(default_factory=datetime.now)
-    type: Literal["rss_update"] = "rss_update"
-
-
-@dataclass(frozen=True)
-class WebContentFetchEvent:
-    url: str
-    content: str
-    timestamp: datetime = field(default_factory=datetime.now)
-    type: Literal["web_content_fetch"] = "web_content_fetch"
-
-
-@dataclass(frozen=True)
 class InternalReflectionEvent:
     payload: InternalReflection
     timestamp: datetime = field(default_factory=datetime.now)
@@ -95,11 +80,5 @@ class ActionFeedbackEvent:
 
 
 Event: TypeAlias = (
-    UserMessageEvent
-    | RSSUpdateEvent
-    | TimeTickEvent
-    | InternalReflectionEvent
-    | ScheduledTriggerEvent
-    | ActionFeedbackEvent
-    | WebContentFetchEvent
+    UserMessageEvent | TimeTickEvent | InternalReflectionEvent | ScheduledTriggerEvent | ActionFeedbackEvent
 )
