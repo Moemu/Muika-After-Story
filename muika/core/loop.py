@@ -104,20 +104,24 @@ class Muika:
             # 1. Collect Events (获取事件或通过 TimeTick 心跳)
             logger.debug("Collecting events...")
             event = await self.collect_events()
-            logger.debug(f"Event collected: {event.type}")
-            self.memory.record_event(event)
+            logger.info(f"Event collected: {event}")
+            if event.type == "user_message":
+                self.memory.add_context("user", event.payload.message.message)
 
             # 2. Update Internal State (情绪/状态更新)
             self.state.tick_state(event, dt)
             logger.debug(f"Internal state updated: {self.state}")
 
-            # 3. Self Think (决策 - 关键逻辑)
+            # 3. Self Think (决策)
             if self.should_think(event):
                 intent = await self.brain.think(event, self.state, self.memory)
+
                 if intent.action.name != "do_nothing" and intent.action.confidence > 0.3:
                     self.state.pending_intents.append(intent.action)
+
                 if intent.memory and intent.memory.type != "noop":
                     await self.memory.record_memory(intent.memory)
+
                 logger.debug(f"Intent created: {intent}")
             else:
                 intent = None
@@ -141,9 +145,13 @@ class Muika:
                 logger.debug("Intent execution skipped.")
                 continue
 
-            if execute_result.result and execute_result.result.success:
+            result = execute_result.result
+            if result and result.success:
                 logger.success("Intent executed successfully.")
-                self.memory.record_intent(current_intent)
+                if current_intent.name == "send_message":
+                    self.memory.add_context("muika", current_intent.content)
+                else:
+                    self.memory.add_context("system", f"Action [{current_intent.name}] Result: {result.output}")
                 self.state.pending_intents.remove(current_intent)
                 self.state.active_intent = None
             else:
@@ -154,6 +162,7 @@ class Muika:
                     logger.warning("Intent failed too many times, discarding.")
                     self.state.pending_intents.remove(current_intent)
                     self.state.active_intent = None
+                    self.memory.add_context("system", f"Action [{current_intent.name}] Failed: {failed_reason}")
 
             action_feedback_event = ActionFeedbackEvent(
                 payload=ActionFeedbackPayload(

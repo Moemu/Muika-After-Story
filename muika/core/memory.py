@@ -9,13 +9,10 @@ import nonebot_plugin_localstore as store
 from nonebot import logger
 from pydantic import BaseModel, Field
 
-from .events import Event
-from .intents import Intent, SendMessageIntent
-
 
 @dataclass
 class ConversationTurn:
-    role: Literal["user", "muika", "internal"]
+    role: Literal["user", "muika", "system"]
     content: str
     timestamp: datetime
 
@@ -73,28 +70,27 @@ class MemoryManager:
     def _build_key(self, category: str, key: str) -> str:
         return f"{category}:{key}"
 
-    def record_event(self, event: Event) -> None:
-        if event.type == "user_message":
-            self.recent_turns.append(
-                ConversationTurn(
-                    role="user",
-                    content=event.payload.message.message,
-                    timestamp=event.timestamp,
-                )
+    def add_context(self, role: Literal["user", "muika", "system"], content: str):
+        """
+        统一记录所有的交互历史：
+        - user: 用户说的话
+        - muika: AI 说的话
+        - system: Action 的执行结果 (如 RSS 内容、文件内容、错误信息)
+        """
+        self.recent_turns.append(
+            ConversationTurn(
+                role=role,
+                content=content,
+                timestamp=datetime.now(),
             )
-
-    def record_intent(self, intent: Intent):
-        if isinstance(intent, SendMessageIntent):
-            self.recent_turns.append(
-                ConversationTurn(
-                    role="muika",
-                    content=intent.content,
-                    timestamp=datetime.now(),
-                )
-            )
+        )
 
     async def record_memory(self, intent: MemoryIntent):
+        if intent.type == "noop":
+            return
+
         key = self._build_key(intent.category, intent.key)
+
         if intent.type == "remember" and intent.value:
             # 只有 confidence 足够高才覆盖
             old_item = self.memory.get(key)
@@ -108,10 +104,12 @@ class MemoryManager:
                 confidence=intent.strength,
                 last_updated=datetime.now(),
             )
+            logger.debug(f"Memory Updated: {key} = {intent.value}")
 
         elif intent.type == "forget":
             if key in self.memory:
                 del self.memory[key]
+                logger.debug(f"Memory Forgot: {key}")
 
         await self._save()
 
@@ -144,9 +142,7 @@ class MemoryManager:
                 "\n## Recent Context (Most recent at bottom): (Do NOT respond to these directly unless relevant)"
             )
             for turn in self.recent_turns:
-                prefix = {"user": "User", "muika": "You", "system": "System", "internal": "My Inner Voice"}.get(
-                    turn.role, turn.role
-                )
+                prefix = {"user": "User", "muika": "You", "system": "System"}.get(turn.role, turn.role)
                 parts.append(f"{prefix}: {turn.content}")
 
         return "\n".join(parts)
