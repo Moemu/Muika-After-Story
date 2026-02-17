@@ -24,7 +24,6 @@ from nonebot_plugin_alconna import (
 from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 from nonebot_plugin_session import SessionIdType, extract_session
 
-from .config import load_embedding_model_config
 from .core import UserMessagePayload, muika
 from .core.events import UserMessageEvent
 from .llm import ModelCompletions, ModelStreamCompletions
@@ -45,8 +44,6 @@ session_manager = SessionManager()
 
 
 def startup_plugins():
-    load_embedding_model_config()
-
     if PLUGINS_PATH.exists():
         logger.info("加载外部插件...")
         load_plugins("./plugins")

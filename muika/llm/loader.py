@@ -5,13 +5,10 @@ from typing import Optional
 
 from nonebot import logger
 
-from ._base import BaseLLM, EmbeddingModel
-from ._config import EmbeddingConfig, ModelConfig
+from ._base import BaseLLM
+from ._config import ModelConfig
 from ._dependencies import MODEL_DEPENDENCY_MAP, get_missing_dependencies
-from .registry import get_embedding_class, get_llm_class
-
-_embedding_instance: dict[EmbeddingConfig, EmbeddingModel] = {}
-"""嵌入实例缓存"""
+from .registry import get_llm_class
 
 
 def load_model(config: Optional[ModelConfig] = None) -> BaseLLM:
@@ -43,19 +40,3 @@ def load_model(config: Optional[ModelConfig] = None) -> BaseLLM:
         sys.exit(1)
 
     return LLMClass(config)
-
-
-def load_embedding_model(config: EmbeddingConfig) -> EmbeddingModel:
-    """
-    获得一个嵌入模型实例，如果存在相同的配置，则返回缓存实例
-    """
-    provider = config.provider.lower()
-
-    builtin_provider = f"muika.llm.embeddings.{provider}"
-    if find_spec(builtin_provider) is not None:
-        logger.debug(f"加载内嵌模型模块: {provider}...")
-        importlib.import_module(builtin_provider)
-
-    EmbeddingClass = get_embedding_class(provider)
-
-    return _embedding_instance.setdefault(config, EmbeddingClass(config))

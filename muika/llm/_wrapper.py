@@ -16,7 +16,7 @@ from ._schema import (
 )
 
 if TYPE_CHECKING:
-    from ._base import BaseLLM, EmbeddingModel
+    from ._base import BaseLLM
 
 ASK_FUNC: TypeAlias = Callable[..., Awaitable[Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]]]
 EMBED_FUNC: TypeAlias = Callable[..., Awaitable[EmbeddingsBatchResult]]
@@ -63,49 +63,5 @@ def record_plugin_usage(func: ASK_FUNC):
                     await UsageORM.save_usage(session, plugin_name, total_usage)
 
         return generator_wrapper()
-
-    return wrapper
-
-
-def record_plugin_embedding_usage(func: EMBED_FUNC):
-    """
-    记录插件嵌入用量的装饰器
-    """
-
-    @wraps(func)
-    async def wrapper(self: "EmbeddingModel", texts: list[str]):
-        plugin_name = _get_caller_plugin_name() or "muika"
-        result = await func(self, texts)
-
-        if result.succeed and result.usage > 0:
-            async with _usage_write_lock:
-                session = get_scoped_session()
-                await UsageORM.save_usage(session, plugin_name, result.usage, "embedding")
-
-        return result
-
-    return wrapper
-
-
-def cache(func: EMBED_FUNC):
-    """
-    缓存嵌入向量的装饰器
-    """
-
-    @wraps(func)
-    async def wrapper(self: "EmbeddingModel", texts: list[str]):
-        if not self.enable_embedding_cache:
-            return await func(self, texts)
-
-        results = []
-        for text in texts:
-            embedding = self._load_embedding_from_cache(text)
-            if embedding is not None:
-                results.append(embedding)
-            else:
-                result = await func(self, [text])
-                self._save_to_cache(text, result.embeddings[0])
-                results.append(result.embeddings[0])
-        return EmbeddingsBatchResult(succeed=True, embeddings=results)
 
     return wrapper

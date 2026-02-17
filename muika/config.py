@@ -14,13 +14,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
-from .llm import EmbeddingConfig, ModelConfig
+from .llm import ModelConfig
 
 MODELS_CONFIG_PATH = Path("configs/models.yml").resolve()
-EMBEDDINGS_CONFIG_PATH = Path("configs/embeddings.yml").resolve()
 
 _model_config_manager: Optional["ModelConfigManager"] = None
-_embeddings_configs: dict[str, EmbeddingConfig] = {}
 
 
 class MASConfig(BaseModel):
@@ -213,50 +211,3 @@ def get_model_config(model_config_name: Optional[str] = None) -> ModelConfig:
     """
     model_config_manager = get_model_config_manager()
     return model_config_manager.get_model_config(model_config_name)
-
-
-def get_embedding_model_config(embedding_config_name: Optional[str] = None) -> EmbeddingConfig:
-    """
-    从配置文件 `configs/models.yml` 中获取指定模型的配置对象
-
-    :param embedding_config_name: (可选)模型配置名称。若为空，则先寻找配置了 `default: true` 的首个配置项，若失败就再寻找首个配置项
-
-    :raise FileNotFoundError: 嵌入配置文件 `configs/embeddings.yml` 不存在或为空
-    :raise ValueError: 指定的嵌入模型配置名不存在
-    """
-    if not _embeddings_configs:
-        raise FileNotFoundError("嵌入配置文件 `configs/embeddings.yml` 不存在或为空")
-
-    if not embedding_config_name:
-        for config in _embeddings_configs.values():
-            if config.default:
-                return config
-
-        return next(iter(_embeddings_configs.values()))
-
-    embeddings_config = _embeddings_configs.get(embedding_config_name, None)
-
-    if embeddings_config:
-        return embeddings_config
-
-    raise ValueError(f"指定的嵌入模型配置名: {embedding_config_name} 不存在")
-
-
-def load_embedding_model_config():
-    global _embeddings_configs
-
-    if not os.path.isfile(EMBEDDINGS_CONFIG_PATH):
-        _embeddings_configs = {}
-        return
-
-    with open(EMBEDDINGS_CONFIG_PATH, "r", encoding="utf-8") as f:
-        configs = yaml_.safe_load(f)
-
-    if not configs:
-        _embeddings_configs = {}
-        return
-
-    _embeddings_configs = {}
-
-    for name, config in configs.items():
-        _embeddings_configs[name] = EmbeddingConfig(**config)
