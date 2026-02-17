@@ -12,9 +12,14 @@ from nonebot.adapters import Bot, Event
 from nonebot.adapters import Message as BotMessage
 from nonebot.exception import FinishedException
 from nonebot.matcher import Matcher
+from nonebot.permission import SUPERUSER
 from nonebot.rule import to_me
 from nonebot_plugin_alconna import (
+    AlconnaMatch,
+    CommandMeta,
+    Match,
     MsgTarget,
+    Subcommand,
     UniMessage,
     UniMsg,
     get_message_id,
@@ -24,6 +29,7 @@ from nonebot_plugin_alconna import (
 from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 from nonebot_plugin_session import SessionIdType, extract_session
 
+from .config import get_model_config_manager
 from .core import UserMessagePayload, muika
 from .core.events import UserMessageEvent
 from .llm import ModelCompletions, ModelStreamCompletions
@@ -88,6 +94,22 @@ at_event = on_alconna(
     rule=to_me(),
     block=True,
     extensions=[ReplyRecordExtension()],
+)
+
+command_model = on_alconna(
+    Alconna(
+        COMMAND_PREFIXES,
+        "model",
+        Subcommand("help", help_text="显示指令帮助"),
+        Subcommand("load", Args["config_name?", str], help_text="切换指定模型配置，用法: .model load <config_name> "),
+        Subcommand("reload", help_text="重新加载模型配置文件"),
+        Subcommand("list", help_text="列出所有可用模型配置"),
+        meta=CommandMeta("Muicebot 模型配置管理指令"),
+    ),
+    priority=10,
+    block=True,
+    skip_for_unmatch=False,
+    permission=SUPERUSER,
 )
 
 
@@ -262,3 +284,58 @@ async def handle_supported_adapters(
     message = Message(message=message_text, userid=userid, groupid=group_id, resources=message_resource)
 
     await muika.create_event(UserMessageEvent(UserMessagePayload(message)))
+
+
+@command_model.assign("help")
+async def handle_model_help():
+    await UniMessage(
+        """Model 命令指南:
+    - help: 显示此帮助信息
+    - load <config_name>: 加载模型配置
+    - reload: 重新加载模型配置文件
+    - list: 列出所有可用的模型配置
+    """
+    ).finish()
+
+
+@command_model.assign("reload")
+async def handle_model_reload():
+    logger.info("重新加载模型配置文件...")
+    config_manager = get_model_config_manager()
+
+    try:
+        config_manager._on_config_changed()
+    except Exception as e:
+        await UniMessage(str(e)).finish()
+
+    await UniMessage(f"已成功重载模型配置文件: {config_manager.current_config}").finish()
+
+
+@command_model.assign("load")
+async def handle_model_load(config: Match[str] = AlconnaMatch("config_name")):
+    config_manager = get_model_config_manager()
+    config_name = config.result if config.available else None
+
+    try:
+        new_config = config_manager.get_model_config(config_name)
+        config_manager.change_current_config(new_config)
+    except (ValueError, FileNotFoundError) as e:
+        await UniMessage(str(e)).finish()
+
+    await UniMessage(
+        f"已成功加载 {config_name}"
+        if config_name
+        else f"未指定模型配置名，已加载默认模型配置: {config_manager.current_config}"
+    ).finish()
+
+
+@command_model.assign("list")
+async def handle_model_list():
+    config_manager = get_model_config_manager()
+    configs = config_manager.configs
+    outputs = ["目前所有可用的模型配置列表:"]
+
+    for name, config in configs.items():
+        outputs.append(f"-{name} {config.model_name}({config.provider}) 多模态: {'是' if config.multimodal else '否'}")
+
+    await UniMessage("\n".join(outputs)).finish()

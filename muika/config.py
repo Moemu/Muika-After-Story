@@ -81,7 +81,7 @@ class ModelConfigManager:
 
         self.configs: dict[str, ModelConfig] = {}
         """所有模型配置"""
-        self.default_config = None
+        self.current_config: Optional[ModelConfig] = None
         """默认模型配置（非主 Muice 使用模型）"""
         self.observer: Optional[BaseObserver] = None
         """文件监视器"""
@@ -110,11 +110,11 @@ class ModelConfigManager:
         for name, config in configs_dict.items():
             self.configs[name] = ModelConfig(**config)
             if config.get("default"):
-                self.default_config = self.configs[name]
+                self.current_config = self.configs[name]
 
-        if not self.default_config and self.configs:
+        if not self.current_config and self.configs:
             # 如果没有指定默认配置，使用第一个
-            self.default_config = next(iter(self.configs.values()))
+            self.current_config = next(iter(self.configs.values()))
 
     def _start_file_watcher(self):
         """启动文件监视器"""
@@ -130,13 +130,13 @@ class ModelConfigManager:
         """配置文件变化时的回调函数"""
         try:
             # old_configs = self.configs.copy()
-            old_default = self.default_config.model_copy() if self.default_config else None
+            old_default = self.current_config.model_copy() if self.current_config else None
 
             self._load_configs()
 
             # 通知所有注册的监听器
             for listener in self._listeners:
-                listener(self.default_config, old_default)
+                listener(self.current_config, old_default)
 
         except Exception as e:
             logger.error(f"重新加载配置文件失败: {e}")
@@ -158,9 +158,9 @@ class ModelConfigManager:
     def get_model_config(self, model_config_name: Optional[str] = None) -> ModelConfig:
         """获取指定模型的配置"""
         if model_config_name in [None, ""]:
-            if not self.default_config:
+            if not self.current_config:
                 raise ValueError("没有找到默认模型配置！请确保存在至少一个有效的配置项！")
-            return self.default_config
+            return self.current_config
 
         elif model_config_name in self.configs:
             return self.configs[model_config_name]
@@ -168,6 +168,14 @@ class ModelConfigManager:
         else:
             logger.warning(f"指定的模型配置 '{model_config_name}' 不存在！")
             raise ValueError(f"指定的模型配置 '{model_config_name}' 不存在！")
+
+    def change_current_config(self, config: ModelConfig):
+        old_default = self.current_config.model_copy() if self.current_config else None
+        self.current_config = config
+
+        # 通知所有注册的监听器
+        for listener in self._listeners:
+            listener(self.current_config, old_default)
 
     def get_name_from_config(self, config: ModelConfig) -> str:
         """

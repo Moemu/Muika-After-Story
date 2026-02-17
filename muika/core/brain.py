@@ -6,7 +6,8 @@ from typing import Optional, Type, TypeVar, Union
 from nonebot import logger
 from pydantic import BaseModel, Field, TypeAdapter
 
-from muika.llm import ModelRequest, load_model
+from muika.config import get_model_config_manager
+from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.json_utils import extract_json_from_text
 from muika.llm.utils.thought_processor import general_processor
 
@@ -34,6 +35,34 @@ class MuikaBrain:
         # 初始化模型类
         self.intent_adapter: TypeAdapter[CognitiveResult] = TypeAdapter(CognitiveResult)
         self.model = load_model()
+
+        # 注册配置监听器
+        self._setup_config_listener()
+
+    def _setup_config_listener(self):
+        config_manager = get_model_config_manager()
+        config_manager.register_listener(self.reload_model)
+
+    def reload_model(self, new_config: ModelConfig, old_config: Optional[ModelConfig]):
+        """
+        重新加载模型
+        """
+        provider_old = old_config.provider if old_config else "None"
+        provider_new = new_config.provider
+        logger.info(f"Detected model config change: {provider_old} -> {provider_new}")
+
+        try:
+            # 尝试加载新模型
+            new_model = load_model(new_config)
+            # 只有成功加载后才替换当前模型
+            self.model = new_model
+            logger.success(f"Model reloaded: {provider_new}")
+        except Exception as e:
+            logger.error(f"Failed to reload model: {e}")
+            logger.warning(
+                "Failed to reload model, continuing with previous configuration "
+                f"(still using provider: {provider_old})."
+            )
 
     async def completions_format(
         self,
