@@ -91,6 +91,11 @@ class ListProcessesIntent(IntentBase):
     persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
 
 
+class GetFocusedWindowIntent(IntentBase):
+    name: Literal["get_focused_window"] = "get_focused_window"
+    persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
+
+
 class GetSystemStatusIntent(IntentBase):
     name: Literal["get_system_status"] = "get_system_status"
     persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
@@ -106,6 +111,7 @@ Intent: TypeAlias = Annotated[
         CaptureScreenshotIntent,
         ListProcessesIntent,
         GetSystemStatusIntent,
+        GetFocusedWindowIntent,
     ],
     Field(discriminator="name"),
 ]
