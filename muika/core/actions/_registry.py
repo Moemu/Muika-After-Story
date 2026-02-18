@@ -1,9 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from inspect import Parameter, signature
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Union,
+    cast,
+)
 
-ActionHandler = Callable[..., Awaitable[str]]
+from muika.models import Resource
+
+
+@dataclass
+class ActionOutput:
+    content: str
+    resources: List[Resource] = field(default_factory=list)
+
+
+ActionHandler = Callable[..., Awaitable[Union[str, ActionOutput]]]
 
 
 _registry: Dict[str, ActionHandler] = {}
@@ -11,8 +31,10 @@ _registry: Dict[str, ActionHandler] = {}
 
 def register_action(
     name: str,
-) -> Callable[[Callable[..., Awaitable[str]]], Callable[..., Awaitable[str]]]:
-    def decorator(handler: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+) -> Callable[[Callable[..., Awaitable[Union[str, ActionOutput]]]], Callable[..., Awaitable[Union[str, ActionOutput]]]]:
+    def decorator(
+        handler: Callable[..., Awaitable[Union[str, ActionOutput]]],
+    ) -> Callable[..., Awaitable[Union[str, ActionOutput]]]:
         if name in _registry:
             raise ValueError(f"Action '{name}' is already registered")
         _registry[name] = cast(ActionHandler, handler)
@@ -29,7 +51,7 @@ def list_action_names() -> list[str]:
     return sorted(_registry.keys())
 
 
-async def invoke_action(handler: ActionHandler, intent: Any, state: Any, executor: "Executor") -> str:
+async def invoke_action(handler: ActionHandler, intent: Any, state: Any, executor: "Executor") -> ActionOutput:
     sig = signature(handler)
     available = {
         "intent": intent,
@@ -93,7 +115,15 @@ async def invoke_action(handler: ActionHandler, intent: Any, state: Any, executo
         for name, value in available.items():
             kwargs.setdefault(name, value)
 
-    return await handler(**kwargs)
+    result = await handler(**kwargs)
+
+    if isinstance(result, str):
+        return ActionOutput(content=result)
+    elif isinstance(result, ActionOutput):
+        return result
+    else:
+        # Fallback for unexpected return types
+        return ActionOutput(content=str(result))
 
 
 if TYPE_CHECKING:

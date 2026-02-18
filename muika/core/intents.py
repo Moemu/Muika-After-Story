@@ -80,6 +80,22 @@ class PlanFutureEventIntent(IntentBase):
     persistence: SkipJsonSchema[Persistence] = Persistence.STICKY
 
 
+class CaptureScreenshotIntent(IntentBase):
+    name: Literal["capture_screenshot"] = "capture_screenshot"
+    persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
+
+
+class ListProcessesIntent(IntentBase):
+    name: Literal["list_processes"] = "list_processes"
+    filter: Optional[str] = Field(None, description="Optional filter string for process names.")
+    persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
+
+
+class GetSystemStatusIntent(IntentBase):
+    name: Literal["get_system_status"] = "get_system_status"
+    persistence: SkipJsonSchema[Persistence] = Persistence.SHORT_TERM
+
+
 Intent: TypeAlias = Annotated[
     Union[
         SendMessageIntent,
@@ -87,6 +103,9 @@ Intent: TypeAlias = Annotated[
         CheckRSSUpdateIntent,
         PlanFutureEventIntent,
         FetchWebContentIntent,
+        CaptureScreenshotIntent,
+        ListProcessesIntent,
+        GetSystemStatusIntent,
     ],
     Field(discriminator="name"),
 ]

@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from random import random
 from typing import Optional
@@ -8,10 +8,11 @@ from nonebot import get_bot
 from nonebot_plugin_alconna.uniseg import Target, UniMessage
 
 from muika.config import mas_config
+from muika.models import Resource
 from muika.utils.utils import clamp
 
 from .actions import bootstrap as _actions_bootstrap  # noqa: F401
-from .actions._registry import get_action_handler, invoke_action
+from .actions._registry import ActionOutput, get_action_handler, invoke_action
 from .intents import Intent
 from .scheduler import Scheduler
 from .state import MuikaState
@@ -21,6 +22,7 @@ from .state import MuikaState
 class ActionResult:
     success: bool
     output: str
+    resources: list[Resource] = field(default_factory=list)
 
 
 @dataclass
@@ -81,12 +83,13 @@ class Executor:
         probability = clamp(state.attention, 0.2, 0.9)
         return random() < probability
 
-    async def _perform(self, intent: Intent, state: MuikaState) -> str:
+    async def _perform(self, intent: Intent, state: MuikaState) -> ActionOutput:
         handler = get_action_handler(intent.name)
         if not handler:
             raise NotImplementedError(f"Action for intent {intent.name} is not implemented.")
 
         self._cooldown[intent.name] = datetime.now()
+        # invoke_action now definitely returns ActionOutput
         return await invoke_action(handler, intent, state, self)
 
     async def execute(self, intent: Intent, state: MuikaState) -> ExecutionOutcome:
@@ -104,7 +107,9 @@ class Executor:
         # 2. 执行
         try:
             perform_result = await self._perform(intent, state)
-            action_result = ActionResult(success=True, output=str(perform_result))
+            action_result = ActionResult(
+                success=True, output=perform_result.content, resources=perform_result.resources
+            )
         except Exception as e:
             action_result = ActionResult(success=False, output=str(e))
 

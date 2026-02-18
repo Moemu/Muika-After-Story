@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from json import JSONDecodeError
-from typing import Optional, Type, TypeVar, Union
+from typing import List, Optional, Type, TypeVar, Union
 
 from nonebot import logger
 from pydantic import BaseModel, Field, TypeAdapter
@@ -10,6 +10,7 @@ from muika.config import get_model_config_manager
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.json_utils import extract_json_from_text
 from muika.llm.utils.thought_processor import general_processor
+from muika.models import Resource
 
 from .events import Event
 from .intents import DoNothingIntent, Intent, SendMessageIntent
@@ -69,14 +70,22 @@ class MuikaBrain:
         prompt: str,
         system: str,
         response_model: Union[Type[TModel], TypeAdapter[TModel]],
+        resources: Optional[List[Resource]] = None,
     ) -> TModel:
         # 如果是 BaseModel 类型，转换为 TypeAdapter 统一处理
+
         if isinstance(response_model, TypeAdapter):
             adapter = response_model
         else:
             adapter = TypeAdapter(response_model)
 
-        request = ModelRequest(prompt, system=system, format="json", json_schema=adapter)
+        request = ModelRequest(
+            prompt,
+            system=system,
+            format="json",
+            json_schema=adapter,
+            resources=resources or [],
+        )
         completions = await self.model.ask(request)
         if not completions.succeed:
             raise RuntimeError(f"模型调用失败: {completions.text}")
@@ -185,8 +194,12 @@ class MuikaBrain:
                 f"{state.last_executed_intent.reason or 'no explicit reason'}.\n"
             )
 
+        resources: list[Resource] = []
         if event.type == "user_message":
             context = f"User said: '{event.payload.message.message}'"
+            # 提取用户消息中的多模态资源（尚未实现完全，这里预留）
+            # if event.payload.message.resources:
+            #     resources.extend(event.payload.message.resources)
         elif event.type == "time_tick":
             context = "A quiet moment passed."
             if state.loneliness > 0.8:
@@ -203,6 +216,12 @@ class MuikaBrain:
             if event.payload.result:
                 if event.payload.result.success:
                     context += f"Success - {event.payload.result.output}"
+
+                    # 提取 Action 返回的多模态资源
+                    if event.payload.result.resources:
+                        resources.extend(event.payload.result.resources)
+                        context += " (Image/Resource attached)"
+
                 else:
                     context += f"Failure - {event.payload.result.output}"
             else:
@@ -225,9 +244,7 @@ class MuikaBrain:
         # 这里我们捕获潜在的错误，防止思考层崩溃导致主循环退出
         try:
             intent = await self.completions_format(
-                prompt=full_prompt,
-                system=system_prompt,
-                response_model=self.intent_adapter,
+                prompt=full_prompt, system=system_prompt, response_model=self.intent_adapter, resources=resources
             )
 
             # 如果决定回复但内容为空，强制转为 IGNORE
