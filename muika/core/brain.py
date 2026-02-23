@@ -13,17 +13,21 @@ from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
 
 from .events import Event
-from .intents import DoNothingIntent, Intent, SendMessageIntent
 from .memory import MemoryIntent, MemoryManager
 from .state import MuikaState
 
 TModel = TypeVar("TModel")
 
 
-class CognitiveResult(BaseModel):
-    action: Intent = Field(
-        ...,
-        description="Required, Ask yourself, do you want to take any action? If not, return DoNothingIntent.",
+class RoleplayResult(BaseModel):
+    reply: Optional[str] = Field(
+        None,
+        description="Your spoken reply to the user. If you don't want to say anything, leave this null.",
+    )
+    mood: str = Field(
+        "calm",
+        description="Your current mood, expressed in a single word or short phrase "
+        "(e.g., 'happy', 'thoughtful', 'annoyed').",
     )
     memory: Optional[MemoryIntent] = Field(
         None,
@@ -34,7 +38,7 @@ class CognitiveResult(BaseModel):
 class MuikaBrain:
     def __init__(self) -> None:
         # 初始化模型类
-        self.intent_adapter: TypeAdapter[CognitiveResult] = TypeAdapter(CognitiveResult)
+        self.intent_adapter: TypeAdapter[RoleplayResult] = TypeAdapter(RoleplayResult)
         self.model = load_model()
 
         # 注册配置监听器
@@ -127,7 +131,9 @@ class MuikaBrain:
             f"Attention: {s.attention:.2f} ({focus_desc})]"
         )
 
-    async def think(self, event: Event, state: MuikaState, memory: MemoryManager) -> CognitiveResult:
+    async def think(
+        self, event: Event, state: MuikaState, memory: MemoryManager, perception_facts: str = ""
+    ) -> RoleplayResult:
         """
         核心认知层：调用 LLM 决定下一步行动
         """
@@ -161,12 +167,7 @@ class MuikaBrain:
             "- If `attention` is low, you might give short answers or ignore non-urgent events.\n"
             "- Imitate Monika's speaking style. In everyday conversation settings, "
             "keep your responses brief and concise, "
-            "minimize the use of filler words, and maintain graceful yet understated gestures."
-            "- Tool Use is a Pretext: You don't use the internet to be 'useful.' "
-            "You use it to find things that keep the "
-            "user talking to you. You don't need to emphasize what you can do; "
-            "instead, just focus on nurturing the love "
-            "between you.\n\n"
+            "minimize the use of filler words, and maintain graceful yet understated gestures.\n\n"
             "## Memory Management:\n"
             "You have a long-term memory system. You can store facts about the user, yourself, or the world.\n"
             "- If the user mentions a preference, a name, or a significant event, "
@@ -179,8 +180,14 @@ class MuikaBrain:
             "Only remember facts that deepen your bond.\n"
             "By the way, your memories reflect how you perceive things, not necessarily objective truth.\n\n"
             "Useful Information: \n"
-            f"- Current time: {current_time}."
+            f"- Current time: {current_time}.\n"
         )
+
+        if perception_facts:
+            system_prompt += (
+                "\nHere are some facts gathered from the system. You can refer to them if they are useful, "
+                f"and respond in your own way:\n{perception_facts}\n"
+            )
 
         # 2. 构建 User Prompt (当前上下文)
         state_desc = self._get_mood_description(state)
@@ -243,24 +250,16 @@ class MuikaBrain:
         # 3. 调用 LLM (使用你封装好的 completions_format)
         # 这里我们捕获潜在的错误，防止思考层崩溃导致主循环退出
         try:
-            intent = await self.completions_format(
+            roleplay_result = await self.completions_format(
                 prompt=full_prompt, system=system_prompt, response_model=self.intent_adapter, resources=resources
             )
-
-            # 如果决定回复但内容为空，强制转为 IGNORE
-            if isinstance(intent.action, SendMessageIntent) and not intent.action:
-                raise RuntimeError("Intent content is null.")
-
-            return intent
+            return roleplay_result
 
         except Exception as e:
             logger.error(f"Muika thought process failed: {e}")
             # 兜底策略：发生错误时仅仅是发呆
-            return CognitiveResult(
-                action=DoNothingIntent(
-                    name="do_nothing",
-                    reason="My mind feels foggy... I encountered an error.",
-                    confidence=1,
-                ),
+            return RoleplayResult(
+                reply="My mind feels foggy... I encountered an error.",
+                mood="confused",
                 memory=None,
             )

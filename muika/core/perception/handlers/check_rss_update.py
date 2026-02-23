@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from nonebot import logger
 
-from ..intents import CheckRSSUpdateIntent
-from ..state import MuikaState
-from ._registry import register_action
+from ...state import MuikaState
+from ..registry import register_tool
+from ..tools import CheckRSSUpdateTool
 from .rss import RSS_SOURCES, fetch_web_content, parse_rss_feed
 
 
-@register_action("check_rss_update")
-async def handle_check_rss_update(intent: CheckRSSUpdateIntent, state: MuikaState) -> str:
-    rss_source = RSS_SOURCES.get(intent.rss_source)
+@register_tool("check_rss_update")
+async def handle_check_rss_update(tool: CheckRSSUpdateTool, state: MuikaState) -> str:
+    rss_source = RSS_SOURCES.get(tool.rss_source)
     if not rss_source:
-        logger.warning(f"Unknown RSS source: {intent.rss_source}")
-        raise ValueError(f"Unknown RSS source: {intent.rss_source}")
+        logger.warning(f"Unknown RSS source: {tool.rss_source}")
+        raise ValueError(f"Unknown RSS source: {tool.rss_source}")
 
     logger.debug(f"Checking RSS feed: {rss_source.url}")
     feed_data = await fetch_web_content(rss_source.url)
@@ -28,7 +28,6 @@ async def handle_check_rss_update(intent: CheckRSSUpdateIntent, state: MuikaStat
         )
         feed_outlines.append(outline)
 
-    # 行为反作用
     state.boredom *= 0.3
     state.curiosity = min(1.0, state.curiosity + 0.2)
     state.attention = min(1.0, state.attention + 0.1)

@@ -6,7 +6,7 @@ import dateparser
 from nonebot import logger
 
 from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
-from .intents import PlanFutureEventIntent
+from .trigger.intents import PlanFutureEventIntent
 
 
 class Scheduler:

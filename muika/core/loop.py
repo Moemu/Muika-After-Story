@@ -8,9 +8,11 @@ from nonebot import logger
 from .brain import MuikaBrain
 from .events import ActionFeedbackEvent, ActionFeedbackPayload, Event, TimeTickEvent
 from .executor import Executor
-from .intents import DoNothingIntent, Intent, Persistence
 from .memory import MemoryManager
+from .perception.agent import PerceptionAgent
 from .state import MuikaState
+from .trigger.agent import TriggerAgent
+from .trigger.intents import DoNothingIntent, Intent, Persistence, SendMessageIntent
 
 CURIOSITY_THRESHOLD = 0.6
 CURIOSITY_DRIVE_INCREASE = 0.01
@@ -27,6 +29,8 @@ class Muika:
         self.event_queue: asyncio.Queue[Event] = asyncio.Queue()
         self.executor = Executor(self.event_queue)
         self.brain = MuikaBrain()
+        self.perception_agent = PerceptionAgent()
+        self.trigger_agent = TriggerAgent()
 
     async def collect_events(self) -> Event:
         """
@@ -114,17 +118,43 @@ class Muika:
 
             # 3. Self Think (决策)
             if self.should_think(event):
-                intent = await self.brain.think(event, self.state, self.memory)
+                # 3.1 Perception Phase
+                perception_facts = ""
+                if event.type == "user_message":
+                    query = event.payload.message.message
+                    logger.debug("Running perception agent...")
+                    perception_facts = await self.perception_agent.perceive(query, self.state)
+                    logger.debug(f"Perception facts: {perception_facts}")
 
-                if intent.action.name != "do_nothing" and intent.action.confidence > 0.3:
-                    self.state.pending_intents.append(intent.action)
+                # 3.2 Roleplay Phase
+                roleplay_result = await self.brain.think(event, self.state, self.memory, perception_facts)
 
-                if intent.memory and intent.memory.type != "noop":
-                    await self.memory.record_memory(intent.memory)
+                # Update mood
+                if roleplay_result and roleplay_result.mood:
+                    self.state.mood = roleplay_result.mood
 
-                logger.debug(f"Intent created: {intent}")
+                # Create SendMessageIntent if there is a reply
+                if roleplay_result.reply:
+                    reply_intent = SendMessageIntent(
+                        confidence=1.0, content=roleplay_result.reply, reason="Roleplay engine decided to reply."
+                    )
+                    self.state.pending_intents.append(reply_intent)
+
+                if roleplay_result.memory and roleplay_result.memory.type != "noop":
+                    await self.memory.record_memory(roleplay_result.memory)
+
+                logger.debug(f"Roleplay result: {roleplay_result}")
+
+                # 3.3 Trigger Phase
+                if event.type == "user_message" and roleplay_result.reply:
+                    query = event.payload.message.message
+                    logger.debug("Running trigger agent...")
+                    trigger_intent = await self.trigger_agent.trigger(query, roleplay_result.reply, self.state)
+                    if trigger_intent:
+                        logger.debug(f"Trigger agent suggested intent: {trigger_intent}")
+                        self.state.pending_intents.append(trigger_intent)
             else:
-                intent = None
+                roleplay_result = None
 
             # 4. Decide & Execute Actions
             # Decide whether to execute an intent

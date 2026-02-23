@@ -6,7 +6,7 @@ from muika.models import Message
 
 if TYPE_CHECKING:
     from .executor import ActionResult
-    from .intents import Intent
+    from .trigger.intents import Intent
 
 
 @dataclass

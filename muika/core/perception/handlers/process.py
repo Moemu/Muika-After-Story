@@ -5,19 +5,12 @@ import win32gui
 import win32process
 from nonebot import logger
 
-from ...intents import (
-    GetFocusedWindowIntent,
-    GetSystemStatusIntent,
-    ListProcessesIntent,
-)
-from .._registry import register_action
+from ..registry import register_tool
+from ..tools import GetFocusedWindowTool, GetSystemStatusTool, ListProcessesTool
 
 
-@register_action("get_focused_window")
-async def handle_get_focused_window(intent: GetFocusedWindowIntent) -> str:
-    """
-    获取当前活动窗口的标题和进程名
-    """
+@register_tool("get_focused_window")
+async def handle_get_focused_window(tool: GetFocusedWindowTool) -> str:
     try:
         hwnd = win32gui.GetForegroundWindow()
         if not hwnd:
@@ -38,28 +31,10 @@ async def handle_get_focused_window(intent: GetFocusedWindowIntent) -> str:
         return f"Error getting focused window: {str(e)}"
 
 
-@register_action("list_processes")
-async def handle_list_processes(intent: ListProcessesIntent) -> str:
-    """
-    列出当前运行的进程。
-    为了避免 token 爆炸，只列出前 50 个唯一的进程名，排除系统关键进程。
-    """
+@register_tool("list_processes")
+async def handle_list_processes(tool: ListProcessesTool) -> str:
     try:
-        processes = []
-        for proc in psutil.process_iter(["name"]):
-            try:
-                p_name = proc.info["name"]
-                if intent.filter:
-                    if intent.filter.lower() in p_name.lower():
-                        processes.append(p_name)
-                else:
-                    processes.append(p_name)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
-
-        unique_names = sorted(list(set(processes)))
-
-        # 过滤掉一些常见的系统后台进程以减少噪声 (可选)
+        processes = set()
         ignored = {
             "svchost.exe",
             "System",
@@ -70,16 +45,35 @@ async def handle_list_processes(intent: ListProcessesIntent) -> str:
             "services.exe",
             "lsass.exe",
         }
-        filtered_names = [n for n in unique_names if n not in ignored]
 
-        count = len(filtered_names)
-        display_names = filtered_names[:50]  # 最多显示50个
+        for proc in psutil.process_iter(["name"]):
+            try:
+                p_name = proc.info["name"]
+                if p_name in ignored:
+                    continue
+                if tool.filter:
+                    if tool.filter.lower() in p_name.lower():
+                        processes.add(p_name)
+                else:
+                    processes.add(p_name)
+
+                if len(processes) >= 500:  # Hard limit to prevent excessive iteration
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+
+        unique_names = sorted(list(processes))
+        count = len(unique_names)
+
+        start = tool.offset
+        end = start + tool.limit
+        display_names = unique_names[start:end]
 
         output = f"Running Processes (Total unique: {count}):\n"
         output += ", ".join(display_names)
 
-        if count > 50:
-            output += f"\n...and {count - 50} more."
+        if count > end:
+            output += f"\n...and {count - end} more. Use offset={end} to see more."
 
         return output
     except Exception as e:
@@ -87,11 +81,8 @@ async def handle_list_processes(intent: ListProcessesIntent) -> str:
         return f"Error listing processes: {str(e)}"
 
 
-@register_action("get_system_status")
-async def handle_get_system_status(intent: GetSystemStatusIntent) -> str:
-    """
-    获取系统状态 (CPU, 内存, 电池)
-    """
+@register_tool("get_system_status")
+async def handle_get_system_status(tool: GetSystemStatusTool) -> str:
     try:
         cpu_percent = psutil.cpu_percent(interval=1)
         dataset = psutil.virtual_memory()

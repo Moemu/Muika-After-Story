@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 from nonebot import logger
 
-from .intents import Intent, Persistence
+from .trigger.intents import Intent, Persistence
 
 if TYPE_CHECKING:
     from .events import Event
