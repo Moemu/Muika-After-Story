@@ -9,22 +9,6 @@ RSS_SOURCES = {
         topics=["technology", "startup", "ai"],
         update_interval=1800,
     ),
-    # "arxiv_cs_ai": RSSSource(
-    #     id="arxiv_cs_ai",
-    #     name="arXiv CS.AI",
-    #     url="http://export.arxiv.org/rss/cs.AI",
-    #     language="en",
-    #     topics=["ai", "research"],
-    #     update_interval=7200,
-    # ),
-    # "arxiv_cs_cl": RSSSource(
-    #     id="arxiv_cs_cl",
-    #     name="arXiv CS.CL",
-    #     url="http://export.arxiv.org/rss/cs.CL",
-    #     language="en",
-    #     topics=["computational linguistics", "nlp", "research"],
-    #     update_interval=7200,
-    # ),
     "mit_technology_review": RSSSource(
         id="mit_technology_review",
         name="MIT Technology Review",

@@ -1,6 +1,5 @@
 from .events import (
     Event,
-    InternalReflection,
     RSSUpdate,
     TimeTickPayload,
     UserMessagePayload,
@@ -15,7 +14,6 @@ __all__ = [
     "UserMessagePayload",
     "TimeTickPayload",
     "RSSUpdate",
-    "InternalReflection",
     "Muika",
     "muika",
     "MuikaState",

@@ -1,12 +1,8 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Optional, TypeAlias
+from typing import Literal, Optional, TypeAlias
 
 from muika.models import Message
-
-if TYPE_CHECKING:
-    from .executor import ActionResult
-    from .trigger.intents import Intent
 
 
 @dataclass
@@ -27,21 +23,9 @@ class RSSUpdate:
 
 
 @dataclass
-class InternalReflection:
-    internal_monologue: str
-    """内在独白"""
-
-
-@dataclass
 class ScheduledTriggerPayload:
     when: str
     what: str
-
-
-@dataclass
-class ActionFeedbackPayload:
-    intent: "Intent"
-    result: Optional["ActionResult"]
 
 
 @dataclass(frozen=True)
@@ -59,26 +43,10 @@ class TimeTickEvent:
 
 
 @dataclass(frozen=True)
-class InternalReflectionEvent:
-    payload: InternalReflection
-    timestamp: datetime = field(default_factory=datetime.now)
-    type: Literal["internal_reflection"] = "internal_reflection"
-
-
-@dataclass(frozen=True)
 class ScheduledTriggerEvent:
     payload: ScheduledTriggerPayload
     timestamp: datetime = field(default_factory=datetime.now)
     type: Literal["scheduled_trigger"] = "scheduled_trigger"
 
 
-@dataclass(frozen=True)
-class ActionFeedbackEvent:
-    payload: ActionFeedbackPayload
-    timestamp: datetime = field(default_factory=datetime.now)
-    type: Literal["action_feedback"] = "action_feedback"
-
-
-Event: TypeAlias = (
-    UserMessageEvent | TimeTickEvent | InternalReflectionEvent | ScheduledTriggerEvent | ActionFeedbackEvent
-)
+Event: TypeAlias = UserMessageEvent | TimeTickEvent | ScheduledTriggerEvent

@@ -5,8 +5,8 @@ from typing import Optional
 import dateparser
 from nonebot import logger
 
+from .actions.intents import Persistence, PlanFutureEventIntent
 from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
-from .trigger.intents import PlanFutureEventIntent
 
 
 class Scheduler:
@@ -19,30 +19,56 @@ class Scheduler:
         return dateparser.parse(natural_time, settings={"PREFER_DATES_FROM": "future"})
 
     async def schedule(self, intent: PlanFutureEventIntent):
-        when_str = intent.when
-        what_str = intent.what
-        payload = ScheduledTriggerPayload(when_str, what_str)
-
-        target_time = self.parse_time(when_str)
-        if not target_time:
-            logger.error(f"无法解析时间: {when_str}")
+        if intent.trigger_at and intent.trigger_in_seconds is not None:
+            logger.error("trigger_at 与 trigger_in_seconds 不能同时设置")
             return
 
-        now = datetime.now()
-        delay_seconds = (target_time - now).total_seconds()
+        if intent.trigger_at:
+            target_time = self.parse_time(intent.trigger_at)
+            if not target_time:
+                logger.error(f"无法解析时间: {intent.trigger_at}")
+                return
+            delay_seconds = (target_time - datetime.now()).total_seconds()
+            when_text = intent.trigger_at
+        elif intent.trigger_in_seconds is not None:
+            delay_seconds = float(intent.trigger_in_seconds)
+            when_text = f"in {delay_seconds:.0f} seconds"
+        else:
+            logger.error("必须提供 trigger_at 或 trigger_in_seconds")
+            return
 
         if delay_seconds < 0:
             logger.warning("预定时间已过，立即触发")
             delay_seconds = 0
 
-        logger.info(f"计划在 {target_time} ({delay_seconds:.0f}s 后) 触发事件: {payload}")
+        payload = ScheduledTriggerPayload(when=when_text, what=intent.event)
+        logger.info(f"计划在 {delay_seconds:.0f}s 后触发事件: {payload}")
 
-        # 创建后台任务等待
-        asyncio.create_task(self._wait_and_trigger(delay_seconds, payload))
+        asyncio.create_task(
+            self._wait_and_trigger(
+                delay=delay_seconds,
+                payload=payload,
+                persistence=intent.persistence,
+                repeat_interval_seconds=intent.repeat_interval_seconds,
+            )
+        )
 
-    async def _wait_and_trigger(self, delay: float, payload: ScheduledTriggerPayload):
-        await asyncio.sleep(delay)
+    async def _wait_and_trigger(
+        self,
+        delay: float,
+        payload: ScheduledTriggerPayload,
+        persistence: Persistence,
+        repeat_interval_seconds: Optional[float],
+    ):
+        next_delay = delay
+        while True:
+            await asyncio.sleep(next_delay)
+            event = ScheduledTriggerEvent(payload=payload)
+            await self.event_queue.put(event)
 
-        # 时间到了！生产一个事件回传给 Muika
-        event = ScheduledTriggerEvent(payload=payload)
-        await self.event_queue.put(event)
+            if persistence != Persistence.REPEAT:
+                break
+            if not repeat_interval_seconds or repeat_interval_seconds <= 0:
+                logger.warning("repeat 模式下 repeat_interval_seconds 无效，自动降级为一次性触发")
+                break
+            next_delay = float(repeat_interval_seconds)

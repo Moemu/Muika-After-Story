@@ -1,4 +1,3 @@
-import asyncio
 import os
 import re
 import time
@@ -66,7 +65,7 @@ def startup_plugins():
 async def startup():
     logger.info("加载 MAS 框架...")
     logger.info("初始化 Muika 实例...")
-    asyncio.create_task(muika.start())
+    muika.start()
 
     logger.info("加载 MAS 插件...")
     startup_plugins()

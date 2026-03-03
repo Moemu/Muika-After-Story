@@ -17,15 +17,6 @@ class ConversationTurn:
     timestamp: datetime
 
 
-class MemoryIntent(BaseModel):
-    type: Literal["remember", "forget", "noop"]
-    category: Literal["user", "self", "world"]
-    key: str
-    value: Optional[str] = None
-    strength: float = Field(..., ge=0, le=1)
-    reason: Optional[str] = None
-
-
 class MemoryItem(BaseModel):
     category: Literal["user", "self", "world"]
     key: str
@@ -85,31 +76,35 @@ class MemoryManager:
             )
         )
 
-    async def record_memory(self, intent: MemoryIntent):
-        if intent.type == "noop":
-            return
+    async def record_memory(
+        self,
+        type: Literal["remember", "forget"],
+        category: Literal["user", "self", "world"],
+        key: str,
+        value: Optional[str] = None,
+        strength: float = 0.9,
+        reason: Optional[str] = None,
+    ) -> None:
+        storage_key = self._build_key(category, key)
 
-        key = self._build_key(intent.category, intent.key)
-
-        if intent.type == "remember" and intent.value:
-            # 只有 confidence 足够高才覆盖
-            old_item = self.memory.get(key)
-            if old_item and old_item.confidence > intent.strength:
+        if type == "remember" and value is not None:
+            old_item = self.memory.get(storage_key)
+            if old_item and old_item.confidence > strength:
                 return  # 旧记忆更可靠，忽略新记忆
 
-            self.memory[key] = MemoryItem(
-                category=intent.category,
-                key=intent.key,
-                value=intent.value,
-                confidence=intent.strength,
+            self.memory[storage_key] = MemoryItem(
+                category=category,
+                key=key,
+                value=value,
+                confidence=strength,
                 last_updated=datetime.now(),
             )
-            logger.debug(f"Memory Updated: {key} = {intent.value}")
+            logger.debug(f"Memory Updated: {storage_key} = {value!r}")
 
-        elif intent.type == "forget":
-            if key in self.memory:
-                del self.memory[key]
-                logger.debug(f"Memory Forgot: {key}")
+        elif type == "forget":
+            if storage_key in self.memory:
+                del self.memory[storage_key]
+                logger.debug(f"Memory Forgot: {storage_key}")
 
         await self._save()
 
