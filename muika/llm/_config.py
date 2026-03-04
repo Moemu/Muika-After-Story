@@ -51,6 +51,8 @@ class ModelConfig(BaseModel):
     """Dashscope 的 enable_thinking"""
     thinking_budget: Optional[int] = None
     """Dashscope 的 thinking_budget"""
+    incremental_output: bool = stream
+    """Dashscope 的 incremental_output，默认为 stream 的值"""
 
     multimodal: bool = False
     """是否为（或启用）多模态模型"""

@@ -92,6 +92,7 @@ class Dashscope(BaseLLM):
         self.enable_search = self.config.online_search
         self.enable_thinking = self.config.enable_thinking
         self.thinking_budget = self.config.thinking_budget
+        self.incremental_output = self.config.incremental_output
 
         self.extra_headers = (
             {"X-DashScope-DataInspection": '{"input":"cip","output":"cip"}'} if self.config.content_security else {}
@@ -345,7 +346,7 @@ class Dashscope(BaseLLM):
                     tools=tools,
                     parallel_tool_calls=True,
                     enable_search=self.enable_search,
-                    incremental_output=self.stream,  # 给他调成一样的：这个参数只支持流式调用时设置为True
+                    incremental_output=self.incremental_output,
                     headers=self.extra_headers,
                     enable_thinking=self.enable_thinking,
                     thinking_budget=self.thinking_budget,
@@ -368,7 +369,7 @@ class Dashscope(BaseLLM):
                     tools=tools,
                     parallel_tool_calls=True,
                     enable_search=self.enable_search,
-                    incremental_output=self.stream,
+                    incremental_output=self.incremental_output,
                     response_format=response_format,
                 ),
             )
