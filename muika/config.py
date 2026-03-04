@@ -35,6 +35,9 @@ class MASConfig(BaseModel):
     telegram_proxy: Optional[str] = None
     """telegram代理，这个配置项用于获取图片时使用"""
 
+    butler_model: Optional[str] = None
+    """管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
+
 
 mas_config = get_plugin_config(MASConfig)
 

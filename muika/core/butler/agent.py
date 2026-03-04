@@ -23,6 +23,8 @@ from typing import Annotated, Literal, Union
 from nonebot import logger
 from pydantic import BaseModel, Field, TypeAdapter
 
+from muika.config import get_model_config, mas_config
+
 # Import modules for built-in action side-effects so subclasses are loaded.
 from muika.core.actions import BaseAction
 from muika.core.actions import intents as _intents  # noqa: F401
@@ -145,7 +147,8 @@ class ButlerAgent:
         return leaves
 
     def __init__(self) -> None:
-        self.model = load_model()
+        butler_cfg = get_model_config(mas_config.butler_model) if mas_config.butler_model else None
+        self.model = load_model(butler_cfg)
         action_classes = self._leaf_action_classes(BaseAction)
 
         if not action_classes:
