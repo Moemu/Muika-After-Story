@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from datetime import datetime
 from random import random
 
 from nonebot import logger
@@ -11,7 +12,7 @@ from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
 from .events import Event, TimeTickEvent
 from .executor import Executor
-from .memory import MemoryManager
+from .memory import MemoryCategory, MemoryLayer, MemoryManager
 from .state import MuikaState
 
 CURIOSITY_THRESHOLD = 0.6
@@ -93,6 +94,29 @@ class Muika:
 
             inner_conversation_context.clear()
 
+            # ── 首次对话：自动写入 CoreIdentity 记忆
+            if event.type == "session_bootstrap" and self.memory.session.is_first_session:
+                first_time = datetime.now().isoformat()
+                await self.memory.upsert_memory(
+                    layer=MemoryLayer.CORE,
+                    category=MemoryCategory.USER,
+                    key="first_conversation_time",
+                    value=first_time,
+                )
+                logger.info(f"[Memory] Recorded first_conversation_time: {first_time}")
+
+            # ── Butler 预处理：对用户输入匹配相关的 PreferenceProfile 条目
+            injected_preferences = []
+            if event.type == "user_message":
+                all_prefs = self.memory.get_preference_records()
+                if all_prefs:
+                    injected_preferences = await self.butler_agent.fetch_relevant_preferences(
+                        user_input=event.payload.message.message,
+                        preferences=all_prefs,
+                    )
+                else:
+                    logger.debug("[Loop] Butler preprocess skipped — no PREFERENCE records in memory.")
+
             # Ojou-sama conversational loop (Iterative Agent)
             max_inner_loops = 4
             for loop_idx in range(max_inner_loops):
@@ -106,6 +130,7 @@ class Muika:
                     state=self.state,
                     memory=self.memory,
                     conversation_history=inner_conversation_context,
+                    injected_preferences=injected_preferences or None,
                 )
 
                 # 2. Append her raw reply to the inner conversation context
@@ -129,12 +154,23 @@ class Muika:
                     break
 
                 # 4. Butler executes each command and feeds results back
+                any_observation = False
                 for cmd in butler_commands:
                     logger.info(f"[Butler ←] {cmd!r}")
                     butler_report: str = await self.butler_agent.execute_command(cmd, self.state, self.executor)
+                    if not butler_report:
+                        # silent 操作（如写入记忆）：不把结果注入 context，避免 Brain 第二轮审查
+                        logger.debug(f"[Loop] Butler silent op complete — no report injected for: {cmd[:60]!r}")
+                        continue
                     logger.info(f"[Butler →] {butler_report!r}")
                     observation = f"[Butler reports]: {butler_report}"
                     inner_conversation_context.append(Message(message=observation, userid="System", profile="self"))
+                    any_observation = True
+
+                # 如果所有 Butler 命令均为 silent（无 observation 注入），本轮已完成，无需 Brain 再次审查
+                if not any_observation:
+                    logger.debug("[Brain] All butler commands were silent — turn complete.")
+                    break
             else:
                 logger.warning(
                     f"[Brain] reached max inner loops ({max_inner_loops}) without completing — possible butler loop."
@@ -143,6 +179,7 @@ class Muika:
     def start(self):
         logger.info("Muika is waking up...")
         self.is_alive = True
+        asyncio.create_task(self.memory.load())
         asyncio.create_task(self.loop())
 
     def stop(self):

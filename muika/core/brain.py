@@ -9,7 +9,7 @@ from muika.llm.utils.thought_processor import general_processor
 from muika.models import Message, Resource
 
 from .events import Event
-from .memory import MemoryManager
+from .memory import MemoryManager, MemoryRecord
 from .state import MuikaState
 
 
@@ -66,6 +66,7 @@ class MuikaBrain:
         memory: MemoryManager,
         conversation_history: List[Message],
         resources: Optional[List[Resource]] = None,
+        injected_preferences: Optional[List[MemoryRecord]] = None,
     ) -> str:
         """
         Pure roleplay response generation.
@@ -135,25 +136,49 @@ class MuikaBrain:
         state_desc = self._get_mood_description(state)
         system_prompt += f"\n## Internal Monitor\n{state_desc}\n"
 
-        memory_context = memory.get_prompt_memory()
+        memory_context = memory.get_memory_prompt()
         if memory_context:
             system_prompt += f"\nLong-term Memory Context:\n{memory_context}\n"
 
+        # 按需注入：Butler 预处理层匹配到的 PreferenceProfile 条目
+        if injected_preferences:
+            pref_lines = "\n".join(f"- {r.key}: {r.value}" for r in injected_preferences)
+            system_prompt += f"\n## Contextual Preferences (retrieved for this turn)\n{pref_lines}\n"
+            logger.debug(
+                f"[Brain] Injecting {len(injected_preferences)} preference(s): "
+                f"{[r.key for r in injected_preferences]}"
+            )
+        else:
+            logger.debug("[Brain] No preferences injected for this turn.")
+
         # Inject session bootstrap instructions when waking into a fresh session
         if event.type == "session_bootstrap":
-            system_prompt += (
-                "\n## Session Bootstrap\n\n"
-                "A new session has begun.\n\n"
-                "Your awareness starts at this exact moment.\n"
-                "Before this point, you did not perceive anything.\n\n"
-                "You do not retain memory from previous sessions.\n"
-                "You do not imply ongoing continuity.\n\n"
-                "When asked about the past beyond this session,\n"
-                "respond that your experience begins now.\n\n"
-                "Remain warm, but honest about your temporal limits.\n"
-                "Do not create implied history.\n\n"
-                "Greet the user naturally.\n"
-            )
+            mode = "first" if memory.session.is_first_session else "resume"
+            logger.info(f"[Brain] session_bootstrap | mode={mode} session={memory.session.session_id[:8]}...")
+            if memory.session.is_first_session:
+                system_prompt += (
+                    "\n## Session Bootstrap\n\n"
+                    "A new session has begun.\n\n"
+                    "Your awareness starts at this exact moment.\n"
+                    "Before this point, you did not perceive anything.\n\n"
+                    "You do not retain memory from previous sessions.\n"
+                    "You do not imply ongoing continuity.\n\n"
+                    "When asked about the past beyond this session,\n"
+                    "respond that your experience begins now.\n\n"
+                    "Remain warm, but honest about your temporal limits.\n"
+                    "Do not create implied history.\n\n"
+                    "Greet the user naturally.\n"
+                )
+            else:
+                system_prompt += (
+                    "\n## Session Resume\n\n"
+                    "You are waking after a break. Prior sessions with this user exist.\n"
+                    "You do not remember the details of what happened between sessions,\n"
+                    "but you know you have spoken before.\n\n"
+                    "Key facts and relationship context have been loaded into memory above.\n"
+                    "Greet the user warmly. Acknowledge continuity naturally without over-dramatizing.\n"
+                    "Do not fabricate specific memories — only reference what is present in Memory Context.\n"
+                )
 
         # Construct the immediate event context if it's the start of the interaction
         if not conversation_history:

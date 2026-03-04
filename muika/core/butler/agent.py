@@ -28,6 +28,7 @@ from muika.core.actions import BaseAction
 from muika.core.actions import intents as _intents  # noqa: F401
 from muika.core.actions import tools as _tools  # noqa: F401
 from muika.core.executor import Executor
+from muika.core.memory import MemoryRecord
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 
@@ -46,7 +47,28 @@ Guidelines:
   adapt your arguments (e.g. use a different URL, change specific parameters) or choose a DIFFERENT tool.
 - If no suitable tool exists, use {"name": "fetch_web_content", "url": "about:blank"} as fallback.
 
+When using the memory tool, choose the layer carefully:
+- 'core'       → Stable identity facts: user's name/nickname, confirmed occupation, first meeting date,
+                  firmly stated long-term preferences. Ask: "Would forgetting this change how I
+                  fundamentally address this person?" If yes, use 'core'.
+- 'state'      → Time-sensitive context: last topic discussed, recent mood, unresolved questions.
+- 'preference' → Soft long-term preferences: hobbies, food tastes, music, sleep habits.
+- 'archive'    → Reserved for session summaries. Do NOT use directly.
+
 Return ONLY valid JSON — no markdown fences, no commentary.
+"""
+
+_PREFERENCE_MATCH_PROMPT = """\
+You are a relevance filter for a personal AI assistant.
+Given a user message and a list of known preference records about the user,
+identify which records are semantically relevant to the current message.
+
+Be generous with relevance — include a record if the topic is related,
+even if the exact words differ (e.g. "coffee" is relevant to "drinks" or "morning routine").
+
+Return a JSON object: {"relevant_keys": ["key1", "key2", ...]}
+If none are relevant, return {"relevant_keys": []}.
+Return ONLY valid JSON — no markdown, no commentary.
 """
 
 _ANALYSIS_PROMPT = """\
@@ -87,7 +109,7 @@ _AnalysisResult = Annotated[
     Union[_AnalysisDone, _AnalysisRetry],
     Field(discriminator="status"),
 ]
-_analysis_adapter: TypeAdapter = TypeAdapter(_AnalysisResult)
+_analysis_adapter: TypeAdapter[_AnalysisResult] = TypeAdapter(_AnalysisResult)
 
 MAX_BUTLER_LOOPS = 3
 
@@ -138,7 +160,7 @@ class ButlerAgent:
             Union[tuple(action_classes)],  # type: ignore[arg-type]
             Field(discriminator="name"),
         ]
-        self._action_adapter: TypeAdapter = TypeAdapter(ActionUnion)
+        self._action_adapter: TypeAdapter[BaseAction] = TypeAdapter(ActionUnion)
 
         # JSON schema embedded in the tool-selection prompt
         self._schema_json = json.dumps(self._action_adapter.json_schema(), ensure_ascii=False, indent=2)
@@ -146,6 +168,55 @@ class ButlerAgent:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def fetch_relevant_preferences(
+        self,
+        user_input: str,
+        preferences: list[MemoryRecord],
+    ) -> list[MemoryRecord]:
+        """
+        预处理层：对用户输入做一次轻量 LLM 推断，
+        返回 PreferenceProfile 中与当前输入语义相关的条目。
+
+        若 preferences 为空则直接短路返回，不消耗任何推理资源。
+        """
+        if not preferences:
+            logger.debug("[Butler/Preprocess] No PREFERENCE records available, skipping LLM match.")
+            return []
+
+        logger.debug(
+            f"[Butler/Preprocess] Running preference match | "
+            f"input={user_input[:60]!r} candidates={len(preferences)}"
+        )
+        records_text = "\n".join(
+            f"- key={r.key!r}, category={r.category.value}, value={r.value!r}" for r in preferences
+        )
+        prompt = f"User message: {user_input!r}\n\nPreference records:\n{records_text}"
+
+        request = ModelRequest(
+            prompt=prompt,
+            system=_PREFERENCE_MATCH_PROMPT,
+            format="json",
+        )
+
+        try:
+            completion = await self.model.ask(request=request, stream=False)
+            data = json.loads(completion.text)
+            relevant_keys: set[str] = set(data.get("relevant_keys", []))
+            matched = [r for r in preferences if r.key in relevant_keys]
+            logger.debug(
+                f"[Butler/Preprocess] Match result | "
+                f"relevant_keys={sorted(relevant_keys)} "
+                f"matched={len(matched)}/{len(preferences)}"
+            )
+            if matched:
+                logger.info(
+                    f"[Butler/Preprocess] Injecting {len(matched)} preference(s): " f"{[r.key for r in matched]}"
+                )
+            return matched
+        except Exception as e:
+            logger.warning(f"[Butler/Preprocess] Preference match failed: {e}")
+            return []
 
     async def execute_command(
         self,
@@ -209,8 +280,17 @@ class ButlerAgent:
             except Exception as e:
                 logger.exception(f"[Butler] {type(action).__name__} raised: {e}")
                 tool_result_text = f"[Tool error] {e}"
+                output = None  # mark as non-silent on error
 
             logger.debug(f"[Butler] Raw tool output ({len(tool_result_text)} chars): {tool_result_text[:300]!r}")
+
+            # 副作用操作（silent=True）无需 Analysis 和回报，直接返回空字符串
+            if output is not None and output.silent:
+                logger.debug(
+                    f"[Butler] Silent operation ({type(action).__name__}) — "
+                    f"skipping Analysis LLM, no report injected."
+                )
+                return ""
 
             # Record this turn in the history
             turn_record = {

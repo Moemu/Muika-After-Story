@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import func, select
 
-from .orm_models import Usage
+from .orm_models import ArchiveRecordORM, MemoryRecordORM, Usage
 
 
 class UsageORM:
@@ -54,3 +54,102 @@ class UsageORM:
             return
 
         session.add(Usage(plugin=plugin, type=type, date=date, tokens=total_tokens))
+
+
+# ─────────────────────────────────────────────────────────────────
+# MemoryRecordCRUD  —  CORE / STATE / PREFERENCE 层持久化
+# ─────────────────────────────────────────────────────────────────
+
+
+class MemoryRecordCRUD:
+    @staticmethod
+    async def upsert(
+        session: async_scoped_session,
+        layer: str,
+        category: str,
+        key: str,
+        value: str,
+        expires_at: Optional[str] = None,
+    ) -> MemoryRecordORM:
+        """
+        插入或覆盖一条记忆记录（upsert by layer + key）。
+        updated_at 始终更新为当前时间。
+        """
+        now = datetime.now().isoformat()
+        stmt = await session.execute(
+            select(MemoryRecordORM).where(MemoryRecordORM.layer == layer, MemoryRecordORM.key == key).limit(1)
+        )
+        existing = stmt.scalar_one_or_none()
+
+        if existing:
+            existing.category = category
+            existing.value = value
+            existing.updated_at = now
+            existing.expires_at = expires_at
+            return existing
+
+        record = MemoryRecordORM(
+            layer=layer,
+            category=category,
+            key=key,
+            value=value,
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_at,
+        )
+        session.add(record)
+        return record
+
+    @staticmethod
+    async def delete(
+        session: async_scoped_session,
+        layer: str,
+        key: str,
+    ) -> bool:
+        """删除一条记忆记录，返回是否实际删除。"""
+        stmt = await session.execute(
+            select(MemoryRecordORM).where(MemoryRecordORM.layer == layer, MemoryRecordORM.key == key).limit(1)
+        )
+        existing = stmt.scalar_one_or_none()
+        if existing:
+            await session.delete(existing)
+            return True
+        return False
+
+    @staticmethod
+    async def get_all(session: async_scoped_session) -> list[MemoryRecordORM]:
+        """返回全部记忆记录（供启动时全量加载）。"""
+        result = await session.execute(select(MemoryRecordORM))
+        return list(result.scalars().all())
+
+
+# ─────────────────────────────────────────────────────────────────
+# ArchiveCRUD  —  ARCHIVE 层（历史 Session 摘要）持久化
+# ─────────────────────────────────────────────────────────────────
+
+
+class ArchiveCRUD:
+    @staticmethod
+    async def add(
+        session: async_scoped_session,
+        session_id: str,
+        summary: str,
+        period_start: str,
+        period_end: str,
+    ) -> ArchiveRecordORM:
+        """添加一条历史 Session 摘要。"""
+        record = ArchiveRecordORM(
+            session_id=session_id,
+            summary=summary,
+            period_start=period_start,
+            period_end=period_end,
+            created_at=datetime.now().isoformat(),
+        )
+        session.add(record)
+        return record
+
+    @staticmethod
+    async def list_all(session: async_scoped_session) -> list[ArchiveRecordORM]:
+        """返回全部历史摘要，按 period_start 升序。"""
+        result = await session.execute(select(ArchiveRecordORM).order_by(ArchiveRecordORM.period_start))
+        return list(result.scalars().all())

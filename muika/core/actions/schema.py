@@ -22,6 +22,11 @@ class ActionMode(str, Enum):
 class ActionOutput:
     content: str
     resources: list[Resource] = field(default_factory=list)
+    silent: bool = False
+    """
+    True 表示此操作为副作用（如写入记忆），结果不需要回报给核心模型。
+    Butler 将跳过 Analysis LLM 调用，不将任何内容注入 inner context。
+    """
 
 
 class BaseAction(BaseModel):

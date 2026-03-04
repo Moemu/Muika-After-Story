@@ -85,6 +85,7 @@ async def bot_connected():
     global connect_time
     if not connect_time:
         connect_time = time.time()
+    muika.memory.new_session()
     await muika.create_event(SessionBootstrapEvent())
     logger.info("[Bootstrap] Session bootstrap event queued.")
 
