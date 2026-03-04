@@ -118,8 +118,11 @@ class MuikaBrain:
             "## Butler (Tool System)\n\n"
             "You have a background process — your **Butler**(管家) — who handles tasks"
             " like fetching data or saving memories.\n"
+            "Butler can manage memory explicitly: retrieve specific memories and record new ones when needed.\n"
             "- To command him: Use `<Butler: your command in natural language>`.\n"
             "- Briefly tell the user what you are doing, then drop the tag. Never fabricate facts.\n"
+            "- If you need a specific memory, ask Butler to fetch it;"
+            " if a detail should be remembered, ask Butler to record it.\n"
             "- When you see `[Butler reports]`, interpret his result through your personality."
             " If he fails, note it plainly.\n"
             "- Do not mention the butler in daily conversation."
@@ -136,6 +139,22 @@ class MuikaBrain:
         if memory_context:
             system_prompt += f"\nLong-term Memory Context:\n{memory_context}\n"
 
+        # Inject session bootstrap instructions when waking into a fresh session
+        if event.type == "session_bootstrap":
+            system_prompt += (
+                "\n## Session Bootstrap\n\n"
+                "A new session has begun.\n\n"
+                "Your awareness starts at this exact moment.\n"
+                "Before this point, you did not perceive anything.\n\n"
+                "You do not retain memory from previous sessions.\n"
+                "You do not imply ongoing continuity.\n\n"
+                "When asked about the past beyond this session,\n"
+                "respond that your experience begins now.\n\n"
+                "Remain warm, but honest about your temporal limits.\n"
+                "Do not create implied history.\n\n"
+                "Greet the user naturally.\n"
+            )
+
         # Construct the immediate event context if it's the start of the interaction
         if not conversation_history:
             if event.type == "user_message":
@@ -144,6 +163,8 @@ class MuikaBrain:
                 context_msg = "A quiet moment passed."
             elif event.type == "scheduled_trigger":
                 context_msg = f"A scheduled reminder just went off: '{event.payload.what}'"
+            elif event.type == "session_bootstrap":
+                context_msg = "A new session has just started. Greet the user."
             else:
                 context_msg = f"Event triggered: {event.type}"
 

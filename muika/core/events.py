@@ -49,4 +49,10 @@ class ScheduledTriggerEvent:
     type: Literal["scheduled_trigger"] = "scheduled_trigger"
 
 
-Event: TypeAlias = UserMessageEvent | TimeTickEvent | ScheduledTriggerEvent
+@dataclass(frozen=True)
+class SessionBootstrapEvent:
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["session_bootstrap"] = "session_bootstrap"
+
+
+Event: TypeAlias = UserMessageEvent | TimeTickEvent | ScheduledTriggerEvent | SessionBootstrapEvent

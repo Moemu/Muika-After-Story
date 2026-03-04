@@ -29,7 +29,7 @@ from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 from nonebot_plugin_session import SessionIdType, extract_session
 
 from .config import get_model_config_manager
-from .core import UserMessagePayload, muika
+from .core import SessionBootstrapEvent, UserMessagePayload, muika
 from .core.events import UserMessageEvent
 from .llm import ModelCompletions, ModelStreamCompletions
 from .models import Message, Resource
@@ -81,10 +81,12 @@ async def startup():
 
 @driver.on_bot_connect
 async def bot_connected():
-    logger.success("Bot 已连接，消息处理进程开始运行✨")
+    logger.success("Bot 已连接")
     global connect_time
     if not connect_time:
         connect_time = time.time()
+    await muika.create_event(SessionBootstrapEvent())
+    logger.info("[Bootstrap] Session bootstrap event queued.")
 
 
 at_event = on_alconna(
