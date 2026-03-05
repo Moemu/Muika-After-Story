@@ -2,6 +2,7 @@ from .intents import BaseIntent, Persistence, PlanFutureEventIntent
 from .schema import ActionMode, ActionOutput, BaseAction
 from .tools import (
     BaseTool,
+    CaptureCameraPhotoTool,
     CaptureScreenshotTool,
     CheckRSSUpdateTool,
     FetchWebContentTool,
@@ -9,6 +10,8 @@ from .tools import (
     GetSystemStatusTool,
     ListProcessesTool,
     MemoryTool,
+    ReadClipboardTool,
+    SendDesktopNotificationTool,
 )
 
 __all__ = [
@@ -22,8 +25,11 @@ __all__ = [
     "CheckRSSUpdateTool",
     "FetchWebContentTool",
     "CaptureScreenshotTool",
+    "CaptureCameraPhotoTool",
     "ListProcessesTool",
     "GetFocusedWindowTool",
     "GetSystemStatusTool",
     "MemoryTool",
+    "SendDesktopNotificationTool",
+    "ReadClipboardTool",
 ]
