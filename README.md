@@ -38,31 +38,44 @@
 
 - [X] Muika 主交互逻辑开发
 
+- [X] 四层长期记忆系统
+
+- [X] Session 生命周期管理：空闲超时归档、跨 Session Resume 模式
+
+- [X] 动态模型配置，可随时切换模型配置文件
+
 - [ ] 系统交互层开发
 
-- [ ] (Pending) 动态模型配置，可随时切换模型配置文件
+- [ ] (Pending) 核心模型人格优化
 
 ## Core Logic🧠
 
-1. **启动阶段**：加载配置（模型/Embedding/MCP 等），初始化 LLM Provider、记忆与数据库层、调度器与插件系统，并加载可用的 Actions。
-2. **消息进入**：Nonebot2 收到平台消息后进入 Muika 的事件循环，由会话管理器聚合上下文（用户、群组、历史片段等）。
-3. **意图与状态**：核心大脑根据当前状态与消息内容生成本轮意图（Intents）与执行计划（是否需要检索/调用工具/读取网页等）。
-4. **模型推理**：将上下文与系统提示组装成请求，调用已配置的 LLM（可多模态），并解析输出（包含普通回复或工具调用）。
-5. **动作执行**：若触发动作调用，由 Butler 将自然语言命令映射为结构化 Action（区分 immediate / scheduled 模式），执行后把结果回填到上下文中，必要时再次让模型进行总结/二次推理。
-6. **记忆沉淀**：将本轮对话与关键事实写入记忆/数据库（包含可检索的向量化内容），为后续长期一致性提供支持。
-7. **输出与调度**：最终消息回传至平台；同时调度器可触发定时事件（新闻/RSS 更新等），以“外部事件”形式再次进入上述闭环。
+### 大小姐——管家模型
+
+Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言生成，管家模型(Butler Agent)负责工具调用、记忆读写与信息检索。两者通过内联标签 `<Butler: 指令>` 通信，Ojou-sama 在回复中嵌入指令，Butler 静默执行后将结果回填上下文，驱动下一轮推理。
+
+### 事件循环
+
+1. **启动阶段**：加载配置（模型 / MCP 等），初始化 LLM Provider、记忆层与数据库（SQLAlchemy），加载插件与 Actions；`bot_connected` 时先从 DB 完整加载历史记忆，再创建新 Session，最后投递 `SessionBootstrapEvent`。
+2. **消息进入**：Nonebot2 收到平台消息后封装为 `UserMessageEvent` 投入事件队列；Butler 预处理层对用户输入做语义匹配，从 `PreferenceProfile` 层中筛选出相关偏好条目注入本轮推理。
+3. **核心模型内循环推理**：将系统提示、多层记忆摘要、注入偏好及对话历史拼装为请求，调用 LLM 生成回复；解析出 `<Butler: ...>` 指令后交由 Butler 执行。
+4. **管家 Agent 内循环推理**：LLM 将自然语言指令映射为结构化 Action（JSON Schema discriminated union），执行工具 → 分析结果 → 确认完成或请求重试。执行结果经 Agent 消化后返回核心模型进行下一轮循环或者静默返回结束循环。
+5. **记忆沉淀**：记忆分四层持久化至 SQLAlchemy DB：`CORE`（稳定身份事实，每次均注入）、`STATE`（时效性上下文，Resume 时注入最近 3 条）、`PREFERENCE`（长期软偏好，由 Butler 预处理层按需注入）、`ARCHIVE`（Session 历史摘要，按需检索）。
+6. **Session 生命周期**：用户若干小时后无交流后触发 `SessionEndEvent`；Butler 对本次对话生成文字摘要写入 ARCHIVE，随后静默重置 Session（不主动发送消息），等待用户下次发言时以 Resume 模式响应。
+7. **输出与调度**：最终消息经 Executor 回传至平台；调度器可触发定时事件（RSS 更新、预定提醒等），以外部事件形式再次进入上述闭环。
 
 ## Configuration⚙️
 
 **Nonebot 配置项(.env)**
 
-| 配置项            | 类型(默认值)                               | 说明                                                       |
-| ----------------- | ------------------------------------------ | ---------------------------------------------------------- |
-| `master_id`       | str = get_driver().config.superusers.pop() | 对话目标ID。目前仅支持一对一对话。                         |
-| `INPUT_TIMEOUT`   | int = 0                                    | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用 |
-| `LOG_LEVEL`       | str = "INFO"                               | 日志等级                                                   |
-| `TELEGRAM_PROXY`  | Optional[str] = None                       | tg适配器代理，并使用该代理下载文件                         |
-| `ENABLE_ADAPTERS` | list = ["~.onebot.v11", "~.onebot.v12"]    | 在入口文件中启用的 Nonebot 适配器(仅 Debug 环境)           |
+| 配置项            | 类型(默认值)                                 | 说明                                                         |
+| ----------------- | -------------------------------------------- | ------------------------------------------------------------ |
+| `master_id`       | `str = get_driver().config.superusers.pop()` | 对话目标ID。目前仅支持一对一对话。                           |
+| `butler_model`    | `Optional[str] = None`                       | 管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置 |
+| `INPUT_TIMEOUT`   | `int = 0`                                    | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用   |
+| `LOG_LEVEL`       | `str = "INFO"`                               | 日志等级                                                     |
+| `TELEGRAM_PROXY`  | `Optional[str] = None`                       | tg适配器代理，并使用该代理下载文件                           |
+| `ENABLE_ADAPTERS` | `list = ["~.onebot.v11", "~.onebot.v12"]`    | 在入口文件中启用的 Nonebot 适配器(仅 Debug 环境)             |
 
 **模型配置项(configs/models.yml)**
 
