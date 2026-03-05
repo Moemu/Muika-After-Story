@@ -44,7 +44,7 @@
 
 - [X] 动态模型配置，可随时切换模型配置文件
 
-- [ ] 系统交互层开发
+- [X] 系统交互层开发
 
 - [ ] (Pending) 核心模型人格优化
 
@@ -82,10 +82,6 @@ Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言
 支持的模型和具体配置内容可参考 [Muicebot 的模型配置](https://bot.snowy.moe/guide/model)
 
 不支持的字段: `template`, `template_mode`, `stream`, `function_call`
-
-**嵌入配置项(configs/embeddings.yml)**
-
-*Not Supported yet.*
 
 ## Quick Start🚀
 
