@@ -10,7 +10,7 @@ Tool implementations are split by capability into dedicated modules:
 
 from ._base import BaseTool
 from ._device import CaptureCameraPhotoTool, CaptureScreenshotTool
-from ._info import CheckRSSUpdateTool, FetchWebContentTool
+from ._info import CheckRSSUpdateTool, FetchWebContentTool, SearchWikipediaTool
 from ._memory import MemoryTool
 from ._system import (
     GetFocusedWindowTool,
@@ -24,6 +24,7 @@ __all__ = [
     "BaseTool",
     "CheckRSSUpdateTool",
     "FetchWebContentTool",
+    "SearchWikipediaTool",
     "CaptureScreenshotTool",
     "CaptureCameraPhotoTool",
     "ListProcessesTool",

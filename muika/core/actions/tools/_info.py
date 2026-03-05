@@ -68,3 +68,66 @@ class FetchWebContentTool(BaseTool):
         logger.debug(f"[FetchWebContentTool] Fetching: {self.url}")
         content = await extract_web_content(self.url)
         return ActionOutput(content=content)
+
+
+class SearchWikipediaTool(BaseTool):
+    """Search Wikipedia and return a summary of the best matching article."""
+
+    name: Literal["search_wikipedia"] = "search_wikipedia"
+    query: str = Field(
+        ...,
+        description="Search term or article title to look up on Wikipedia.",
+    )
+    language: str = Field(
+        "zh",
+        description="Wikipedia language code, e.g. 'zh' for Chinese, 'en' for English, 'ja' for Japanese.",
+    )
+
+    async def handle(self, state: "MuikaState", executor: "Executor") -> ActionOutput:
+        from urllib.parse import quote
+
+        from aiohttp import ClientSession
+
+        lang = self.language.strip().lower() or "zh"
+        query = self.query.strip()
+
+        # Step 1: OpenSearch to resolve best-matching page title
+        search_url = (
+            f"https://{lang}.wikipedia.org/w/api.php"
+            f"?action=opensearch&search={quote(query)}&limit=1&namespace=0&format=json"
+        )
+        logger.debug(f"[SearchWikipediaTool] OpenSearch: {search_url}")
+        try:
+            async with ClientSession() as session:
+                async with session.get(search_url, timeout=__import__("aiohttp").ClientTimeout(total=10)) as resp:
+                    result = await resp.json(content_type=None)
+        except Exception as e:
+            logger.error(f"[SearchWikipediaTool] Search failed: {e}")
+            return ActionOutput(content=f"Wikipedia search failed: {e}")
+
+        titles: list[str] = result[1] if len(result) > 1 else []
+        if not titles:
+            return ActionOutput(content=f"No Wikipedia article found for: {query!r}")
+
+        page_title = titles[0]
+
+        # Step 2: Fetch page summary via REST API
+        summary_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{quote(page_title)}"
+        logger.debug(f"[SearchWikipediaTool] Summary: {summary_url}")
+        try:
+            async with ClientSession() as session:
+                async with session.get(summary_url, timeout=__import__("aiohttp").ClientTimeout(total=10)) as resp:
+                    data = await resp.json(content_type=None)
+        except Exception as e:
+            logger.error(f"[SearchWikipediaTool] Summary fetch failed: {e}")
+            return ActionOutput(content=f"Failed to fetch Wikipedia summary: {e}")
+
+        title = data.get("title", page_title)
+        extract = data.get("extract", "")
+        page_url = data.get("content_urls", {}).get("desktop", {}).get("page", summary_url)
+
+        if not extract:
+            return ActionOutput(content=f"Wikipedia article '{title}' has no summary available.")
+
+        state.curiosity = min(1.0, state.curiosity + 0.15)
+        return ActionOutput(content=f"# {title}\n\n{extract}\n\nSource: {page_url}")

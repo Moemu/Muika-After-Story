@@ -11,6 +11,7 @@ from .tools import (
     ListProcessesTool,
     MemoryTool,
     ReadClipboardTool,
+    SearchWikipediaTool,
     SendDesktopNotificationTool,
 )
 
@@ -24,6 +25,7 @@ __all__ = [
     "PlanFutureEventIntent",
     "CheckRSSUpdateTool",
     "FetchWebContentTool",
+    "SearchWikipediaTool",
     "CaptureScreenshotTool",
     "CaptureCameraPhotoTool",
     "ListProcessesTool",
