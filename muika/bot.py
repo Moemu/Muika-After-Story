@@ -85,6 +85,7 @@ async def bot_connected():
     global connect_time
     if not connect_time:
         connect_time = time.time()
+    await muika.memory.load()  # 先加载 DB，确保 new_session() 能正确判断 is_first_session
     muika.memory.new_session()
     await muika.create_event(SessionBootstrapEvent())
     logger.info("[Bootstrap] Session bootstrap event queued.")

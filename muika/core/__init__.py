@@ -2,6 +2,7 @@ from .events import (
     Event,
     RSSUpdate,
     SessionBootstrapEvent,
+    SessionEndEvent,
     TimeTickPayload,
     UserMessagePayload,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "TimeTickPayload",
     "RSSUpdate",
     "SessionBootstrapEvent",
+    "SessionEndEvent",
     "Muika",
     "muika",
     "MuikaState",

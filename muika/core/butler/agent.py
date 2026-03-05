@@ -30,7 +30,7 @@ from muika.core.actions import BaseAction
 from muika.core.actions import intents as _intents  # noqa: F401
 from muika.core.actions import tools as _tools  # noqa: F401
 from muika.core.executor import Executor
-from muika.core.memory import MemoryRecord
+from muika.core.memory import MemoryRecord, SessionTurn
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 
@@ -73,8 +73,17 @@ If none are relevant, return {"relevant_keys": []}.
 Return ONLY valid JSON — no markdown, no commentary.
 """
 
+_SESSION_SUMMARY_PROMPT = """\
+You are a skilled butler writing a concise memory log entry for your mistress's personal archive.
+Summarize the following conversation session into a brief, factual paragraph.
+Focus on: topics discussed, decisions made, the user's apparent mood or state, and anything
+your mistress should remember when meeting this person next time.
+
+Be concise (2–5 sentences). Write in the same language as the conversation.
+Return ONLY the summary text — no JSON, no markdown, no commentary.
+"""
+
 _ANALYSIS_PROMPT = """\
-You are a skilled butler evaluating tool execution results.
 
 Given the original command, the execution history, and the latest tool result, decide one of:
   A) The goal is met or enough meaningful data is gathered →
@@ -220,6 +229,33 @@ class ButlerAgent:
         except Exception as e:
             logger.warning(f"[Butler/Preprocess] Preference match failed: {e}")
             return []
+
+    async def summarize_session(self, turns: list[SessionTurn]) -> str:
+        """
+        对本次 Session 的对话记录生成一段简洁的文字摘要，供写入 ARCHIVE 层。
+        由 loop.py 在 session_end 事件时调用，不走 Butler 内循环。
+        """
+        if not turns:
+            logger.debug("[Butler/Summary] No turns to summarize — returning empty string.")
+            return ""
+
+        transcript = "\n".join(f"[{t.role.upper()}] {t.content}" for t in turns)
+        logger.info(f"[Butler/Summary] Summarizing {len(turns)} turns...")
+
+        request = ModelRequest(
+            prompt=f"Session transcript:\n\n{transcript}",
+            system=_SESSION_SUMMARY_PROMPT,
+        )
+        try:
+            completion = await self.model.ask(request=request, stream=False)
+            summary = completion.text.strip()
+            logger.info(
+                f"[Butler/Summary] Done — {len(summary)} chars: {summary[:120]!r}{'...' if len(summary) > 120 else ''}"
+            )
+            return summary
+        except Exception as e:
+            logger.error(f"[Butler/Summary] Summarization LLM failed: {e}")
+            return f"[Summary failed: {e}]"
 
     async def execute_command(
         self,
