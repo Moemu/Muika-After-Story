@@ -10,13 +10,11 @@ from muika.models import Message
 
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
+from .constants import CURIOSITY_THRESHOLD, SESSION_IDLE_TIMEOUT  # noqa: F401
 from .events import Event, SessionEndEvent, TimeTickEvent
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager
 from .state import MuikaState
-
-CURIOSITY_THRESHOLD = 0.6
-SESSION_IDLE_TIMEOUT = 1800.0  # 30 分钟无交流则结束 Session
 
 
 class Muika:

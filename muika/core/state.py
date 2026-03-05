@@ -6,13 +6,7 @@ if TYPE_CHECKING:
     from .events import Event
     from .memory import MemoryManager
 
-# 定义情绪充满所需的时间（秒）
-TIME_TO_FULL_LONELINESS = 3600.0  # 1小时
-TIME_TO_FULL_BOREDOM = 7200.0  # 2小时
-
-# 计算每秒增长率
-LONELINESS_RATE = 1.0 / TIME_TO_FULL_LONELINESS
-BOREDOM_RATE = 1.0 / TIME_TO_FULL_BOREDOM
+from .constants import BOREDOM_RATE, LONELINESS_RATE
 
 
 @dataclass
