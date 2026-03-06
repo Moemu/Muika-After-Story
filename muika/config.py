@@ -38,6 +38,16 @@ class MASConfig(BaseModel):
     butler_model: Optional[str] = None
     """管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
 
+    fs_allowed_paths: List[str] = []
+    """文件操作白名单目录列表。空列表时文件系统工具全部禁用。
+    示例: ["D:/Documents", "D:/Downloads"]"""
+
+    enable_file_write: bool = False
+    """开启文件写入/删除操作（Tier 2）。需同时在 fs_allowed_paths 中声明目标目录。"""
+
+    enable_code_execution: bool = False
+    """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
+
 
 mas_config = get_plugin_config(MASConfig)
 

@@ -88,13 +88,13 @@ class ButlerAgent:
     """
 
     @staticmethod
-    def _leaf_action_classes(base_cls: type) -> list[type]:
-        leaves: list[type] = []
+    def _leaf_action_classes(base_cls: type[BaseAction]) -> list[type[BaseAction]]:
+        leaves: list[type[BaseAction]] = []
 
-        def walk(cls: type) -> None:
+        def walk(cls: type[BaseAction]) -> None:
             subs = cls.__subclasses__()
             if not subs:
-                if not cls.__name__.startswith("Base"):
+                if not cls.__name__.startswith("Base") and getattr(cls, "is_enabled", lambda: True)():
                     leaves.append(cls)
                 return
             for sub in subs:

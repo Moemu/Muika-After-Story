@@ -5,14 +5,19 @@ from .tools import (
     CaptureCameraPhotoTool,
     CaptureScreenshotTool,
     CheckRSSUpdateTool,
+    DeleteFileTool,
+    ExecutePythonTool,
     FetchWebContentTool,
     GetFocusedWindowTool,
     GetSystemStatusTool,
+    ListDirectoryTool,
     ListProcessesTool,
     MemoryTool,
     ReadClipboardTool,
+    ReadFileTool,
     SearchWikipediaTool,
     SendDesktopNotificationTool,
+    WriteFileTool,
 )
 
 __all__ = [
@@ -34,4 +39,9 @@ __all__ = [
     "MemoryTool",
     "SendDesktopNotificationTool",
     "ReadClipboardTool",
+    "ListDirectoryTool",
+    "ReadFileTool",
+    "WriteFileTool",
+    "DeleteFileTool",
+    "ExecutePythonTool",
 ]
