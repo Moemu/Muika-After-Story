@@ -17,7 +17,13 @@ filters out tools where is_enabled() returns False.
 from ._base import BaseTool
 from ._device import CaptureCameraPhotoTool, CaptureScreenshotTool
 from ._executor import ExecutePythonTool
-from ._filesystem import DeleteFileTool, ListDirectoryTool, ReadFileTool, WriteFileTool
+from ._filesystem import (
+    DeleteFileTool,
+    EditFileTool,
+    ListDirectoryTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 from ._info import CheckRSSUpdateTool, FetchWebContentTool, SearchWikipediaTool
 from ._memory import MemoryTool
 from ._system import (
@@ -44,6 +50,7 @@ __all__ = [
     "ListDirectoryTool",
     "ReadFileTool",
     "WriteFileTool",
+    "EditFileTool",
     "DeleteFileTool",
     "ExecutePythonTool",
 ]

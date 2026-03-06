@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 from nonebot import logger
 from pydantic import Field
@@ -187,6 +187,123 @@ class WriteFileTool(BaseTool):
         except Exception as e:
             logger.error(f"[WriteFileTool] Failed: {e}")
             return ActionOutput(content=f"[WriteFileTool] Error: {e}")
+
+
+class EditFileTool(BaseTool):
+    """Edit an existing text file within the allowed paths using precise operations.
+    Supports three operations:
+    - 'replace': find an exact string and replace it (must match exactly once).
+    - 'insert':  insert lines before a given 1-based line number.
+    - 'delete_lines': remove a range of lines (inclusive, 1-based).
+    Requires ENABLE_FILE_WRITE=true.
+    """
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        return bool(mas_config.fs_allowed_paths) and mas_config.enable_file_write
+
+    name: Literal["edit_file"] = "edit_file"
+    path: str = Field(..., description="Absolute or relative path of the file to edit.")
+    operation: Literal["replace", "insert", "delete_lines"] = Field(
+        ...,
+        description=(
+            "'replace': replace old_string with new_string (must appear exactly once). "
+            "'insert': insert new_string before line_number (1-based). "
+            "'delete_lines': delete lines from line_start to line_end inclusive (1-based)."
+        ),
+    )
+    old_string: Optional[str] = Field(
+        None,
+        description="Required for 'replace'. The exact string to find in the file.",
+    )
+    new_string: Optional[str] = Field(
+        None,
+        description="Required for 'replace' and 'insert'. The replacement or inserted text.",
+    )
+    line_number: Optional[int] = Field(
+        None,
+        description="Required for 'insert'. 1-based line number to insert before. "
+        "Use 0 or a number beyond EOF to append.",
+    )
+    line_start: Optional[int] = Field(
+        None,
+        description="Required for 'delete_lines'. First line to delete (1-based, inclusive).",
+    )
+    line_end: Optional[int] = Field(
+        None,
+        description="Required for 'delete_lines'. Last line to delete (1-based, inclusive).",
+    )
+    encoding: str = Field("utf-8", description="File encoding, default utf-8.")
+
+    async def handle(self, state: "MuikaState", executor: "Executor") -> ActionOutput:
+        try:
+            resolved = _resolve_and_check(self.path, require_write=True)
+        except _FSError as e:
+            return ActionOutput(content=f"[EditFileTool] {e}")
+
+        if not resolved.exists():
+            return ActionOutput(content=f"[EditFileTool] File not found: {resolved}")
+        if not resolved.is_file():
+            return ActionOutput(content=f"[EditFileTool] Not a file: {resolved}")
+
+        try:
+            original = resolved.read_text(encoding=self.encoding, errors="replace")
+        except Exception as e:
+            return ActionOutput(content=f"[EditFileTool] Failed to read file: {e}")
+
+        try:
+            result = self._apply(original)
+        except ValueError as e:
+            return ActionOutput(content=f"[EditFileTool] {e}")
+
+        try:
+            resolved.write_text(result, encoding=self.encoding)
+        except PermissionError:
+            return ActionOutput(content=f"[EditFileTool] Permission denied: {resolved}")
+        except Exception as e:
+            logger.error(f"[EditFileTool] Failed to write: {e}")
+            return ActionOutput(content=f"[EditFileTool] Error writing file: {e}")
+
+        logger.info(f"[EditFileTool] Applied '{self.operation}' to {resolved}")
+        return ActionOutput(content=f"File edited successfully ({self.operation}): {resolved}")
+
+    def _apply(self, text: str) -> str:
+        if self.operation == "replace":
+            if self.old_string is None or self.new_string is None:
+                raise ValueError("'replace' requires both old_string and new_string.")
+            count = text.count(self.old_string)
+            if count == 0:
+                raise ValueError("old_string not found in file.")
+            if count > 1:
+                raise ValueError(
+                    f"old_string appears {count} times; it must match exactly once. "
+                    "Add more surrounding context to make it unique."
+                )
+            return text.replace(self.old_string, self.new_string, 1)
+
+        if self.operation == "insert":
+            if self.new_string is None or self.line_number is None:
+                raise ValueError("'insert' requires new_string and line_number.")
+            lines = text.splitlines(keepends=True)
+            # line_number is 1-based; 0 or beyond EOF → append
+            idx = max(0, self.line_number - 1)
+            insert_text = self.new_string if self.new_string.endswith("\n") else self.new_string + "\n"
+            lines.insert(idx, insert_text)
+            return "".join(lines)
+
+        if self.operation == "delete_lines":
+            if self.line_start is None or self.line_end is None:
+                raise ValueError("'delete_lines' requires line_start and line_end.")
+            if self.line_start < 1 or self.line_end < self.line_start:
+                raise ValueError("line_start must be ≥ 1 and ≤ line_end.")
+            lines = text.splitlines(keepends=True)
+            total = len(lines)
+            start_idx = min(self.line_start - 1, total)
+            end_idx = min(self.line_end, total)
+            del lines[start_idx:end_idx]
+            return "".join(lines)
+
+        raise ValueError(f"Unknown operation: {self.operation!r}")
 
 
 class DeleteFileTool(BaseTool):
