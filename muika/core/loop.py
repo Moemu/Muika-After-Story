@@ -13,6 +13,8 @@ from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
 from .constants import (  # noqa: F401
     CURIOSITY_THRESHOLD,
+    LONELINESS_PROACTIVE_RELIEF,
+    PROACTIVE_COOLDOWN,
     SESSION_IDLE_TIMEOUT,
     TOPIC_FOLLOWUP_TIMEOUT,
 )
@@ -70,7 +72,12 @@ class Muika:
             return None
 
         if self.state.loneliness > 0.8:
-            logger.debug("TimeTick: loneliness threshold breached \u2014 emotional pipeline.")
+            # 检查主动发言冷却期，避免连续倾诉
+            if self.state.last_proactive_at is not None:
+                since_last = (datetime.now() - self.state.last_proactive_at).total_seconds()
+                if since_last < PROACTIVE_COOLDOWN:
+                    return None
+            logger.debug("TimeTick: loneliness threshold breached — emotional pipeline.")
             return "emotional"
 
         if self.state.boredom > 0.6:
@@ -270,6 +277,17 @@ class Muika:
                 f"[Brain] reached max inner loops ({max_inner_loops}) without completing — possible butler loop."
             )
 
+        # 主动发言（孤独驱动）后的情感释放
+        # 说出来会好一点，但孤独本身不会因为说了一句话就消失
+        if event.type == "time_tick":
+            prev = self.state.loneliness
+            self.state.loneliness = max(0.0, self.state.loneliness - LONELINESS_PROACTIVE_RELIEF)
+            self.state.last_proactive_at = datetime.now()
+            logger.debug(
+                f"[State] Proactive relief — loneliness {prev:.2f} → {self.state.loneliness:.2f} "
+                f"(cooldown {PROACTIVE_COOLDOWN / 60:.0f} min)"
+            )
+
     def start(self):
         logger.info("Muika is waking up...")
         self.is_alive = True
@@ -314,6 +332,10 @@ class Muika:
                 f"at session end (engaged={self.state.active_topic.user_engaged})"
             )
             self.state.active_topic = None
+
+        # 真实对话已完整结束，孤独感归零
+        self.state.loneliness = 0.0
+        self.state.last_proactive_at = None
 
         self.memory.new_session()
         logger.info("[Loop] Session reset complete — waiting for next user interaction silently.")

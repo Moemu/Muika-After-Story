@@ -38,6 +38,8 @@ class MuikaState:
 
     last_interaction: datetime = field(default_factory=datetime.now)
     """最近一次交流时间"""
+    last_proactive_at: Optional[datetime] = field(default=None)
+    """最近一次由孤独感驱动主动发言的时间，用于冷却期判断。"""
 
     active_topic: Optional["ActiveTopicState"] = field(default=None)
     """当前活跃话题，由 TopicManager 写入，Session 结束时清空并评分。"""
