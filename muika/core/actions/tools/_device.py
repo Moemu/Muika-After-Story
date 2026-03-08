@@ -32,6 +32,15 @@ class CaptureScreenshotTool(BaseTool):
 
         try:
             screenshot = ImageGrab.grab()
+        except OSError as e:
+            return ActionOutput(
+                content=f"[CaptureScreenshotTool] Screen capture failed (headless or no display available): {e}"
+            )
+        except Exception as e:
+            logger.error(f"[CaptureScreenshotTool] Failed: {e}")
+            return ActionOutput(content=f"[CaptureScreenshotTool] Failed to capture screenshot: {e}")
+
+        try:
             screenshot.thumbnail((1920, 1080))
             timestamp = int(datetime.now().timestamp())
             file_path = temp_dir / f"screenshot_{timestamp}.png"
@@ -44,7 +53,7 @@ class CaptureScreenshotTool(BaseTool):
             )
         except Exception as e:
             logger.error(f"[CaptureScreenshotTool] Failed: {e}")
-            return ActionOutput(content=f"Failed to capture screenshot: {e}")
+            return ActionOutput(content=f"[CaptureScreenshotTool] Failed to save screenshot: {e}")
 
 
 class CaptureCameraPhotoTool(BaseTool):

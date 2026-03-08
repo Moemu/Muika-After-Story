@@ -22,18 +22,24 @@ class ListProcessesTool(BaseTool):
     offset: int = Field(0, description="Number of processes to skip for pagination.")
 
     async def handle(self, state: "MuikaState", executor: "Executor") -> ActionOutput:
+        import sys
+
         import psutil
 
-        ignored = {
-            "svchost.exe",
-            "System",
-            "Registry",
-            "smss.exe",
-            "csrss.exe",
-            "wininit.exe",
-            "services.exe",
-            "lsass.exe",
-        }
+        ignored = (
+            {
+                "svchost.exe",
+                "System",
+                "Registry",
+                "smss.exe",
+                "csrss.exe",
+                "wininit.exe",
+                "services.exe",
+                "lsass.exe",
+            }
+            if sys.platform == "win32"
+            else {"kthreadd", "ksoftirqd", "kworker"}
+        )
         try:
             processes: set[str] = set()
             for proc in psutil.process_iter(["name"]):
@@ -69,6 +75,11 @@ class GetFocusedWindowTool(BaseTool):
     name: Literal["get_focused_window"] = "get_focused_window"
 
     async def handle(self, state: "MuikaState", executor: "Executor") -> ActionOutput:
+        import sys
+
+        if sys.platform != "win32":
+            return ActionOutput(content="[GetFocusedWindowTool] Not supported on this platform (Windows only).")
+
         import psutil
         import win32gui
         import win32process
@@ -170,6 +181,13 @@ class ReadClipboardTool(BaseTool):
             suffix = f"\n...(truncated, {len(text) - max_len} chars omitted)" if len(text) > max_len else ""
             logger.debug(f"[ReadClipboardTool] Read {len(text)} chars from clipboard")
             return ActionOutput(content=f"Clipboard content:\n{truncated}{suffix}")
+        except pyperclip.PyperclipException as e:
+            return ActionOutput(
+                content=(
+                    f"[ReadClipboardTool] Clipboard unavailable (Linux requires xclip or xsel: apt install xclip)"
+                    f": {e}"
+                )
+            )
         except Exception as e:
             logger.error(f"[ReadClipboardTool] Failed: {e}")
             return ActionOutput(content=f"Failed to read clipboard: {e}")

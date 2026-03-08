@@ -26,7 +26,7 @@ dependencies = [
     "psutil>=7.2.2",
     "pydantic>=2.12.5",
     "pyperclip>=1.9.0",
-    "pywin32>=311",
+    "pywin32>=311; sys_platform == 'win32'",
     "sqlalchemy>=2.0.46",
     "trafilatura>=2.0.0",
     "watchdog>=6.0.0",
