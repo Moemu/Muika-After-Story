@@ -115,6 +115,26 @@ command_model = on_alconna(
     permission=SUPERUSER,
 )
 
+command_debug = on_alconna(
+    Alconna(
+        COMMAND_PREFIXES,
+        "debug",
+        Subcommand("topic", help_text="立即触发一次话题旁路管线，测试主动对话效果"),
+        Subcommand("state", help_text="显示当前 Muika 情绪状态"),
+        Subcommand(
+            "state-set",
+            Args["field", str]["value", str],
+            help_text="修改情绪状态字段，用法: .debug state-set <field> <value>",
+        ),
+        Subcommand("topic-reset", help_text="清空当前活跃话题（active_topic）"),
+        meta=CommandMeta("Muika 调试指令"),
+    ),
+    priority=10,
+    block=True,
+    skip_for_unmatch=False,
+    permission=SUPERUSER,
+)
+
 
 def _get_media_filename(media: uniseg.segment.Media, type: Literal["audio", "image", "video", "file"]) -> str:
     """
@@ -342,3 +362,77 @@ async def handle_model_list():
         outputs.append(f"-{name} {config.model_name}({config.provider}) 多模态: {'是' if config.multimodal else '否'}")
 
     await UniMessage("\n".join(outputs)).finish()
+
+
+@command_debug.assign("topic")
+async def handle_debug_topic():
+    await UniMessage("正在触发话题管线...").send()
+    await muika._run_topic_pipeline()
+
+
+@command_debug.assign("state")
+async def handle_debug_state():
+    s = muika.state
+    at = s.active_topic
+
+    lines = [
+        "当前 Muika 情绪状态:",
+        f"  mood        : {s.mood}",
+        f"  attention   : {s.attention:.2f}",
+        f"  loneliness  : {s.loneliness:.2f}",
+        f"  boredom     : {s.boredom:.2f}",
+        f"  curiosity   : {s.curiosity:.2f}",
+    ]
+
+    if at is not None:
+        lines += [
+            "活跃话题:",
+            f"  topic_id    : {at.topic_id}",
+            f"  topic_type  : {at.topic_type}",
+            f"  topic_seed  : {at.topic_seed}",
+            f"  started_at  : {at.started_at.strftime('%H:%M:%S')}",
+            f"  follow_up   : {'已发送' if at.follow_up_sent else '未发送'}",
+            f"  user_engaged: {'是' if at.user_engaged else '否'}",
+        ]
+    else:
+        lines.append("活跃话题: 无")
+
+    await UniMessage("\n".join(lines)).finish()
+
+
+@command_debug.assign("state-set")
+async def handle_debug_state_set(
+    field: Match[str] = AlconnaMatch("field"),
+    value: Match[str] = AlconnaMatch("value"),
+):
+    _FLOAT_FIELDS = {"attention", "loneliness", "boredom", "curiosity"}
+    _STR_FIELDS = {"mood"}
+    _ALL_FIELDS = _FLOAT_FIELDS | _STR_FIELDS
+
+    field_name = field.result
+    raw_value = value.result
+
+    if field_name not in _ALL_FIELDS:
+        await UniMessage(f"未知字段 '{field_name}'，可修改的字段: {', '.join(sorted(_ALL_FIELDS))}").finish()
+
+    if field_name in _FLOAT_FIELDS:
+        try:
+            float_val = float(raw_value)
+        except ValueError:
+            await UniMessage(f"字段 '{field_name}' 需要一个浮点数值（0.0 ~ 1.0）").finish()
+        if not (0.0 <= float_val <= 1.0):
+            await UniMessage(f"字段 '{field_name}' 的值须在 0.0 ~ 1.0 范围内").finish()
+        setattr(muika.state, field_name, float_val)
+        await UniMessage(f"已将 {field_name} 设置为 {float_val:.2f}").finish()
+    else:
+        setattr(muika.state, field_name, raw_value)
+        await UniMessage(f"已将 {field_name} 设置为 '{raw_value}'").finish()
+
+
+@command_debug.assign("topic-reset")
+async def handle_debug_topic_reset():
+    if muika.state.active_topic is None:
+        await UniMessage("当前没有活跃话题，无需重置。").finish()
+    topic_id = muika.state.active_topic.topic_id
+    muika.state.active_topic = None
+    await UniMessage(f"已清空活跃话题: {topic_id}").finish()
