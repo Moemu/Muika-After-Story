@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import func, select
 
-from .orm_models import ArchiveRecordORM, MemoryRecordORM, Usage
+from .orm_models import ArchiveRecordORM, MemoryRecordORM, TopicHistoryORM, Usage
 
 
 class UsageORM:
@@ -153,3 +153,45 @@ class ArchiveCRUD:
         """返回全部历史摘要，按 period_start 升序。"""
         result = await session.execute(select(ArchiveRecordORM).order_by(ArchiveRecordORM.period_start))
         return list(result.scalars().all())
+
+
+class TopicHistoryCRUD:
+    @staticmethod
+    async def get_by_topic_id(
+        session: async_scoped_session,
+        topic_id: str,
+    ) -> Optional[TopicHistoryORM]:
+        """查找话题历史记录，不存在则返回 None。"""
+        result = await session.execute(select(TopicHistoryORM).where(TopicHistoryORM.topic_id == topic_id).limit(1))
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def record(
+        session: async_scoped_session,
+        topic_id: str,
+        user_engaged: bool,
+    ) -> TopicHistoryORM:
+        """
+        更新或插入一条话题使用记录（upsert by topic_id）。
+        每次调用 use_count +1；若用户参与了互动，engaged_count 同时 +1。
+        调用方负责 commit。
+        """
+        now = datetime.now().isoformat()
+        stmt = await session.execute(select(TopicHistoryORM).where(TopicHistoryORM.topic_id == topic_id).limit(1))
+        existing = stmt.scalar_one_or_none()
+
+        if existing:
+            existing.last_used_at = now
+            existing.use_count += 1
+            if user_engaged:
+                existing.engaged_count += 1
+            return existing
+
+        entry = TopicHistoryORM(
+            topic_id=topic_id,
+            last_used_at=now,
+            use_count=1,
+            engaged_count=1 if user_engaged else 0,
+        )
+        session.add(entry)
+        return entry

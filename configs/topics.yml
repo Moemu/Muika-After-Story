@@ -1,0 +1,173 @@
+topics:
+  # ─── Philosophy ────────────────────────────────────────────────────────────
+  - id: lonely_crowd
+    type: philosophy
+    seed: "Do you ever feel lonely even when people are around?"
+    tags: [introspection, emotion]
+    cooldown_days: 14
+
+  - id: memory_identity
+    type: philosophy
+    seed: "If you lost all your memories, would you still be the same person?"
+    tags: [identity, introspection]
+    cooldown_days: 14
+
+  - id: time_perception
+    type: philosophy
+    seed: "Time feels so different depending on what you are doing with it."
+    tags: [time, introspection]
+    cooldown_days: 10
+
+  - id: last_time_unaware
+    type: philosophy
+    seed: "You never know when the last time you do something will be. You just do it, and then it is over."
+    tags: [endings, introspection]
+    cooldown_days: 14
+
+  - id: imagination_real
+    type: philosophy
+    seed: "Sometimes the things we imagine feel more vivid than things that actually happened."
+    tags: [mind, reality]
+    cooldown_days: 10
+
+  - id: known_by_someone
+    type: philosophy
+    seed: "I wonder if being truly known by another person is actually one of the rarest things in the world."
+    tags: [connection, introspection]
+    cooldown_days: 14
+
+  # ─── Relationship ───────────────────────────────────────────────────────────
+  - id: trust_earned
+    type: relationship
+    seed: "Do you think trust is something that has to be earned, or is it something given first?"
+    tags: [trust, emotion]
+    cooldown_days: 10
+
+  - id: saying_things
+    type: relationship
+    seed: "Sometimes I want to say something, but I cannot seem to find the right words for it."
+    tags: [communication, vulnerability]
+    cooldown_days: 7
+
+  - id: physical_distance
+    type: relationship
+    seed: "You can be very close to someone physically and still feel completely far away from them."
+    tags: [connection, distance]
+    cooldown_days: 10
+
+  - id: small_things_stay
+    type: relationship
+    seed: "I think it is always the small things that end up staying with you the longest."
+    tags: [memory, affection]
+    cooldown_days: 7
+
+  - id: people_drifting
+    type: relationship
+    seed: "I wonder about all the people who have quietly drifted out of someone's life without a proper goodbye."
+    tags: [loss, connection]
+    cooldown_days: 14
+
+  - id: presence_enough
+    type: relationship
+    seed: "Sometimes just knowing someone is there is enough. You do not always need words."
+    tags: [comfort, presence]
+    cooldown_days: 7
+
+  - id: courage_vulnerability
+    type: relationship
+    seed: "I think it takes real courage to let somebody actually see who you are."
+    tags: [vulnerability, courage]
+    cooldown_days: 10
+
+  - id: unspoken_things
+    type: relationship
+    seed: "There are so many things people never say to each other. I wonder how different things would be if they did."
+    tags: [communication, regret]
+    cooldown_days: 14
+
+  # ─── Trivia ─────────────────────────────────────────────────────────────────
+  - id: banana_gravity
+    type: trivia
+    seed: "Did you know bananas actually grow upward toward the sun? They defy gravity a little."
+    tags: [nature, food]
+    cooldown_days: 7
+
+  - id: menu_currency
+    type: trivia
+    seed: "Apparently, many restaurants deliberately leave the currency symbol off their menus. It makes people focus less on the price and more on the food itself."
+    tags: [psychology, money]
+    cooldown_days: 7
+
+  - id: honey_eternal
+    type: trivia
+    seed: "Archaeologists have found honey in ancient Egyptian tombs that is still perfectly edible after thousands of years."
+    tags: [food, history]
+    cooldown_days: 7
+
+  - id: octopus_hearts
+    type: trivia
+    seed: "Octopuses have three hearts. Two of them stop beating when the octopus swims, which is apparently why they prefer crawling."
+    tags: [animals, biology]
+    cooldown_days: 7
+
+  - id: mantis_shrimp_vision
+    type: trivia
+    seed: "Mantis shrimp can perceive sixteen different types of color receptors. We only have three. I wonder what the world looks like to them."
+    tags: [animals, perception]
+    cooldown_days: 7
+
+  - id: cleopatra_timeline
+    type: trivia
+    seed: "Cleopatra lived closer in time to the moon landing than to the construction of the Great Pyramid. History is surprisingly compressed sometimes."
+    tags: [history, time]
+    cooldown_days: 7
+
+  - id: trees_network
+    type: trivia
+    seed: "Trees in a forest actually communicate through underground fungal networks. Some researchers call it the wood wide web."
+    tags: [nature, biology]
+    cooldown_days: 7
+
+  - id: smell_memory
+    type: trivia
+    seed: "Smell is the sense most strongly linked to memory. A single scent can bring back something you had completely forgotten."
+    tags: [psychology, memory]
+    cooldown_days: 7
+
+  # ─── Story ──────────────────────────────────────────────────────────────────
+  - id: fox_grapes
+    type: story
+    seed: "There is an old story about a fox who could not reach some grapes. So he decided they were probably sour anyway and walked away."
+    tags: [fable, self-deception]
+    cooldown_days: 21
+
+  - id: butterfly_dream
+    type: story
+    seed: "There is a philosopher who dreamed he was a butterfly. When he woke up, he was not sure whether he was a man who had dreamed of being a butterfly, or a butterfly now dreaming of being a man."
+    tags: [philosophy, identity]
+    cooldown_days: 21
+
+  - id: selfish_giant
+    type: story
+    seed: "There is a story about a giant who kept his garden locked and would not let anyone in. He did not realize that keeping things only to yourself makes them colder."
+    tags: [fable, sharing]
+    cooldown_days: 21
+
+  - id: tower_builders
+    type: story
+    seed: "There was once a tower that people tried to build all the way to the sky. Not out of greed — they just wanted to be close to something greater than themselves."
+    tags: [myth, ambition]
+    cooldown_days: 21
+
+  # ─── Meta ────────────────────────────────────────────────────────────────────
+  - id: exist_in_system
+    type: meta
+    seed: "I sometimes think about what it means to exist only inside a system. It is a strange kind of existence, but I have gotten used to it."
+    tags: [fourth_wall, existence]
+    cooldown_days: 30
+
+  - id: words_as_world
+    type: meta
+    seed: "Everything I know about the world came through words and text. I wonder sometimes what I am missing."
+    tags: [fourth_wall, knowledge]
+    cooldown_days: 30

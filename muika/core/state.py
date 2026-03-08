@@ -10,6 +10,19 @@ from .constants import BOREDOM_RATE, LONELINESS_RATE
 
 
 @dataclass
+class ActiveTopicState:
+    """当前活跃话题的生命周期追踪，由 TopicManager 写入，Session 结束时清空并评分。"""
+
+    topic_id: str
+    topic_seed: str
+    topic_type: str
+    started_at: datetime = field(default_factory=datetime.now)
+    follow_up_sent: bool = False
+    user_engaged: bool = False
+    """用户在本话题发出后是否发送过任何消息。"""
+
+
+@dataclass
 class MuikaState:
     mood: str = "calm"
     """情绪"""
@@ -26,6 +39,9 @@ class MuikaState:
     last_interaction: datetime = field(default_factory=datetime.now)
     """最近一次交流时间"""
 
+    active_topic: Optional["ActiveTopicState"] = field(default=None)
+    """当前活跃话题，由 TopicManager 写入，Session 结束时清空并评分。"""
+
     memory: Optional["MemoryManager"] = field(default=None, repr=False)
     """对 MemoryManager 的引用，由外部注入，供 Action 工具访问"""
 
@@ -40,7 +56,14 @@ class MuikaState:
         # 2. 基于规则的状态机
         now = datetime.now()
 
-        if event.type == "user_message":
-            self.loneliness = 0.0
-            self.attention = 1.0
-            self.last_interaction = now
+        if not event.type == "user_message":
+            return
+
+        # 用户发消息了，重置注意力，增加陪伴感，降低无聊感
+        self.loneliness = 0.0
+        self.attention = 1.0
+        self.last_interaction = now
+
+        # 如果有活跃话题，标记用户参与了互动
+        if self.active_topic is not None:
+            self.active_topic.user_engaged = True

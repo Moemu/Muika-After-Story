@@ -3,6 +3,7 @@ import re
 import time
 from datetime import datetime
 from random import random
+from typing import Literal, Optional
 
 from nonebot import logger
 
@@ -10,11 +11,16 @@ from muika.models import Message
 
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
-from .constants import CURIOSITY_THRESHOLD, SESSION_IDLE_TIMEOUT  # noqa: F401
+from .constants import (  # noqa: F401
+    CURIOSITY_THRESHOLD,
+    SESSION_IDLE_TIMEOUT,
+    TOPIC_FOLLOWUP_TIMEOUT,
+)
 from .events import Event, SessionEndEvent, TimeTickEvent
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager
-from .state import MuikaState
+from .state import ActiveTopicState, MuikaState
+from .topic_manager import TopicManager
 
 
 class Muika:
@@ -31,6 +37,7 @@ class Muika:
         # New "Ojou-sama & Butler" Architecture
         self.brain = MuikaBrain()
         self.butler_agent = ButlerAgent()
+        self.topic_manager = TopicManager()
 
     async def collect_events(self) -> Event:
         try:
@@ -41,20 +48,41 @@ class Muika:
     async def create_event(self, event: Event):
         await self.event_queue.put(event)
 
-    def should_think(self, event: Event) -> bool:
-        if event.type == "time_tick":
-            if self.state.loneliness > 0.8:
-                logger.debug("TimeTick: loneliness threshold breached — will think.")
-                return True
-            if self.state.boredom > 0.6:
-                logger.debug("TimeTick: boredom threshold breached — will think.")
-                return True
-            if self.curiosity_drive > CURIOSITY_THRESHOLD and random() < 0.3:
-                self.curiosity_drive = 0.0
-                logger.debug("TimeTick: curiosity drive fired — will think.")
-                return True
-            return False
-        return True
+    def get_think_mode(self, event: Event) -> Optional[Literal["emotional", "topic"]]:
+        """
+        Determines the cognitive pipeline to use for the current tick.
+
+        - "emotional": loneliness-driven, routes to the main Brain pipeline.
+        - "topic":     boredom/curiosity-driven, routes to the TopicManager pipeline.
+        - None:        idle tick — no LLM call, only state update and bookkeeping.
+
+        For non-time_tick events (user_message, scheduled_trigger, etc.) always returns
+        "emotional" so they are handled by the main Brain unconditionally.
+        When an active topic is in flight, time_tick events are blocked to prevent
+        the emotional pipeline from interrupting an ongoing topic while the user is silent.
+        """
+        if event.type != "time_tick":
+            return "emotional"
+
+        # While a topic is active, suppress automatic time_tick thinking.
+        # User replies will re-enter via their own user_message event ("emotional" path).
+        if self.state.active_topic is not None:
+            return None
+
+        if self.state.loneliness > 0.8:
+            logger.debug("TimeTick: loneliness threshold breached \u2014 emotional pipeline.")
+            return "emotional"
+
+        if self.state.boredom > 0.6:
+            logger.debug("TimeTick: boredom threshold breached \u2014 topic pipeline.")
+            return "topic"
+
+        if self.curiosity_drive > CURIOSITY_THRESHOLD and random() < 0.3:
+            self.curiosity_drive = 0.0
+            logger.debug("TimeTick: curiosity drive fired \u2014 topic pipeline.")
+            return "topic"
+
+        return None
 
     async def loop(self):
         last_tick_time = time.time()
@@ -71,18 +99,42 @@ class Muika:
             logger.debug("Collecting events...")
             event = await self.collect_events()
 
-            if event.type == "time_tick" and not self.should_think(event):
-                # Idle tick update
-                self.state.tick_state(event, dt)
+            # ── Time tick: determine cognitive pipeline ──────────────────────────────
+            think_mode: Optional[Literal["emotional", "topic"]] = "emotional"
+            if event.type == "time_tick":
+                think_mode = self.get_think_mode(event)
+                if think_mode is None:
+                    # Idle tick: update state and run bookkeeping only.
+                    self.state.tick_state(event, dt)
 
-                # ── 空闲超时检测：若本 session 有对话且超过阈値，触发 SessionEndEvent
-                if not _session_end_triggered and self.memory.recent_turns:
-                    idle_seconds = (datetime.now() - self.state.last_interaction).total_seconds()
-                    if idle_seconds >= SESSION_IDLE_TIMEOUT:
-                        logger.info(f"[Loop] Session idle for {idle_seconds / 60:.1f} min — triggering session end.")
-                        _session_end_triggered = True
-                        await self.create_event(SessionEndEvent())
-                continue
+                    # ── Follow-up 续白：话题发出后超过阈值无回复，Muika 继续独自思考 ────────────
+                    if self.state.active_topic is not None and not self.state.active_topic.follow_up_sent:
+                        since_topic = (datetime.now() - self.state.active_topic.started_at).total_seconds()
+                        if since_topic > TOPIC_FOLLOWUP_TIMEOUT:
+                            logger.info(
+                                f"[Topic] Follow-up triggered for {self.state.active_topic.topic_id!r}"
+                                f" ({since_topic:.0f}s since topic start)"
+                            )
+                            followup = await self.brain.expand_topic_followup(
+                                seed_text=self.state.active_topic.topic_seed,
+                                state=self.state,
+                            )
+                            if followup:
+                                await self.executor.send_message(followup)
+                                self.memory.add_context("muika", followup)
+                            # Mark sent regardless of content to prevent re-triggering.
+                            self.state.active_topic.follow_up_sent = True
+
+                    # ── 空闲超时检测：若本 session 有对话且超过阈値，触发 SessionEndEvent ─────────────
+                    if not _session_end_triggered and self.memory.recent_turns:
+                        idle_seconds = (datetime.now() - self.state.last_interaction).total_seconds()
+                        if idle_seconds >= SESSION_IDLE_TIMEOUT:
+                            logger.info(
+                                f"[Loop] Session idle for {idle_seconds / 60:.1f} min — triggering session end."
+                            )
+                            _session_end_triggered = True
+                            await self.create_event(SessionEndEvent())
+                    continue
 
             if event.type == "user_message":
                 logger.info(f"[Event] user_message | content: {event.payload.message.message!r}")
@@ -118,6 +170,26 @@ class Muika:
                     value=first_time,
                 )
                 logger.info(f"[Memory] Recorded first_conversation_time: {first_time}")
+
+            # ── TopicManager 旁路：boredom/curiosity 驱动的话题触发 ──────────────────────────
+            if think_mode == "topic":
+                topic_seed = await self.topic_manager.get_next_topic(self.state)
+                if topic_seed:
+                    expanded = await self.brain.expand_topic(topic_seed, self.state, self.memory)
+                    if expanded:
+                        await self.executor.send_message(expanded)
+                        self.memory.add_context("muika", expanded)
+                        self.state.active_topic = ActiveTopicState(
+                            topic_id=topic_seed.id,
+                            topic_seed=topic_seed.seed,
+                            topic_type=topic_seed.type,
+                        )
+                        self.state.boredom = 0.0
+                        logger.info(f"[Topic] Initiated: {topic_seed.id!r} (type={topic_seed.type})")
+                else:
+                    logger.debug("[Topic] No available seed — skipping topic pipeline this tick.")
+                continue  # Skip Brain on topic ticks
+            # ────────────────────────────────────────────────────────────────────────
 
             # ── Butler 预处理：对用户输入匹配相关的 PreferenceProfile 条目
             injected_preferences = []
@@ -226,6 +298,18 @@ class Muika:
             )
         else:
             logger.debug("[Loop] No turns in this session — skipping archive.")
+
+        # ── 话题开销记录：Session 结束时与 TopicHistory 同步 ─────────────────────────────
+        if self.state.active_topic is not None:
+            await self.topic_manager.record_topic_used(
+                self.state.active_topic.topic_id,
+                user_engaged=self.state.active_topic.user_engaged,
+            )
+            logger.info(
+                f"[Topic] Recorded topic {self.state.active_topic.topic_id!r} "
+                f"at session end (engaged={self.state.active_topic.user_engaged})"
+            )
+            self.state.active_topic = None
 
         self.memory.new_session()
         logger.info("[Loop] Session reset complete — waiting for next user interaction silently.")

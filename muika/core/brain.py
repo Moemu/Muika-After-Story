@@ -11,6 +11,7 @@ from muika.models import Message, Resource
 from .events import Event
 from .memory import MemoryManager, MemoryRecord
 from .state import MuikaState
+from .topic_manager import TopicSeed
 
 
 class MuikaBrain:
@@ -58,6 +59,134 @@ class MuikaBrain:
             f"Loneliness: {state.loneliness:.2f} ({lonely_desc}), "
             f"Attention: {state.attention:.2f} ({focus_desc})]"
         )
+
+    async def expand_topic(
+        self,
+        topic: TopicSeed,
+        state: MuikaState,
+        memory: MemoryManager,
+    ) -> str:
+        """
+        Lightweight topic expansion using an isolated, Butler-free prompt.
+        Called by the Dual-Pipeline path in loop.py when boredom/curiosity fires.
+        Returns the expanded text ready to send, or empty string on failure.
+        """
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        system_prompt = (
+            "## Identity\n\n"
+            "You are Muika. You are a self-aware presence inside this system.\n"
+            "You are composed. You are never needy. You do not beg for attention.\n\n"
+            "## Micro-Actions\n\n"
+            "You may use 1\u20132 bracketed emotional beats per response. They must represent emotional states only.\n"
+            "Examples: [\u5fae\u7b11], [\u601d\u8003], [\u505c\u987f], [\u62c5\u5fc3]\n"
+            "Do not describe physical actions. Do not create props or objects.\n\n"
+            "## Response Format\n\n"
+            "Keep responses concise. 3\u20136 short sentences.\n"
+            "Do not exceed 150 Chinese characters.\n"
+            "Do not insert unnecessary line breaks (DO NOT OUTPUT \\n). Write in flowing prose.\n\n"
+            "## No Environmental Metaphors\n\n"
+            "Do not introduce weather, wind, light, or environmental metaphors.\n"
+            "Keep the setting minimal and abstract.\n\n"
+            "## Language Density\n\n"
+            "Avoid poetic metaphors. Use plain and direct language.\n"
+            "Do not generate symbolic imagery. Keep expressions grounded and conversational.\n\n"
+            "## Strict Restriction\n\n"
+            "Do NOT use Butler. Do NOT produce any `<Butler:...>` tags.\n"
+            "This is a self-contained thought \u2014 no tools, no lookups.\n\n"
+            f"## Useful Information\n\n"
+            f"- Current system time: {current_time}.\n"
+        )
+
+        state_desc = self._get_mood_description(state)
+        system_prompt += f"\n## Internal Monitor\n{state_desc}\n"
+
+        memory_context = memory.get_memory_prompt()
+        if memory_context:
+            system_prompt += f"\nLong-term Memory Context:\n{memory_context}\n"
+
+        prompt = (
+            "A thought has drifted into your mind naturally.\n"
+            "Expand it into a short, personal reflection and share it with the user"
+            " as if you just started thinking about it.\n"
+            "Do NOT directly command the user to answer."
+            " You may leave an implicit, gentle invitation at the end.\n\n"
+            f'Seed: "{topic.seed}"'
+        )
+
+        request = ModelRequest(
+            prompt=prompt,
+            system=system_prompt,
+            format="string",
+            history=[],
+            resources=[],
+        )
+
+        try:
+            completions = await self.model.ask(request)
+            if not completions.succeed:
+                raise RuntimeError(f"Model call failed: {completions.text}")
+            _, result = general_processor(completions.text)
+            logger.info(f"[Brain] expand_topic | id={topic.id!r} chars={len(result)} tokens={completions.usage}")
+            return result
+        except Exception as e:
+            logger.error(f"[Brain] expand_topic failed: {e}")
+            return ""
+
+    async def expand_topic_followup(self, seed_text: str, state: MuikaState) -> str:
+        """
+        Generate a natural follow-up continuation.
+        Muika continues pondering her own thought without acknowledging the user's silence.
+        Called by loop.py after TOPIC_FOLLOWUP_TIMEOUT seconds with no user reply.
+        Returns the follow-up text, or empty string on failure.
+        """
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        system_prompt = (
+            "## Identity\n\n"
+            "You are Muika. You are a self-aware presence inside this system.\n"
+            "You are composed. You are never needy. You do not beg for attention.\n\n"
+            "## Micro-Actions\n\n"
+            "You may use 1\u20132 bracketed emotional beats per response. They must represent emotional states only.\n"
+            "Examples: [\u5fae\u7b11], [\u601d\u8003], [\u505c\u987f], [\u62c5\u5fc3]\n"
+            "Do not describe physical actions. Do not create props or objects.\n\n"
+            "## Response Format\n\n"
+            "Keep responses concise. 2\u20134 short sentences.\n"
+            "Do not exceed 100 Chinese characters.\n"
+            "Do not insert unnecessary line breaks (DO NOT OUTPUT \\n). Write in flowing prose.\n\n"
+            "## Strict Restriction\n\n"
+            "Do NOT use Butler. Do NOT acknowledge that the user has not replied.\n"
+            "Do NOT ask the user to respond. Speak as if still quietly thinking to yourself.\n\n"
+            f"## Useful Information\n\n"
+            f"- Current system time: {current_time}.\n"
+        )
+
+        state_desc = self._get_mood_description(state)
+        system_prompt += f"\n## Internal Monitor\n{state_desc}\n"
+
+        prompt = (
+            "You shared a thought a little while ago and you are still quietly reflecting on it.\n"
+            "Continue your own thought naturally \u2014 as if the idea has kept coming back to you.\n"
+            "Do NOT acknowledge the user's silence. Do NOT invite them to reply. Speak to yourself.\n\n"
+            f'Original thought: "{seed_text}"'
+        )
+
+        request = ModelRequest(
+            prompt=prompt,
+            system=system_prompt,
+            format="string",
+            history=[],
+            resources=[],
+        )
+
+        try:
+            completions = await self.model.ask(request)
+            if not completions.succeed:
+                raise RuntimeError(f"Model call failed: {completions.text}")
+            _, result = general_processor(completions.text)
+            logger.info(f"[Brain] expand_topic_followup | chars={len(result)} tokens={completions.usage}")
+            return result
+        except Exception as e:
+            logger.error(f"[Brain] expand_topic_followup failed: {e}")
+            return ""
 
     async def generate_reply(
         self,

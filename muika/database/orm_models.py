@@ -41,3 +41,16 @@ class ArchiveRecordORM(Model):
     period_start: Mapped[str] = mapped_column(String)
     period_end: Mapped[str] = mapped_column(String)
     created_at: Mapped[str] = mapped_column(String)
+
+
+class TopicHistoryORM(Model):
+    """
+    话题使用历史，用于冷却周期判断和用户参与度评估。
+    topic_id 全局唯一（一行对应一个话题的累计记录）。
+    """
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    topic_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    last_used_at: Mapped[str] = mapped_column(String)  # ISO8601
+    use_count: Mapped[int] = mapped_column(Integer, default=1)
+    engaged_count: Mapped[int] = mapped_column(Integer, default=0)

@@ -147,10 +147,9 @@ dist/
 doc_build/
 
 # Muika-After-Story
-configs.yml
 .vscode
 logs
-configs
+configs/*
+!topics.yml
 plugins
 docs
-models
