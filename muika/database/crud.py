@@ -56,11 +56,7 @@ class UsageORM:
         session.add(Usage(plugin=plugin, type=type, date=date, tokens=total_tokens))
 
 
-# ─────────────────────────────────────────────────────────────────
-# MemoryRecordCRUD  —  CORE / STATE / PREFERENCE 层持久化
-# ─────────────────────────────────────────────────────────────────
-
-
+# MemoryRecordCRUD：CORE / STATE / PREFERENCE 层持久化
 class MemoryRecordCRUD:
     @staticmethod
     async def upsert(
@@ -123,11 +119,7 @@ class MemoryRecordCRUD:
         return list(result.scalars().all())
 
 
-# ─────────────────────────────────────────────────────────────────
-# ArchiveCRUD  —  ARCHIVE 层（历史 Session 摘要）持久化
-# ─────────────────────────────────────────────────────────────────
-
-
+# ArchiveCRUD：ARCHIVE 层（历史 Session 摘要）持久化
 class ArchiveCRUD:
     @staticmethod
     async def add(

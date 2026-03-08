@@ -39,6 +39,8 @@ class Muika:
         self.butler_agent = ButlerAgent()
         self.topic_manager = TopicManager()
 
+        self._session_end_triggered: bool = False
+
     async def collect_events(self) -> Event:
         try:
             return await asyncio.wait_for(self.event_queue.get(), timeout=5.0)
@@ -50,16 +52,14 @@ class Muika:
 
     def get_think_mode(self, event: Event) -> Optional[Literal["emotional", "topic"]]:
         """
-        Determines the cognitive pipeline to use for the current tick.
+        根据当前 tick 决定走哪条认知管线。
 
-        - "emotional": loneliness-driven, routes to the main Brain pipeline.
-        - "topic":     boredom/curiosity-driven, routes to the TopicManager pipeline.
-        - None:        idle tick — no LLM call, only state update and bookkeeping.
+        - "emotional"：孤独感驱动，走主 Brain 管线。
+        - "topic"：无聊 / 好奇心驱动，走 TopicManager 旁路管线。
+        - None：空闲 tick，仅更新状态，不调用 LLM。
 
-        For non-time_tick events (user_message, scheduled_trigger, etc.) always returns
-        "emotional" so they are handled by the main Brain unconditionally.
-        When an active topic is in flight, time_tick events are blocked to prevent
-        the emotional pipeline from interrupting an ongoing topic while the user is silent.
+        非 time_tick 事件（user_message、scheduled_trigger 等）始终返回 "emotional"。
+        话题活跃期间，所有 time_tick 均返回 None，防止情绪管线打断正在进行的话题。
         """
         if event.type != "time_tick":
             return "emotional"
@@ -86,10 +86,7 @@ class Muika:
 
     async def loop(self):
         last_tick_time = time.time()
-
-        # We need to maintain a short-term inner dialogue context if a conversation spans multiple Butler calls
-        inner_conversation_context = []
-        _session_end_triggered = False  # 防止同一 session 重复触发结束事件
+        inner_conversation_context: list[Message] = []
 
         while self.is_alive:
             current_time = time.time()
@@ -98,51 +95,17 @@ class Muika:
 
             logger.debug("Collecting events...")
             event = await self.collect_events()
+            think_mode = self.get_think_mode(event)
 
-            # ── Time tick: determine cognitive pipeline ──────────────────────────────
-            think_mode: Optional[Literal["emotional", "topic"]] = "emotional"
-            if event.type == "time_tick":
-                think_mode = self.get_think_mode(event)
-                if think_mode is None:
-                    # Idle tick: update state and run bookkeeping only.
-                    self.state.tick_state(event, dt)
+            # ── Idle tick: state update and bookkeeping only ──────────────────────
+            if think_mode is None:
+                await self._tick_idle(event, dt)
+                continue
 
-                    # ── Follow-up 续白：话题发出后超过阈值无回复，Muika 继续独自思考 ────────────
-                    if self.state.active_topic is not None and not self.state.active_topic.follow_up_sent:
-                        since_topic = (datetime.now() - self.state.active_topic.started_at).total_seconds()
-                        if since_topic > TOPIC_FOLLOWUP_TIMEOUT:
-                            logger.info(
-                                f"[Topic] Follow-up triggered for {self.state.active_topic.topic_id!r}"
-                                f" ({since_topic:.0f}s since topic start)"
-                            )
-                            followup = await self.brain.expand_topic_followup(
-                                seed_text=self.state.active_topic.topic_seed,
-                                state=self.state,
-                            )
-                            if followup:
-                                await self.executor.send_message(followup)
-                                self.memory.add_context("muika", followup)
-                            # Mark sent regardless of content to prevent re-triggering.
-                            self.state.active_topic.follow_up_sent = True
-
-                    # ── 空闲超时检测：若本 session 有对话且超过阈値，触发 SessionEndEvent ─────────────
-                    if not _session_end_triggered and self.memory.recent_turns:
-                        idle_seconds = (datetime.now() - self.state.last_interaction).total_seconds()
-                        if idle_seconds >= SESSION_IDLE_TIMEOUT:
-                            logger.info(
-                                f"[Loop] Session idle for {idle_seconds / 60:.1f} min — triggering session end."
-                            )
-                            _session_end_triggered = True
-                            await self.create_event(SessionEndEvent())
-                    continue
-
+            # ── Incoming event processing ─────────────────────────────────────────
+            self._log_event(event)
             if event.type == "user_message":
-                logger.info(f"[Event] user_message | content: {event.payload.message.message!r}")
                 self.memory.add_context("user", event.payload.message.message)
-            elif event.type == "scheduled_trigger":
-                logger.info(f"[Event] scheduled_trigger | what: {event.payload.what!r}")
-            else:
-                logger.info(f"[Event] {event.type}")
 
             self.state.tick_state(event, dt)
             logger.debug(
@@ -151,116 +114,161 @@ class Muika:
                 f"boredom={self.state.boredom:.2f} "
                 f"attention={self.state.attention:.2f}"
             )
-
             inner_conversation_context.clear()
 
-            # ── Session 结束事件：归纳摘要 → 写奥 Archive → 重置 Session
+            # ── Session lifecycle ─────────────────────────────────────────────────
             if event.type == "session_end":
-                _session_end_triggered = False  # 重置，下一个 session 可以重新计时
+                self._session_end_triggered = False
                 await self._handle_session_end()
-                continue  # 跳过 Brain，直接开始新 session
+                continue
 
-            # ── 首次对话：自动写入 CoreIdentity 记忆
             if event.type == "session_bootstrap" and self.memory.session.is_first_session:
-                first_time = datetime.now().isoformat()
-                await self.memory.upsert_memory(
-                    layer=MemoryLayer.CORE,
-                    category=MemoryCategory.USER,
-                    key="first_conversation_time",
-                    value=first_time,
-                )
-                logger.info(f"[Memory] Recorded first_conversation_time: {first_time}")
+                await self._record_first_conversation()
 
-            # ── TopicManager 旁路：boredom/curiosity 驱动的话题触发 ──────────────────────────
+            # ── Topic pipeline (boredom / curiosity) ─────────────────────────────
             if think_mode == "topic":
-                topic_seed = await self.topic_manager.get_next_topic(self.state)
-                if topic_seed:
-                    expanded = await self.brain.expand_topic(topic_seed, self.state, self.memory)
-                    if expanded:
-                        await self.executor.send_message(expanded)
-                        self.memory.add_context("muika", expanded)
-                        self.state.active_topic = ActiveTopicState(
-                            topic_id=topic_seed.id,
-                            topic_seed=topic_seed.seed,
-                            topic_type=topic_seed.type,
-                        )
-                        self.state.boredom = 0.0
-                        logger.info(f"[Topic] Initiated: {topic_seed.id!r} (type={topic_seed.type})")
-                else:
-                    logger.debug("[Topic] No available seed — skipping topic pipeline this tick.")
-                continue  # Skip Brain on topic ticks
-            # ────────────────────────────────────────────────────────────────────────
+                await self._run_topic_pipeline()
+                continue
 
-            # ── Butler 预处理：对用户输入匹配相关的 PreferenceProfile 条目
-            injected_preferences = []
-            if event.type == "user_message":
-                all_prefs = self.memory.get_preference_records()
-                if all_prefs:
-                    injected_preferences = await self.butler_agent.fetch_relevant_preferences(
-                        user_input=event.payload.message.message,
-                        preferences=all_prefs,
-                    )
-                else:
-                    logger.debug("[Loop] Butler preprocess skipped — no PREFERENCE records in memory.")
+            # ── Emotional pipeline (main Brain + Butler) ──────────────────────────
+            injected_preferences = await self._fetch_preferences(event)
+            await self._run_brain_pipeline(event, inner_conversation_context, injected_preferences)
 
-            # Ojou-sama conversational loop (Iterative Agent)
-            max_inner_loops = 4
-            for loop_idx in range(max_inner_loops):
-                logger.debug(
-                    f"[Brain] turn {loop_idx + 1}/{max_inner_loops} | history_len={len(inner_conversation_context)}"
+    @staticmethod
+    def _log_event(event: Event) -> None:
+        if event.type == "user_message":
+            logger.info(f"[Event] user_message | content: {event.payload.message.message!r}")
+        elif event.type == "scheduled_trigger":
+            logger.info(f"[Event] scheduled_trigger | what: {event.payload.what!r}")
+        else:
+            logger.info(f"[Event] {event.type}")
+
+    async def _tick_idle(self, event: Event, dt: float) -> None:
+        """处理空闲 time_tick：状态衰减、follow-up 续白、session 空闲超时检测。"""
+        self.state.tick_state(event, dt)
+
+        # follow-up 续白：话题已发出但用户尚未回复
+        if self.state.active_topic is not None and not self.state.active_topic.follow_up_sent:
+            since_topic = (datetime.now() - self.state.active_topic.started_at).total_seconds()
+            if since_topic > TOPIC_FOLLOWUP_TIMEOUT:
+                logger.info(
+                    f"[Topic] Follow-up triggered for {self.state.active_topic.topic_id!r}"
+                    f" ({since_topic:.0f}s since topic start)"
                 )
-
-                # 1. Ask Ojou-sama
-                reply = await self.brain.generate_reply(
-                    event=event,
+                followup = await self.brain.expand_topic_followup(
+                    seed_text=self.state.active_topic.topic_seed,
                     state=self.state,
-                    memory=self.memory,
-                    conversation_history=inner_conversation_context,
-                    injected_preferences=injected_preferences or None,
                 )
+                if followup:
+                    await self.executor.send_message(followup)
+                    self.memory.add_context("muika", followup)
+                self.state.active_topic.follow_up_sent = True  # 防止重复触发
 
-                # 2. Append her raw reply to the inner conversation context
-                inner_conversation_context.append(Message(message=reply, userid="Muika", profile="self"))
+        # session 空闲超时检测
+        if not self._session_end_triggered and self.memory.recent_turns:
+            idle_seconds = (datetime.now() - self.state.last_interaction).total_seconds()
+            if idle_seconds >= SESSION_IDLE_TIMEOUT:
+                logger.info(f"[Loop] Session idle for {idle_seconds / 60:.1f} min — triggering session end.")
+                self._session_end_triggered = True
+                await self.create_event(SessionEndEvent())
 
-                # 3. Intercept Butler commands — format: <Butler: command>
-                butler_commands = re.findall(r"<Butler:\s*(.+?)>", reply, re.DOTALL)
-                clean_reply = re.sub(r"<Butler:\s*(.+?)>", "", reply, flags=re.DOTALL).strip()
+    async def _record_first_conversation(self) -> None:
+        """首次 session 时将 first_conversation_time 写入 CoreIdentity 记忆。"""
+        first_time = datetime.now().isoformat()
+        await self.memory.upsert_memory(
+            layer=MemoryLayer.CORE,
+            category=MemoryCategory.USER,
+            key="first_conversation_time",
+            value=first_time,
+        )
+        logger.info(f"[Memory] Recorded first_conversation_time: {first_time}")
 
-                if butler_commands:
-                    logger.info(f"[Brain] intercepted {len(butler_commands)} butler command(s)")
+    async def _run_topic_pipeline(self) -> None:
+        """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
+        topic_seed = await self.topic_manager.get_next_topic(self.state)
+        if not topic_seed:
+            logger.debug("[Topic] No available seed — skipping topic pipeline this tick.")
+            return
+        expanded = await self.brain.expand_topic(topic_seed, self.state, self.memory)
+        if not expanded:
+            return
+        await self.executor.send_message(expanded)
+        self.memory.add_context("muika", expanded)
+        self.state.active_topic = ActiveTopicState(
+            topic_id=topic_seed.id,
+            topic_seed=topic_seed.seed,
+            topic_type=topic_seed.type,
+        )
+        self.state.boredom = 0.0
+        logger.info(f"[Topic] Initiated: {topic_seed.id!r} (type={topic_seed.type})")
 
-                if clean_reply:
-                    logger.info(f"[Muika → User] {clean_reply!r}")
-                    await self.executor.send_message(clean_reply)
-                    self.memory.add_context("muika", clean_reply)
+    async def _fetch_preferences(self, event: Event) -> list:
+        """通过 Butler 检索当前用户消息相关的 PreferenceProfile 条目。"""
+        if event.type != "user_message":
+            return []
+        all_prefs = self.memory.get_preference_records()
+        if not all_prefs:
+            logger.debug("[Loop] Butler preprocess skipped — no PREFERENCE records in memory.")
+            return []
+        return await self.butler_agent.fetch_relevant_preferences(
+            user_input=event.payload.message.message,
+            preferences=all_prefs,
+        )
 
-                if not butler_commands:
-                    # No butler command — conversation turn is complete
-                    logger.debug("[Brain] no butler commands, turn complete.")
-                    break
+    async def _run_brain_pipeline(
+        self,
+        event: Event,
+        inner_conversation_context: list[Message],
+        injected_preferences: list,
+    ) -> None:
+        """迭代式大小姐 ↔ Butler 管线（情绪驱动路径）。"""
+        max_inner_loops = 4
+        for loop_idx in range(max_inner_loops):
+            logger.debug(
+                f"[Brain] turn {loop_idx + 1}/{max_inner_loops} | history_len={len(inner_conversation_context)}"
+            )
+            reply = await self.brain.generate_reply(
+                event=event,
+                state=self.state,
+                memory=self.memory,
+                conversation_history=inner_conversation_context,
+                injected_preferences=injected_preferences or None,
+            )
+            inner_conversation_context.append(Message(message=reply, userid="Muika", profile="self"))
 
-                # 4. Butler executes each command and feeds results back
-                any_observation = False
-                for cmd in butler_commands:
-                    logger.info(f"[Butler ←] {cmd!r}")
-                    butler_report: str = await self.butler_agent.execute_command(cmd, self.state, self.executor)
-                    if not butler_report:
-                        # silent 操作（如写入记忆）：不把结果注入 context，避免 Brain 第二轮审查
-                        logger.debug(f"[Loop] Butler silent op complete — no report injected for: {cmd[:60]!r}")
-                        continue
-                    logger.info(f"[Butler →] {butler_report!r}")
-                    observation = f"[Butler reports]: {butler_report}"
-                    inner_conversation_context.append(Message(message=observation, userid="System", profile="self"))
-                    any_observation = True
+            butler_commands = re.findall(r"<Butler:\s*(.+?)>", reply, re.DOTALL)
+            clean_reply = re.sub(r"<Butler:\s*(.+?)>", "", reply, flags=re.DOTALL).strip()
 
-                # 如果所有 Butler 命令均为 silent（无 observation 注入），本轮已完成，无需 Brain 再次审查
-                if not any_observation:
-                    logger.debug("[Brain] All butler commands were silent — turn complete.")
-                    break
-            else:
-                logger.warning(
-                    f"[Brain] reached max inner loops ({max_inner_loops}) without completing — possible butler loop."
+            if butler_commands:
+                logger.info(f"[Brain] intercepted {len(butler_commands)} butler command(s)")
+            if clean_reply:
+                logger.info(f"[Muika → User] {clean_reply!r}")
+                await self.executor.send_message(clean_reply)
+                self.memory.add_context("muika", clean_reply)
+            if not butler_commands:
+                logger.debug("[Brain] no butler commands, turn complete.")
+                break
+
+            any_observation = False
+            for cmd in butler_commands:
+                logger.info(f"[Butler ←] {cmd!r}")
+                butler_report: str = await self.butler_agent.execute_command(cmd, self.state, self.executor)
+                if not butler_report:
+                    logger.debug(f"[Loop] Butler silent op complete — no report injected for: {cmd[:60]!r}")
+                    continue
+                logger.info(f"[Butler →] {butler_report!r}")
+                inner_conversation_context.append(
+                    Message(message=f"[Butler reports]: {butler_report}", userid="System", profile="self")
                 )
+                any_observation = True
+
+            if not any_observation:
+                logger.debug("[Brain] All butler commands were silent — turn complete.")
+                break
+        else:
+            logger.warning(
+                f"[Brain] reached max inner loops ({max_inner_loops}) without completing — possible butler loop."
+            )
 
     def start(self):
         logger.info("Muika is waking up...")
@@ -273,11 +281,7 @@ class Muika:
 
     async def _handle_session_end(self):
         """
-        Session 结束处理流程：
-          1. Butler 归纳对话摘要
-          2. 写入 ARCHIVE
-          3. 重置 Session
-          4. 发送新的 SessionBootstrapEvent
+        Session 结束处理流程：归纳摘要 → 写入 ARCHIVE → 记录话题历史 → 重置 Session。
         """
         logger.info("[Loop] Session ending — starting summarization...")
         turns = list(self.memory.recent_turns)
@@ -299,7 +303,7 @@ class Muika:
         else:
             logger.debug("[Loop] No turns in this session — skipping archive.")
 
-        # ── 话题开销记录：Session 结束时与 TopicHistory 同步 ─────────────────────────────
+        # 话题使用记录：Session 结束时与 TopicHistory 同步
         if self.state.active_topic is not None:
             await self.topic_manager.record_topic_used(
                 self.state.active_topic.topic_id,

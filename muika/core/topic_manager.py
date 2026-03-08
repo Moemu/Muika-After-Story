@@ -35,7 +35,7 @@ class TopicSeed:
 
 
 class TopicStore:
-    """Loads and indexes topic seeds from the YAML file."""
+    """从 YAML 文件加载并索引话题种子。"""
 
     def __init__(self, path: Path = _TOPICS_PATH) -> None:
         self._by_type: dict[str, list[TopicSeed]] = {}
@@ -72,24 +72,19 @@ class TopicStore:
 
 
 class TopicManager:
-    """
-    Orchestrates topic selection and history tracking.
-
-    Serves as the interface between loop.py (Dual-Pipeline) and the topic subsystem.
-    The Brain handles prompt construction; TopicManager owns scheduling logic only.
-    """
+    """话题选择与历史追踪的调度器。在 loop.py 的双管线架构中作为旁路入口。"""
 
     def __init__(self) -> None:
         self.store = TopicStore()
 
     async def get_next_topic(self, state: MuikaState) -> Optional[TopicSeed]:
         """
-        Select the next topic seed based on emotional state and cooldown history.
+        根据情绪状态与冷却历史选择下一个话题种子。
 
-        Returns None if:
-        - A topic is already active (state.active_topic is not None)
-        - All candidates are in cooldown
-        - The topic store is empty
+        以下情况返回 None：
+        - 当前已有活跃话题（state.active_topic is not None）
+        - 所有候选话题均在冷却期内
+        - 话题库为空
         """
         if state.active_topic is not None:
             return None
@@ -97,8 +92,7 @@ class TopicManager:
         if self.store.is_empty():
             return None
 
-        # Bias weights toward trivia/story when boredom is the dominant driver,
-        # toward philosophy/relationship when curiosity is the driver.
+        # boredom 主导时偏向 trivia/story；curiosity 主导时偏向 philosophy/relationship
         weights = dict(TOPIC_WEIGHTS)
         if state.boredom > state.curiosity:
             weights["trivia"] = weights.get("trivia", 0.0) + 0.10
@@ -106,7 +100,7 @@ class TopicManager:
             weights["philosophy"] = max(0.0, weights.get("philosophy", 0.0) - 0.10)
             weights["meta"] = max(0.0, weights.get("meta", 0.0) - 0.05)
 
-        # Build per-type candidate lists, filtering out topics still in cooldown.
+        # 按类型构建候选列表，过滤掉仍在冷却期内的话题
         candidates_by_type: dict[str, list[TopicSeed]] = {}
         try:
             db_session = get_scoped_session()
@@ -130,7 +124,7 @@ class TopicManager:
             logger.debug("[TopicManager] All topics are in cooldown — skipping.")
             return None
 
-        # Renormalize weights to available types only.
+        # 仅对有候选的类型重新归一化权重
         filtered_weights = {t: weights.get(t, 0.05) for t in candidates_by_type}
         total = sum(filtered_weights.values())
         if total == 0:
@@ -148,7 +142,7 @@ class TopicManager:
         return chosen
 
     async def record_topic_used(self, topic_id: str, *, user_engaged: bool) -> None:
-        """Persist the topic usage to TopicHistory for future cooldown checks."""
+        """将话题使用记录写入 TopicHistory，供后续冷却期检查。"""
         try:
             db_session = get_scoped_session()
             await TopicHistoryCRUD.record(db_session, topic_id=topic_id, user_engaged=user_engaged)
