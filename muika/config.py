@@ -9,7 +9,7 @@ from typing import Callable, List, Optional
 
 import yaml as yaml_
 from nonebot import get_driver, get_plugin_config, logger
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
@@ -19,10 +19,11 @@ from .llm import ModelConfig
 MODELS_CONFIG_PATH = Path("configs/models.yml").resolve()
 
 _model_config_manager: Optional["ModelConfigManager"] = None
+_default_master_id = list(get_driver().config.superusers)[0] if get_driver().config.superusers else ""
 
 
 class MASConfig(BaseModel):
-    master_id: str = get_driver().config.superusers.pop()
+    master_id: str = _default_master_id
     """对话目标ID"""
 
     input_timeout: int = 0
@@ -47,6 +48,12 @@ class MASConfig(BaseModel):
 
     enable_code_execution: bool = False
     """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
+
+    @field_validator("master_id")
+    def validate_master_id(cls, v):
+        if not v:
+            logger.warning("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
+        return v
 
 
 mas_config = get_plugin_config(MASConfig)
