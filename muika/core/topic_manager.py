@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,10 @@ TOPIC_WEIGHTS: dict[str, float] = {
 }
 
 _TOPICS_PATH = Path(__file__).parent.parent.parent / "configs" / "topics.yml"
+
+# 最近抽取的类型进入队列后，权重会被衰减，避免同一类型连续出现。
+_RECENT_TYPE_PENALTY: float = 0.25
+_RECENT_TYPE_WINDOW: int = 3
 
 
 @dataclass
@@ -76,6 +81,7 @@ class TopicManager:
 
     def __init__(self) -> None:
         self.store = TopicStore()
+        self._recent_types: deque[str] = deque(maxlen=_RECENT_TYPE_WINDOW)
 
     async def get_next_topic(self, state: MuikaState) -> Optional[TopicSeed]:
         """
@@ -124,8 +130,11 @@ class TopicManager:
             logger.debug("[TopicManager] All topics are in cooldown — skipping.")
             return None
 
-        # 仅对有候选的类型重新归一化权重
+        # 仅对有候选的类型重新归一化权重，并对最近已抽取的类型施加衰减惩罚
         filtered_weights = {t: weights.get(t, 0.05) for t in candidates_by_type}
+        for recent_type in self._recent_types:
+            if recent_type in filtered_weights:
+                filtered_weights[recent_type] *= _RECENT_TYPE_PENALTY
         total = sum(filtered_weights.values())
         if total == 0:
             return None
@@ -138,7 +147,11 @@ class TopicManager:
             k=1,
         )[0]
         chosen = random.choice(candidates_by_type[chosen_type])
-        logger.debug(f"[TopicManager] Selected topic: {chosen.id!r} (type={chosen.type})")
+        self._recent_types.append(chosen_type)
+        logger.debug(
+            f"[TopicManager] Selected topic: {chosen.id!r} (type={chosen.type}) "
+            f"recent_types={list(self._recent_types)}"
+        )
         return chosen
 
     async def record_topic_used(self, topic_id: str, *, user_engaged: bool) -> None:
