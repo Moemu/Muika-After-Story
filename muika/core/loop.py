@@ -172,8 +172,12 @@ class Muika:
                 self.state.active_topic.follow_up_sent = True  # 防止重复触发
 
         # session 空闲超时检测
+        # 若话题刚发出，以话题开始时间作为活动基准，避免立即触发 session end
         if not self._session_end_triggered and self.memory.recent_turns:
-            idle_seconds = (datetime.now() - self.state.last_interaction).total_seconds()
+            last_activity = self.state.last_interaction
+            if self.state.active_topic is not None:
+                last_activity = max(last_activity, self.state.active_topic.started_at)
+            idle_seconds = (datetime.now() - last_activity).total_seconds()
             if idle_seconds >= SESSION_IDLE_TIMEOUT:
                 logger.info(f"[Loop] Session idle for {idle_seconds / 60:.1f} min — triggering session end.")
                 self._session_end_triggered = True
