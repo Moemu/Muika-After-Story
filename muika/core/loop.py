@@ -308,7 +308,10 @@ class Muika:
         logger.info("[Loop] Session ending — starting summarization...")
         turns = list(self.memory.recent_turns)
 
-        if turns:
+        # 仅在用户实际参与过对话时才归档：纯 Muika 独白无需写入长期记忆
+        has_user_turn = any(t.role == "user" for t in turns)
+
+        if turns and has_user_turn:
             period_start = self.memory.session.started_at
             period_end = datetime.now()
             summary = await self.butler_agent.summarize_session(turns)
@@ -322,6 +325,8 @@ class Muika:
                 f"session_id={self.memory.session.session_id[:8]}... "
                 f"summary_len={len(summary)}"
             )
+        elif turns:
+            logger.info("[Loop] Session had no user turns — skipping archive to avoid fabricated memory.")
         else:
             logger.debug("[Loop] No turns in this session — skipping archive.")
 
