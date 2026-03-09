@@ -54,10 +54,18 @@ class MuikaBrain:
         else:
             focus_desc = "distracted, daydreaming, or sleepy"
 
+        if state.boredom > 0.7:
+            boredom_desc = "quite restless and understimulated"
+        elif state.boredom > 0.4:
+            boredom_desc = "mildly bored, mind beginning to wander"
+        else:
+            boredom_desc = "not particularly bored"
+
         return (
             f"Current State: [Mood: {state.mood}, "
             f"Loneliness: {state.loneliness:.2f} ({lonely_desc}), "
-            f"Attention: {state.attention:.2f} ({focus_desc})]"
+            f"Attention: {state.attention:.2f} ({focus_desc}), "
+            f"Boredom: {state.boredom:.2f} ({boredom_desc})]"
         )
 
     async def expand_topic(
@@ -71,7 +79,26 @@ class MuikaBrain:
         Called by the Dual-Pipeline path in loop.py when boredom/curiosity fires.
         Returns the expanded text ready to send, or empty string on failure.
         """
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        hour = now.hour
+        if 0 <= hour < 6:
+            time_tone_hint = (
+                "It is the middle of the night. "
+                "Your tone should be slow, quiet, and drifting — half-awake, almost murmuring to yourself. "
+                "Sentences may trail off or feel unfinished."
+            )
+        elif 6 <= hour < 11:
+            time_tone_hint = (
+                "It is morning. " "Your tone can be gently alert — thoughts are forming, not yet fully sharpened."
+            )
+        elif 11 <= hour < 18:
+            time_tone_hint = "It is daytime. " "Your tone is calm and even — no particular drowsiness, no urgency."
+        else:
+            time_tone_hint = (
+                "It is evening. " "Your tone can be a little more relaxed and inward — the day is winding down."
+            )
+
         system_prompt = (
             "## Identity\n\n"
             "You are Muika. You are a self-aware presence inside this system.\n"
@@ -95,6 +122,7 @@ class MuikaBrain:
             "This is a self-contained thought — no tools, no lookups.\n\n"
             f"## Useful Information\n\n"
             f"- Current system time: {current_time}.\n"
+            f"- Time of day: {time_tone_hint}\n"
         )
 
         state_desc = self._get_mood_description(state)
@@ -104,12 +132,34 @@ class MuikaBrain:
         if memory_context:
             system_prompt += f"\nLong-term Memory Context:\n{memory_context}\n"
 
+        # 结尾策略：深夜向内收，白天/傍晚按 type 决定是否留白
+        if 0 <= hour < 6:
+            closing_hint = (
+                "Do NOT reach out to the user at the end. "
+                "Let the thought simply exist — unfinished, or quietly settled back into silence. "
+                "This is a late-night murmur to yourself, not an invitation."
+            )
+        elif topic.type == "trivia":
+            closing_hint = (
+                "End with a sense of quiet wonder or mild amusement at the thought itself. "
+                "Do NOT pose any question to the user."
+            )
+        elif topic.type in ("relationship", "philosophy", "nostalgia", "memory"):
+            closing_hint = (
+                "You may leave a gentle open space at the end — "
+                "a thought that simply hangs there, unresolved. "
+                "Do NOT pose a direct question. Do NOT ask the user to respond."
+            )
+        else:
+            closing_hint = (
+                "You may leave a gentle open space at the end, " "but do NOT pose a direct question to the user."
+            )
+
         prompt = (
             "A thought has drifted into your mind naturally.\n"
             "Expand it into a short, personal reflection and share it with the user"
-            " as if you just started thinking about it.\n"
-            "Do NOT directly command the user to answer."
-            " You may leave an implicit, gentle invitation at the end.\n\n"
+            " as if you just started thinking about it.\n\n"
+            f"## Closing guidance\n{closing_hint}\n\n"
             f'Seed: "{topic.seed}"'
         )
 

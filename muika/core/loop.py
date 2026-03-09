@@ -81,12 +81,12 @@ class Muika:
             return "emotional"
 
         if self.state.boredom > 0.6:
-            logger.debug("TimeTick: boredom threshold breached \u2014 topic pipeline.")
+            logger.debug("TimeTick: boredom threshold breached — topic pipeline.")
             return "topic"
 
         if self.curiosity_drive > CURIOSITY_THRESHOLD and random() < 0.3:
             self.curiosity_drive = 0.0
-            logger.debug("TimeTick: curiosity drive fired \u2014 topic pipeline.")
+            logger.debug("TimeTick: curiosity drive fired — topic pipeline.")
             return "topic"
 
         return None
@@ -204,6 +204,7 @@ class Muika:
         if not expanded:
             return
         await self.executor.send_message(expanded)
+        logger.info(f"[Topic] Sent: {expanded!r}")
         self.memory.add_context("muika", expanded)
         self.state.active_topic = ActiveTopicState(
             topic_id=topic_seed.id,
