@@ -16,7 +16,6 @@ from .constants import (  # noqa: F401
     LONELINESS_PROACTIVE_RELIEF,
     PROACTIVE_COOLDOWN,
     SESSION_IDLE_TIMEOUT,
-    TOPIC_FOLLOWUP_TIMEOUT,
 )
 from .events import Event, SessionEndEvent, TimeTickEvent
 from .executor import Executor
@@ -151,25 +150,8 @@ class Muika:
             logger.info(f"[Event] {event.type}")
 
     async def _tick_idle(self, event: Event, dt: float) -> None:
-        """处理空闲 time_tick：状态衰减、follow-up 续白、session 空闲超时检测。"""
+        """处理空闲 time_tick：状态衰减、session 空闲超时检测。"""
         self.state.tick_state(event, dt)
-
-        # follow-up 续白：话题已发出但用户尚未回复
-        if self.state.active_topic is not None and not self.state.active_topic.follow_up_sent:
-            since_topic = (datetime.now() - self.state.active_topic.started_at).total_seconds()
-            if since_topic > TOPIC_FOLLOWUP_TIMEOUT:
-                logger.info(
-                    f"[Topic] Follow-up triggered for {self.state.active_topic.topic_id!r}"
-                    f" ({since_topic:.0f}s since topic start)"
-                )
-                followup = await self.brain.expand_topic_followup(
-                    seed_text=self.state.active_topic.topic_seed,
-                    state=self.state,
-                )
-                if followup:
-                    await self.executor.send_message(followup)
-                    self.memory.add_context("muika", followup)
-                self.state.active_topic.follow_up_sent = True  # 防止重复触发
 
         # session 空闲超时检测
         # 若话题刚发出，以话题开始时间作为活动基准，避免立即触发 session end

@@ -12,9 +12,6 @@ SESSION_IDLE_TIMEOUT: float = 60.0 * 30  # 会话无交互超时时长（秒，3
 # Butler Agent 参数
 MAX_BUTLER_LOOPS: int = 3  # 管家 Agent 单次命令最大内循环次数
 
-# TopicManager 参数
-TOPIC_FOLLOWUP_TIMEOUT: float = 180.0  # 话题发出后无回复超过此时长（秒）时触发续白
-
 # 主动发言（孤独驱动）行为参数
 PROACTIVE_COOLDOWN: float = 60.0 * 60 * 1  # 两次主动情绪发言之间的最小间隔（1 小时）。
 # 发言后孤独感不会清零，但此冷却期保证她不会连续倾诉。

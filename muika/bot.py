@@ -391,7 +391,6 @@ async def handle_debug_state():
             f"  topic_type  : {at.topic_type}",
             f"  topic_seed  : {at.topic_seed}",
             f"  started_at  : {at.started_at.strftime('%H:%M:%S')}",
-            f"  follow_up   : {'已发送' if at.follow_up_sent else '未发送'}",
             f"  user_engaged: {'是' if at.user_engaged else '否'}",
         ]
     else:

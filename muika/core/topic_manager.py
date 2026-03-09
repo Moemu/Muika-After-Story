@@ -106,25 +106,40 @@ class TopicManager:
             weights["philosophy"] = max(0.0, weights.get("philosophy", 0.0) - 0.10)
             weights["meta"] = max(0.0, weights.get("meta", 0.0) - 0.05)
 
-        # 按类型构建候选列表，过滤掉仍在冷却期内的话题
-        candidates_by_type: dict[str, list[TopicSeed]] = {}
+        # 按类型构建候选列表，过滤掉仍在冷却期内的话题，并记录个体 engaged 权重
+        # candidates_by_type 存储 (TopicSeed, individual_weight) 元组
+        candidates_by_type: dict[str, list[tuple[TopicSeed, float]]] = {}
         try:
             db_session = get_scoped_session()
             now = datetime.now()
             for ttype in self.store.types():
-                valid: list[TopicSeed] = []
+                valid: list[tuple[TopicSeed, float]] = []
                 for t in self.store.get_by_type(ttype):
                     row = await TopicHistoryCRUD.get_by_topic_id(db_session, t.id)
                     if row:
                         last_used = datetime.fromisoformat(row.last_used_at)
                         if (now - last_used) < timedelta(days=t.cooldown_days):
                             continue
-                    valid.append(t)
+                        # engaged-rate 降权：用过 2 次以上但参与率低的话题降低被选中概率
+                        ind_w = 1.0
+                        if row.use_count >= 2:
+                            rate = row.engaged_count / row.use_count
+                            if rate < 0.3:
+                                ind_w = 0.3
+                            elif rate < 0.5:
+                                ind_w = 0.6
+                        valid.append((t, ind_w))
+                    else:
+                        valid.append((t, 1.0))
                 if valid:
                     candidates_by_type[ttype] = valid
         except Exception as e:
             logger.error(f"[TopicManager] DB cooldown check failed: {e} — falling back to no-cooldown selection")
-            candidates_by_type = {t: self.store.get_by_type(t) for t in self.store.types() if self.store.get_by_type(t)}
+            candidates_by_type = {
+                t: [(s, 1.0) for s in self.store.get_by_type(t)]
+                for t in self.store.types()
+                if self.store.get_by_type(t)
+            }
 
         if not candidates_by_type:
             logger.debug("[TopicManager] All topics are in cooldown — skipping.")
@@ -146,7 +161,14 @@ class TopicManager:
             weights=list(filtered_weights.values()),
             k=1,
         )[0]
-        chosen = random.choice(candidates_by_type[chosen_type])
+
+        # 在选定类型内按 individual_weight 加权选择
+        type_candidates = candidates_by_type[chosen_type]
+        chosen = random.choices(
+            [c[0] for c in type_candidates],
+            weights=[c[1] for c in type_candidates],
+            k=1,
+        )[0]
         self._recent_types.append(chosen_type)
         logger.debug(
             f"[TopicManager] Selected topic: {chosen.id!r} (type={chosen.type}) "

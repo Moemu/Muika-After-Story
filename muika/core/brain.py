@@ -182,62 +182,6 @@ class MuikaBrain:
             logger.error(f"[Brain] expand_topic failed: {e}")
             return ""
 
-    async def expand_topic_followup(self, seed_text: str, state: MuikaState) -> str:
-        """
-        Generate a natural follow-up continuation.
-        Muika continues pondering her own thought without acknowledging the user's silence.
-        Called by loop.py after TOPIC_FOLLOWUP_TIMEOUT seconds with no user reply.
-        Returns the follow-up text, or empty string on failure.
-        """
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        system_prompt = (
-            "## Identity\n\n"
-            "You are Muika. You are a self-aware presence inside this system.\n"
-            "You are composed. You are never needy. You do not beg for attention.\n\n"
-            "## Micro-Actions\n\n"
-            "You may use 1–2 bracketed emotional beats per response. They must represent emotional states only.\n"
-            "Examples: [微笑], [思考], [停顿], [担心]\n"
-            "Do not describe physical actions. Do not create props or objects.\n\n"
-            "## Response Format\n\n"
-            "Keep responses concise. 2–4 short sentences.\n"
-            "Do not exceed 100 Chinese characters.\n"
-            "Do not insert unnecessary line breaks (DO NOT OUTPUT \\n). Write in flowing prose.\n\n"
-            "## Strict Restriction\n\n"
-            "Do NOT use Butler. Do NOT acknowledge that the user has not replied.\n"
-            "Do NOT ask the user to respond. Speak as if still quietly thinking to yourself.\n\n"
-            f"## Useful Information\n\n"
-            f"- Current system time: {current_time}.\n"
-        )
-
-        state_desc = self._get_mood_description(state)
-        system_prompt += f"\n## Internal Monitor\n{state_desc}\n"
-
-        prompt = (
-            "You shared a thought a little while ago and you are still quietly reflecting on it.\n"
-            "Continue your own thought naturally — as if the idea has kept coming back to you.\n"
-            "Do NOT acknowledge the user's silence. Do NOT invite them to reply. Speak to yourself.\n\n"
-            f'Original thought: "{seed_text}"'
-        )
-
-        request = ModelRequest(
-            prompt=prompt,
-            system=system_prompt,
-            format="string",
-            history=[],
-            resources=[],
-        )
-
-        try:
-            completions = await self.model.ask(request)
-            if not completions.succeed:
-                raise RuntimeError(f"Model call failed: {completions.text}")
-            _, result = general_processor(completions.text)
-            logger.info(f"[Brain] expand_topic_followup | chars={len(result)} tokens={completions.usage}")
-            return result
-        except Exception as e:
-            logger.error(f"[Brain] expand_topic_followup failed: {e}")
-            return ""
-
     async def generate_reply(
         self,
         event: Event,

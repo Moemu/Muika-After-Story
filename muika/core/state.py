@@ -17,7 +17,6 @@ class ActiveTopicState:
     topic_seed: str
     topic_type: str
     started_at: datetime = field(default_factory=datetime.now)
-    follow_up_sent: bool = False
     user_engaged: bool = False
     """用户在本话题发出后是否发送过任何消息。"""
 
