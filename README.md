@@ -11,9 +11,9 @@
   <a href='https://qm.qq.com/q/y1gC9PU4IU'><img src="https://img.shields.io/badge/QQ群-26時聊天室-purple" alt="QQ群组"></a>
 </div>
 
-> [!WARNING]
+> [!NOTE]
 >
-> 本项目目前属于早期开发阶段(Alpha)，许多功能尚未完善，使用时可能会出现诸多问题
+> 本项目目前属于测试阶段(Beta)，在细节处理（比如角色语调、工具执行）时可能存在问题，还请留意。
 
 ## Introduction✨
 
