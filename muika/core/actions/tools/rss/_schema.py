@@ -41,4 +41,4 @@ class RSSSource:
     url: str
     language: str
     topics: list[str]
-    update_interval: int
+    digest: bool = False

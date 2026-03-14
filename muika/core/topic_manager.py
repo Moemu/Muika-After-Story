@@ -4,6 +4,7 @@ import random
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +16,37 @@ from muika.database.crud import TopicHistoryCRUD
 
 from .state import MuikaState
 
+
+class TopicSource(Enum):
+    STATIC = "static"
+    """内部预设哲学/彩蛋/关系话题"""
+    EVENT = "event"
+    """外部输入的动态事件话题（如 RSS 摘要）"""
+
+
+@dataclass
+class BaseTopic:
+    id: str
+    source: TopicSource
+    category: str
+    content: str = ""
+    tags: list[str] = field(default_factory=list)
+    cooldown_days: int = 7
+
+
+@dataclass
+class StaticTopic(BaseTopic):
+    source = TopicSource.STATIC
+
+
+@dataclass
+class EventTopic(BaseTopic):
+    source = TopicSource.EVENT
+    title: str = ""
+    content: str = ""
+    date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+
 TOPIC_WEIGHTS: dict[str, float] = {
     "relationship": 0.35,
     "philosophy": 0.25,
@@ -24,26 +56,15 @@ TOPIC_WEIGHTS: dict[str, float] = {
 }
 
 _TOPICS_PATH = Path(__file__).parent.parent.parent / "configs" / "topics.yml"
-
-# 最近抽取的类型进入队列后，权重会被衰减，避免同一类型连续出现。
 _RECENT_TYPE_PENALTY: float = 0.25
 _RECENT_TYPE_WINDOW: int = 3
 
 
-@dataclass
-class TopicSeed:
-    id: str
-    type: str
-    seed: str
-    tags: list[str] = field(default_factory=list)
-    cooldown_days: int = 7
-
-
 class TopicStore:
-    """从 YAML 文件加载并索引话题种子。"""
+    """从 YAML 文件加载并索引静态话题种子。"""
 
     def __init__(self, path: Path = _TOPICS_PATH) -> None:
-        self._by_type: dict[str, list[TopicSeed]] = {}
+        self._by_category: dict[str, list[StaticTopic]] = {}
         self._load(path)
 
     def _load(self, path: Path) -> None:
@@ -51,54 +72,102 @@ class TopicStore:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
             for entry in data.get("topics", []):
-                seed = TopicSeed(
+                # 兼容旧字段：如果存在 content 则作为 content
+                concept = entry.get("concept", entry.get("content", ""))
+                topic = StaticTopic(
                     id=entry["id"],
-                    type=entry["type"],
-                    seed=entry["seed"],
+                    source=TopicSource.STATIC,
+                    category=entry.get("category", entry.get("type", "misc")),
+                    content=concept,
                     tags=entry.get("tags", []),
                     cooldown_days=entry.get("cooldown_days", 7),
                 )
-                self._by_type.setdefault(seed.type, []).append(seed)
-            total = sum(len(v) for v in self._by_type.values())
-            logger.info(f"[TopicStore] Loaded {total} topic seeds across {len(self._by_type)} types")
+                self._by_category.setdefault(topic.category, []).append(topic)
+            total = sum(len(v) for v in self._by_category.values())
+            logger.info(f"[TopicStore] Loaded {total} static topics across {len(self._by_category)} categories")
         except FileNotFoundError:
-            logger.warning(f"[TopicStore] topics.yml not found at {path} — topic system disabled")
+            logger.warning(f"[TopicStore] topics.yml not found at {path} — static topics disabled")
         except Exception as e:
             logger.error(f"[TopicStore] Failed to load topics.yml: {e}")
 
-    def get_by_type(self, topic_type: str) -> list[TopicSeed]:
-        return self._by_type.get(topic_type, [])
+    def get_by_category(self, category: str) -> list[StaticTopic]:
+        return self._by_category.get(category, [])
 
-    def types(self) -> list[str]:
-        return list(self._by_type.keys())
+    def categories(self) -> list[str]:
+        return list(self._by_category.keys())
 
     def is_empty(self) -> bool:
-        return not self._by_type
+        return not self._by_category
 
 
 class TopicManager:
-    """话题选择与历史追踪的调度器。在 loop.py 的双管线架构中作为旁路入口。"""
+    """话题选择与历史追踪的调度器。"""
 
     def __init__(self) -> None:
         self.store = TopicStore()
-        self._recent_types: deque[str] = deque(maxlen=_RECENT_TYPE_WINDOW)
+        self._recent_categories: deque[str] = deque(maxlen=_RECENT_TYPE_WINDOW)
+        self._event_queue: deque[EventTopic] = deque()
 
-    async def get_next_topic(self, state: MuikaState) -> Optional[TopicSeed]:
-        """
-        根据情绪状态与冷却历史选择下一个话题种子。
+    def enqueue_event(self, topic: EventTopic) -> None:
+        """从外部（如 DigestAgent / 管家）注入动态新闻。"""
+        self._event_queue.append(topic)
 
-        以下情况返回 None：
-        - 当前已有活跃话题（state.active_topic is not None）
-        - 所有候选话题均在冷却期内
-        - 话题库为空
-        """
+    async def _get_available_candidates(self) -> dict[str, list[tuple[StaticTopic, float]]]:
+        """获取所有度过冷却期的话题，并根据历史互动率计算独立权重。"""
+        candidates: dict[str, list[tuple[StaticTopic, float]]] = {}
+        try:
+            db_session = get_scoped_session()
+            now = datetime.now()
+
+            for category in self.store.categories():
+                valid_topics: list[tuple[StaticTopic, float]] = []
+                for topic in self.store.get_by_category(category):
+                    history_record = await TopicHistoryCRUD.get_by_topic_id(db_session, topic.id)
+
+                    if not history_record:
+                        valid_topics.append((topic, 1.0))
+                        continue
+
+                    last_used_time = datetime.fromisoformat(history_record.last_used_at)
+                    if (now - last_used_time) < timedelta(days=topic.cooldown_days):
+                        continue
+
+                    # 计算互动率权重惩罚：如果多次抛出但用户不理睬，则降低选中概率
+                    topic_weight = 1.0
+                    if history_record.use_count >= 2:
+                        engagement_rate = history_record.engaged_count / history_record.use_count
+                        if engagement_rate < 0.3:
+                            topic_weight = 0.3
+                        elif engagement_rate < 0.5:
+                            topic_weight = 0.6
+
+                    valid_topics.append((topic, topic_weight))
+
+                if valid_topics:
+                    candidates[category] = valid_topics
+            return candidates
+        except Exception as e:
+            logger.error(f"[TopicManager] DB cooldown check failed: {e}")
+            return {
+                category: [(topic, 1.0) for topic in self.store.get_by_category(category)]
+                for category in self.store.categories()
+                if self.store.get_by_category(category)
+            }
+
+    async def get_next_topic(self, state: MuikaState) -> Optional[BaseTopic]:
         if state.active_topic is not None:
             return None
 
+        # 优先级 1：外部动态事件
+        if self._event_queue:
+            topic = self._event_queue.popleft()
+            logger.debug(f"[TopicManager] Popped event topic: {topic.id}")
+            return topic
+
+        # 优先级 2 & 3：根据权重和冷却机制从静态话题中选择
         if self.store.is_empty():
             return None
 
-        # boredom 主导时偏向 trivia/story；curiosity 主导时偏向 philosophy/relationship
         weights = dict(TOPIC_WEIGHTS)
         if state.boredom > state.curiosity:
             weights["trivia"] = weights.get("trivia", 0.0) + 0.10
@@ -106,73 +175,39 @@ class TopicManager:
             weights["philosophy"] = max(0.0, weights.get("philosophy", 0.0) - 0.10)
             weights["meta"] = max(0.0, weights.get("meta", 0.0) - 0.05)
 
-        # 按类型构建候选列表，过滤掉仍在冷却期内的话题，并记录个体 engaged 权重
-        # candidates_by_type 存储 (TopicSeed, individual_weight) 元组
-        candidates_by_type: dict[str, list[tuple[TopicSeed, float]]] = {}
-        try:
-            db_session = get_scoped_session()
-            now = datetime.now()
-            for ttype in self.store.types():
-                valid: list[tuple[TopicSeed, float]] = []
-                for t in self.store.get_by_type(ttype):
-                    row = await TopicHistoryCRUD.get_by_topic_id(db_session, t.id)
-                    if row:
-                        last_used = datetime.fromisoformat(row.last_used_at)
-                        if (now - last_used) < timedelta(days=t.cooldown_days):
-                            continue
-                        # engaged-rate 降权：用过 2 次以上但参与率低的话题降低被选中概率
-                        ind_w = 1.0
-                        if row.use_count >= 2:
-                            rate = row.engaged_count / row.use_count
-                            if rate < 0.3:
-                                ind_w = 0.3
-                            elif rate < 0.5:
-                                ind_w = 0.6
-                        valid.append((t, ind_w))
-                    else:
-                        valid.append((t, 1.0))
-                if valid:
-                    candidates_by_type[ttype] = valid
-        except Exception as e:
-            logger.error(f"[TopicManager] DB cooldown check failed: {e} — falling back to no-cooldown selection")
-            candidates_by_type = {
-                t: [(s, 1.0) for s in self.store.get_by_type(t)]
-                for t in self.store.types()
-                if self.store.get_by_type(t)
-            }
+        candidates_by_cat = await self._get_available_candidates()
 
-        if not candidates_by_type:
-            logger.debug("[TopicManager] All topics are in cooldown — skipping.")
+        if not candidates_by_cat:
+            logger.debug("[TopicManager] All static topics in cooldown.")
             return None
 
-        # 仅对有候选的类型重新归一化权重，并对最近已抽取的类型施加衰减惩罚
-        filtered_weights = {t: weights.get(t, 0.05) for t in candidates_by_type}
-        for recent_type in self._recent_types:
-            if recent_type in filtered_weights:
-                filtered_weights[recent_type] *= _RECENT_TYPE_PENALTY
+        filtered_weights = {t: weights.get(t, 0.05) for t in candidates_by_cat}
+        for recent_cat in self._recent_categories:
+            if recent_cat in filtered_weights:
+                filtered_weights[recent_cat] *= _RECENT_TYPE_PENALTY
         total = sum(filtered_weights.values())
         if total == 0:
             return None
         for k in filtered_weights:
             filtered_weights[k] /= total
 
-        chosen_type = random.choices(
+        chosen_cat = random.choices(
             list(filtered_weights.keys()),
             weights=list(filtered_weights.values()),
             k=1,
         )[0]
 
         # 在选定类型内按 individual_weight 加权选择
-        type_candidates = candidates_by_type[chosen_type]
+        cat_candidates = candidates_by_cat[chosen_cat]
         chosen = random.choices(
-            [c[0] for c in type_candidates],
-            weights=[c[1] for c in type_candidates],
+            [c[0] for c in cat_candidates],
+            weights=[c[1] for c in cat_candidates],
             k=1,
         )[0]
-        self._recent_types.append(chosen_type)
+        self._recent_categories.append(chosen_cat)
         logger.debug(
-            f"[TopicManager] Selected topic: {chosen.id!r} (type={chosen.type}) "
-            f"recent_types={list(self._recent_types)}"
+            f"[TopicManager] Selected topic: {chosen.id!r} (category={chosen.category}) "
+            f"recent_categories={list(self._recent_categories)}"
         )
         return chosen
 

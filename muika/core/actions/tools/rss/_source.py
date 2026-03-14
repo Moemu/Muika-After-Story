@@ -7,7 +7,6 @@ RSS_SOURCES = {
         url="https://news.ycombinator.com/rss",
         language="en",
         topics=["technology", "startup", "ai"],
-        update_interval=1800,
     ),
     "mit_technology_review": RSSSource(
         id="mit_technology_review",
@@ -15,7 +14,6 @@ RSS_SOURCES = {
         url="https://www.technologyreview.com/feed/",
         language="en",
         topics=["technology", "innovation", "ai"],
-        update_interval=3600,
     ),
     "sspai": RSSSource(
         id="sspai",
@@ -23,7 +21,6 @@ RSS_SOURCES = {
         url="https://sspai.com/feed",
         language="zh",
         topics=["technology", "productivity", "lifestyle"],
-        update_interval=3600,
     ),
     "arxiv_ai": RSSSource(
         id="arxiv_ai",
@@ -31,7 +28,6 @@ RSS_SOURCES = {
         url="http://export.arxiv.org/rss/cs.AI",
         language="en",
         topics=["ai", "research", "machine_learning"],
-        update_interval=43200,
     ),
     "arxiv_cl": RSSSource(
         id="arxiv_cl",
@@ -39,7 +35,6 @@ RSS_SOURCES = {
         url="http://export.arxiv.org/rss/cs.CL",
         language="en",
         topics=["nlp", "llm", "research"],
-        update_interval=43200,
     ),
     "baidu": RSSSource(
         id="baidu",
@@ -47,7 +42,6 @@ RSS_SOURCES = {
         url="https://rss.aishort.top/?type=baidu",
         language="zh",
         topics=["news", "trending"],
-        update_interval=3600,
     ),
     "guokr": RSSSource(
         id="guokr",
@@ -55,7 +49,7 @@ RSS_SOURCES = {
         url="https://rss.aishort.top/?type=guokr",
         language="zh",
         topics=["science", "technology", "culture"],
-        update_interval=3600,
+        digest=True,
     ),
 }
 

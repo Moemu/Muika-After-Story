@@ -13,10 +13,13 @@ from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
 from .constants import (  # noqa: F401
     CURIOSITY_THRESHOLD,
+    DIGEST_INTERVAL_SECONDS,
+    DIGEST_STARTUP_DELAY,
     LONELINESS_PROACTIVE_RELIEF,
     PROACTIVE_COOLDOWN,
     SESSION_IDLE_TIMEOUT,
 )
+from .digest_agent import DigestAgent
 from .events import Event, SessionEndEvent, TimeTickEvent
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager
@@ -39,8 +42,12 @@ class Muika:
         self.brain = MuikaBrain()
         self.butler_agent = ButlerAgent()
         self.topic_manager = TopicManager()
+        self.digest_agent = DigestAgent(self.topic_manager)
 
         self._session_end_triggered: bool = False
+        self._is_collecting_event: bool = False
+        self._last_digest_time: float = 0.0
+        self._digest_interval: float = DIGEST_INTERVAL_SECONDS
 
     async def collect_events(self) -> Event:
         try:
@@ -99,7 +106,10 @@ class Muika:
             dt = current_time - last_tick_time
             last_tick_time = current_time
 
-            logger.debug("Collecting events...")
+            if not self._is_collecting_event:
+                logger.debug("Collecting events...")
+                self._is_collecting_event = True
+
             event = await self.collect_events()
             think_mode = self.get_think_mode(event)
 
@@ -109,6 +119,7 @@ class Muika:
                 continue
 
             # ── Incoming event processing ─────────────────────────────────────────
+            self._is_collecting_event = False
             self._log_event(event)
             if event.type == "user_message":
                 self.memory.add_context("user", event.payload.message.message)
@@ -150,8 +161,19 @@ class Muika:
             logger.info(f"[Event] {event.type}")
 
     async def _tick_idle(self, event: Event, dt: float) -> None:
-        """处理空闲 time_tick：状态衰减、session 空闲超时检测。"""
+        """处理空闲 time_tick：状态衰减、session 空闲超时检测、后台阅读等。"""
         self.state.tick_state(event, dt)
+
+        # 后台新闻阅读计划，每过一个周期且不是处于话题活跃期，则触发
+        current_time = time.time()
+        if self._last_digest_time == 0.0:
+            # 刚启动时稍微延后一点执行
+            self._last_digest_time = current_time - self._digest_interval + DIGEST_STARTUP_DELAY
+
+        if (current_time - self._last_digest_time > self._digest_interval) and (self.state.active_topic is None):
+            self._last_digest_time = current_time
+            # 放到后台执行，不阻塞主 Loop  tick
+            asyncio.create_task(self.digest_agent.fetch_and_digest())
 
         # session 空闲超时检测
         # 若话题刚发出，以话题开始时间作为活动基准，避免立即触发 session end
@@ -178,23 +200,23 @@ class Muika:
 
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
-        topic_seed = await self.topic_manager.get_next_topic(self.state)
-        if not topic_seed:
+        topic = await self.topic_manager.get_next_topic(self.state)
+        if not topic:
             logger.debug("[Topic] No available seed — skipping topic pipeline this tick.")
             return
-        expanded = await self.brain.expand_topic(topic_seed, self.state, self.memory)
+        expanded = await self.brain.expand_topic(topic, self.state, self.memory)
         if not expanded:
             return
         await self.executor.send_message(expanded)
         logger.info(f"[Topic] Sent: {expanded!r}")
         self.memory.add_context("muika", expanded)
         self.state.active_topic = ActiveTopicState(
-            topic_id=topic_seed.id,
-            topic_seed=topic_seed.seed,
-            topic_type=topic_seed.type,
+            topic_id=topic.id,
+            topic_seed=topic.content,
+            topic_type=topic.category,
         )
         self.state.boredom = 0.0
-        logger.info(f"[Topic] Initiated: {topic_seed.id!r} (type={topic_seed.type})")
+        logger.info(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
     async def _fetch_preferences(self, event: Event) -> list:
         """通过 Butler 检索当前用户消息相关的 PreferenceProfile 条目。"""
