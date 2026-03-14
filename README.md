@@ -1,5 +1,5 @@
 <div align=center>
-  <!-- <img width=200 src="https://bot.snowy.moe/logo.png"  alt="image"/> -->
+  <img width="90%" src="./assets/head-0.5x.webp"  alt="image"/>
   <h1 align="center">Muika-After-Story</h1>
   <i align="center">I'll be back to see you.</i>
 </div>
@@ -32,19 +32,19 @@
 
 ## Features🪄
 
-- [X] 内嵌多种模型加载器，如[OpenAI](https://platform.openai.com/docs/overview) 和 [Ollama](https://ollama.com/) ，可加载市面上大多数的模型服务或本地模型，支持多模态（图片识别）和工具调用。
+- [X] Muika 核心交互逻辑：事件循环系统和状态机更新
 
-- [X] 支持调用 MCP 服务（支持 stdio、SSE 和 Streamable HTTP 传输方式）
+- [X] 四层长期记忆系统: Session 级、关系状态级、用户偏好级、长期核心记忆级
 
-- [X] Muika 主交互逻辑开发
+- [X] Session 生命周期管理: 空闲超时归档、跨 Session Resume 模式
 
-- [X] 四层长期记忆系统
+- [X] Muika 第四面墙窗口: Butler 管家 Agent，支持访问&写入硬盘文件；截取当前屏幕
 
-- [X] Session 生命周期管理：空闲超时归档、跨 Session Resume 模式
+- [X] Muika 主动对话系统：从 `configs/topics.yaml` 抽取话题源或在线访问 RSS 获取筛选后的新闻流。
 
-- [X] 动态模型配置，可随时切换模型配置文件
+- [X] 多模型 SDK 支持: 如[OpenAI](https://platform.openai.com/docs/overview) 和 [Ollama](https://ollama.com/) ，可加载市面上大多数的模型服务或本地模型，支持多模态（图片识别）。
 
-- [X] 系统交互层开发
+- [X] 动态模型配置: 可随时切换模型配置文件，支持模型配置热重载
 
 - [ ] (Pending) 核心模型人格优化
 
@@ -64,28 +64,100 @@ Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言
 6. **Session 生命周期**：用户若干小时后无交流后触发 `SessionEndEvent`；Butler 对本次对话生成文字摘要写入 ARCHIVE，随后静默重置 Session（不主动发送消息），等待用户下次发言时以 Resume 模式响应。
 7. **输出与调度**：最终消息经 Executor 回传至平台；调度器可触发定时事件（RSS 更新、预定提醒等），以外部事件形式再次进入上述闭环。
 
+## Quick Start🚀
+
+Muika-After-Story 将作为 [Nonebot2](https://nonebot.dev/) 的 Bot 实现进行安装。
+
+## 通过 git clone 的方式进行安装(Dev)
+
+Step 1: 克隆项目并安装依赖：
+
+```bash
+git clone https://github.com/Moemu/Muika-After-Story.git
+cd Muika-After-Story
+pip install .
+```
+
+Step 2: 参考 [Configuration⚙️](#Configuration⚙️) 小节配置 `.env` 和 `configs/models.yml` 文件，示例配置如下：
+
+**.env**
+
+```env
+ENVIRONMENT=dev
+DRIVER=~fastapi+~websockets+~httpx
+SUPERUSERS=["<your_qq_number>"]
+master_id="<your_qq_number>"
+enable_adapters = ["nonebot.adapters.onebot.v11"]
+enable_file_write=true
+FS_ALLOWED_PATHS=["C:/Users/Muika/Desktop", "D:/"]
+butler_model=butler
+```
+
+**configs/models.yml**
+
+```yaml
+dashscope:
+  provider: Dashscope
+  model_name: qwen3.5-plus
+  default: true
+  multimodal: true
+  stream: false
+  incremental_output: true
+  online_search: false
+  api_key: sk-muikaissuperkawaii
+  max_tokens: 1024
+  temperature: 0.75
+  top_p: 0.9
+  content_security: false
+  enable_thinking: false
+
+butler:
+  provider: Dashscope
+  model_name: qwen-turbo
+  default: false
+  api_key: sk-muikaissuperkawaii
+  stream: false
+  max_tokens: 1024
+  temperature: 0.2
+```
+
+Step 3: 运行 Nonebot 项目并执行数据库迁移
+
+**使用 nb-cli**
+
+```
+nb orm migrate
+```
+
+或者**直接运行 bot.py**
+
+```
+python bot.py
+```
+
+Step 4: 同意用户许可协议后开始运行。
+
 ## Configuration⚙️
 
 **Nonebot 配置项(.env)**
 
-| 配置项            | 类型(默认值)                                 | 说明                                                         |
-| ----------------- | -------------------------------------------- | ------------------------------------------------------------ |
-| `master_id`       | `str = get_driver().config.superusers.pop()` | 对话目标ID。目前仅支持一对一对话。                           |
-| `butler_model`    | `Optional[str] = None`                       | 管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置 |
-| `INPUT_TIMEOUT`   | `int = 0`                                    | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用   |
-| `LOG_LEVEL`       | `str = "INFO"`                               | 日志等级                                                     |
-| `TELEGRAM_PROXY`  | `Optional[str] = None`                       | tg适配器代理，并使用该代理下载文件                           |
-| `ENABLE_ADAPTERS` | `list = ["~.onebot.v11", "~.onebot.v12"]`    | 在入口文件中启用的 Nonebot 适配器(仅 Debug 环境)             |
+| 配置项                  | 类型(默认值)                              | 说明                                                         |
+| ----------------------- | ----------------------------------------- | ------------------------------------------------------------ |
+| `master_id`             | `str = SUPERUSERS[0]`                     | 对话目标 ID。目前仅支持一对一对话。                          |
+| `butler_model`          | `Optional[str] = None`                    | 管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置。 |
+| `INPUT_TIMEOUT`         | `int = 0`                                 | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用。 |
+| `LOG_LEVEL`             | `str = "INFO"`                            | 日志等级。                                                   |
+| `TELEGRAM_PROXY`        | `Optional[str] = None`                    | Telegram 适配器代理，并使用该代理下载文件。                  |
+| `ENABLE_ADAPTERS`       | `list = ["~.onebot.v11", "~.onebot.v12"]` | 在入口文件中启用的 Nonebot 适配器。                          |
+| `FS_ALLOWED_PATHS`      | `List[str] = []`                          | 文件系统工具白名单目录。为空时禁用文件系统工具。             |
+| `ENABLE_FILE_WRITE`     | `bool = False`                            | 是否允许文件写入/删除，需同时配置 `FS_ALLOWED_PATHS`。       |
+| `ENABLE_CODE_EXECUTION` | `bool = False`                            | 是否允许 Python 子进程代码执行。                             |
 
 **模型配置项(configs/models.yml)**
 
 支持的模型和具体配置内容可参考 [Muicebot 的模型配置](https://bot.snowy.moe/guide/model)
 
 不支持的字段: `template`, `template_mode`, `stream`, `function_call`
-
-## Quick Start🚀
-
-*Work In Progress.*
 
 ## Character Setting🧸
 
