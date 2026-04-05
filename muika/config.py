@@ -33,6 +33,8 @@ class MASConfig(BaseModel):
 
     log_level: str = "INFO"
     """日志等级"""
+    mas_log_only: bool = False
+    """仅输出 MAS 相关日志（不输出 NoneBot 核心日志）"""
     telegram_proxy: Optional[str] = None
     """telegram代理，这个配置项用于获取图片时使用"""
 

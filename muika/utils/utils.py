@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import os
 import ssl
@@ -7,7 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from mimetypes import guess_type
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import fleep
 import httpx
@@ -21,6 +23,9 @@ from nonebot_plugin_userinfo import get_user_info
 from ..config import mas_config
 from ..models import Resource
 from .adapters import ADAPTER_CLASSES
+
+if TYPE_CHECKING:
+    from loguru import Record
 
 FILES_DIR = store.get_plugin_data_dir() / "files"
 FILES_CACHED_DIR = store.get_plugin_cache_dir() / "files"
@@ -124,6 +129,14 @@ async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optiona
     return None
 
 
+def _mas_filter(record: "Record") -> bool:
+    """MAS 日志过滤器，仅输出 MAS 相关日志"""
+    if mas_config.mas_log_only and (record["name"] is None or not record["name"].startswith("muika")):
+        return False
+
+    return default_filter(record)
+
+
 def init_logger():
     console_handler_level = mas_config.log_level
 
@@ -142,7 +155,7 @@ def init_logger():
             level=console_handler_level,
             diagnose=True,
             format="<lvl>[{level}] {function}: {message}</lvl>",
-            filter=default_filter,
+            filter=_mas_filter,
             colorize=True,
         )
 
