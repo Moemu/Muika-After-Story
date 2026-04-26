@@ -366,7 +366,7 @@ async def handle_model_list():
 
 @command_debug.assign("topic")
 async def handle_debug_topic():
-    await UniMessage("正在触发话题管线...").send()
+    await UniMessage("Debug: 正在触发话题管线...").send()
     await muika._run_topic_pipeline()
 
 
