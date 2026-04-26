@@ -268,13 +268,18 @@ class Muika:
             any_observation = False
             for cmd in butler_commands:
                 logger.info(f"[Butler ←] {cmd!r}")
-                butler_report: str = await self.butler_agent.execute_command(cmd, self.state, self.executor)
+                butler_report, cmd_resources = await self.butler_agent.execute_command(cmd, self.state, self.executor)
                 if not butler_report:
                     logger.debug(f"[Loop] Butler silent op complete — no report injected for: {cmd[:60]!r}")
                     continue
                 logger.info(f"[Butler →] {butler_report!r}")
                 inner_conversation_context.append(
-                    Message(message=f"[Butler reports]: {butler_report}", userid="System", profile="self")
+                    Message(
+                        message=f"[Butler reports]: {butler_report}",
+                        userid="System",
+                        profile="self",
+                        resources=cmd_resources,
+                    )
                 )
                 any_observation = True
 

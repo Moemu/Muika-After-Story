@@ -40,6 +40,7 @@ from muika.core.executor import Executor
 from muika.core.memory import MemoryRecord, SessionTurn
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
+from muika.models import Resource
 
 # ---------------------------------------------------------------------------
 # Prompts  (→ see muika/core/butler/_prompts.py)
@@ -210,16 +211,18 @@ class ButlerAgent:
         command: str,
         state: MuikaState,
         executor: Executor,
-    ) -> str:
+    ) -> tuple[str, list[Resource]]:
         """
         Execute *command* using a mini inner loop:
           • select tool → execute → analyse result → retry or return.
-        Always returns a plain-string butler report (never raw tool data).
+        Returns (report, resources) — the report is a plain-string butler report,
+        and resources are any images/files produced by the tool.
         """
         logger.info(f"[Butler] Executing command: {command!r}")
 
         # Maintains the execution context for complex/multi-step requests
         execution_history: list[dict[str, str]] = []
+        collected_resources: list[Resource] = []
 
         for attempt in range(1, MAX_BUTLER_LOOPS + 1):
             logger.debug(f"[Butler] Attempt {attempt}/{MAX_BUTLER_LOOPS}")
@@ -250,13 +253,13 @@ class ButlerAgent:
                 logger.debug(f"[Butler] Tool selection response: {raw_action!r}")
             except Exception as e:
                 logger.error(f"[Butler] Tool selection LLM error: {e}")
-                return f"I encountered an error while choosing a tool: {e}"
+                return (f"I encountered an error while choosing a tool: {e}", [])
 
             try:
                 action = self._action_adapter.validate_json(raw_action)
             except Exception as e:
                 logger.error(f"[Butler] Failed to parse action JSON: {e}\nRaw: {raw_action!r}")
-                return f"I failed to understand how to handle that command: {e}"
+                return (f"I failed to understand how to handle that command: {e}", [])
 
             logger.info(f"[Butler] Dispatching: {type(action).__name__}")
 
@@ -264,6 +267,8 @@ class ButlerAgent:
             try:
                 output = await action.handle(state, executor)
                 tool_result_text = output.content
+                if output.resources:
+                    collected_resources.extend(output.resources)
             except Exception as e:
                 logger.exception(f"[Butler] {type(action).__name__} raised: {e}")
                 tool_result_text = f"[Tool error] {e}"
@@ -277,7 +282,7 @@ class ButlerAgent:
                     f"[Butler] Silent operation ({type(action).__name__}) — "
                     f"skipping Analysis LLM, no report injected."
                 )
-                return ""
+                return ("", [])
 
             # Record this turn in the history
             turn_record = {
@@ -311,15 +316,15 @@ class ButlerAgent:
             except Exception as e:
                 # If analysis itself fails, treat the raw output as the report
                 logger.warning(f"[Butler] Analysis LLM failed ({e}), falling back to raw output")
-                return tool_result_text
+                return (tool_result_text, collected_resources)
 
             if analysis.status == "done":
                 logger.info(f"[Butler] Report ready after {attempt} attempt(s).")
-                return analysis.report  # type: ignore[union-attr]
+                return (analysis.report, collected_resources)  # type: ignore[union-attr]
 
             # status == "retry"
             reason: str = analysis.reason  # type: ignore[union-attr]
             logger.info(f"[Butler] Requesting next step / retry: {reason}")
             turn_record["analysis"] = reason
 
-        return "I was unable to complete the task after several steps. Please try a different approach."
+        return ("I was unable to complete the task after several steps. Please try a different approach.", [])

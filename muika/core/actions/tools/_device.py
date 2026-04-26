@@ -48,7 +48,7 @@ class CaptureScreenshotTool(BaseTool):
             logger.info(f"[CaptureScreenshotTool] Saved to {file_path}")
             resource = Resource(type="image", path=str(file_path), mimetype="image/png")
             return ActionOutput(
-                content=f"Screenshot captured successfully. Path: {file_path}",
+                content="Screenshot captured successfully. See attached image.",
                 resources=[resource],
             )
         except Exception as e:
@@ -100,7 +100,7 @@ class CaptureCameraPhotoTool(BaseTool):
             logger.info(f"[CaptureCameraPhotoTool] Saved to {file_path}")
             resource = Resource(type="image", path=file_path, mimetype="image/jpeg")
             return ActionOutput(
-                content=f"Camera photo captured successfully. Path: {file_path}",
+                content="Camera photo captured successfully. See attached image.",
                 resources=[resource],
             )
         except Exception as e:
