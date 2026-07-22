@@ -35,6 +35,7 @@ from .llm import ModelCompletions, ModelStreamCompletions
 from .models import Message, Resource
 from .plugin import load_plugins
 from .plugin.mcp import initialize_servers
+from .utils.first_run import user_agreement
 from .utils.SessionManager import SessionManager
 from .utils.utils import download_file, get_file_via_adapter
 
@@ -64,6 +65,7 @@ def startup_plugins():
 @driver.on_startup
 async def startup():
     logger.info("加载 MAS 框架...")
+    user_agreement.check_first_run()
     logger.info("初始化 Muika 实例...")
     muika.start()
 

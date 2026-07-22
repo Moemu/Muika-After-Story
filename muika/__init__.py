@@ -20,14 +20,12 @@ __plugin_meta__ = PluginMetadata(
 
 import nonebot_plugin_localstore as store  # noqa: E402
 
-from .utils.first_run import user_agreement  # noqa: E402
 from .utils.utils import get_version, init_logger  # noqa: E402
 
 init_logger()
 
 logger.info(f"Muika-After-Story 版本: {get_version()}")
 logger.info(f"Muika-After-Story 数据目录: {store.get_plugin_data_dir().resolve()}")
-user_agreement.check_first_run()
 
 from . import bot  # noqa: E402, F401
 from . import database  # noqa: E402, F401
