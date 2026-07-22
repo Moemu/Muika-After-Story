@@ -31,6 +31,8 @@ _default_master_id = list(get_driver().config.superusers)[0] if get_driver().con
 class MASConfig(BaseModel):
     master_id: str = _default_master_id
     """对话目标ID"""
+    persona_template: str = "Muika.md.jinja2"
+    """默认人格模板"""
 
     input_timeout: int = 0
     """输入等待时间"""

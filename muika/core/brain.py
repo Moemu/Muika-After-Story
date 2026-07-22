@@ -4,7 +4,7 @@ from typing import List, Optional, TypeVar
 
 from nonebot import logger
 
-from muika.config import get_model_config_manager
+from muika.config import get_model_config_manager, mas_config
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import Message, Resource
@@ -55,7 +55,6 @@ class MuikaBrain:
         Returns the expanded text ready to send, or empty string on failure.
         """
         now = datetime.now()
-        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
         hour = now.hour
         if 0 <= hour < 6:
             time_tone_hint = (
@@ -82,7 +81,7 @@ class MuikaBrain:
             memory_context=memory_context,
             time_tone_hint=time_tone_hint,
         )
-        system_prompt = generate_prompt_from_template("Muika.md.jinja2", template_data)
+        system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
         # 结尾策略：深夜向内收，白天/傍晚按 category 决定是否留白
         # TODO: 也许可以简化这一部分。目前先考虑效果是否合适
@@ -170,7 +169,7 @@ class MuikaBrain:
             memory_context=memory_context,
             injected_preferences=injected_preferences,
         )
-        system_prompt = generate_prompt_from_template("Muika.md.jinja2", template_data)
+        system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
         # 按需注入：Butler 预处理层匹配到的 PreferenceProfile 条目
         if injected_preferences:
