@@ -18,6 +18,12 @@ from .llm import ModelConfig
 
 MODELS_CONFIG_PATH = Path("configs/models.yml").resolve()
 
+BUILTIN_SKILLS_PATH = Path("configs/skills").resolve()
+"""内置技能目录，始终会被扫描"""
+
+USER_SKILL_PATHS = (Path.home() / ".agents" / "skills", Path.home() / ".claude" / "skills")
+"""用户级技能目录，仅在 load_user_skills 启用时扫描"""
+
 _model_config_manager: Optional["ModelConfigManager"] = None
 _default_master_id = list(get_driver().config.superusers)[0] if get_driver().config.superusers else ""
 
@@ -50,6 +56,10 @@ class MASConfig(BaseModel):
 
     enable_code_execution: bool = False
     """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
+
+    load_user_skills: bool = False
+    """是否额外扫描用户级技能目录（~/.agents/skills 与 ~/.claude/skills）。
+    内置技能目录 configs/skills 始终会被扫描。"""
 
     @field_validator("master_id")
     def validate_master_id(cls, v):

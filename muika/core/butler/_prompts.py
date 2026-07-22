@@ -22,6 +22,13 @@ When using the memory tool, choose the layer carefully:
 - 'archive'    → Reserved for session summaries. Do NOT use directly.
 
 Return ONLY valid JSON — no markdown fences, no commentary.
+
+Skills:
+- If the system prompt lists an "Available skills" section, those are packaged
+  instruction sets for specialized tasks (only name + description are shown here).
+- When the command matches a skill's description, FIRST call load_skill with that
+  skill's exact name to fetch its full instructions, then follow them. The loaded
+  instructions include the skill's file path; use read_file for any files it references.
 """
 
 PREFERENCE_MATCH_PROMPT = """\

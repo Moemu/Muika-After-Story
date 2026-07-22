@@ -41,6 +41,7 @@ from muika.core.memory import MemoryRecord, SessionTurn
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 from muika.models import Resource
+from muika.plugin.skills import get_skill_manager
 
 # ---------------------------------------------------------------------------
 # Prompts  (→ see muika/core/butler/_prompts.py)
@@ -125,6 +126,9 @@ class ButlerAgent:
 
         # JSON schema embedded in the tool-selection prompt
         self._schema_json = json.dumps(self._action_adapter.json_schema(), ensure_ascii=False, indent=2)
+
+        # 技能管理器：启动时扫描技能目录并启动热重载监听
+        self._skill_manager = get_skill_manager()
 
     # ------------------------------------------------------------------
     # Public API
@@ -240,9 +244,16 @@ class ButlerAgent:
                         f"Analysis/Next Steps: {turn.get('analysis', 'None')}\n"
                     )
 
+            # 每次调用时组装系统提示，确保技能热重载即时生效
+            system = _TOOL_SELECTION_PROMPT
+            skills_section = self._skill_manager.render_prompt_section()
+            if skills_section:
+                system += f"\n\n{skills_section}"
+            system += f"\n\nAvailable actions (JSON schema):\n{self._schema_json}"
+
             selection_request = ModelRequest(
                 prompt=prompt_payload,
-                system=f"{_TOOL_SELECTION_PROMPT}\n\nAvailable actions (JSON schema):\n{self._schema_json}",
+                system=system,
                 format="json",
                 json_schema=self._action_adapter,
             )

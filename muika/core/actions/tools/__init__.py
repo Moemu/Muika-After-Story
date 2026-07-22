@@ -8,6 +8,7 @@ Tool implementations are split by capability into dedicated modules:
 - _memory.py:      long-term memory operations
 - _filesystem.py:  file system read/write (enabled via BaseTool.is_enabled())
 - _executor.py:    Python subprocess execution (enabled via BaseTool.is_enabled())
+- _skill.py:       skill loading (always available)
 
 All classes are always imported; availability is controlled at runtime via
 the BaseTool.is_enabled() method on each tool class. Butler's _leaf_action_classes
@@ -26,6 +27,7 @@ from ._filesystem import (
 )
 from ._info import CheckRSSUpdateTool, FetchWebContentTool, SearchWikipediaTool
 from ._memory import MemoryTool
+from ._skill import LoadSkillTool
 from ._system import (
     GetFocusedWindowTool,
     GetSystemStatusTool,
@@ -53,4 +55,5 @@ __all__ = [
     "EditFileTool",
     "DeleteFileTool",
     "ExecutePythonTool",
+    "LoadSkillTool",
 ]
