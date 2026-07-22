@@ -8,7 +8,7 @@ from muika.config import mas_config
 
 from .scheduler import Scheduler
 
-COMMON_PUNCTUATION = "。！？；…，\n"
+COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 1.5
 
 
@@ -18,12 +18,13 @@ class Executor:
         self._cooldown: dict[str, datetime] = {}
         self.scheduler = Scheduler(event_queue=event_queue)
 
-    def _split_message(self, content: str, max_length_per_message: int = 100) -> list[str]:
+    def _split_message(self, content: str, max_length_per_message: int = 250) -> list[str]:
         messages_split_by_newlines = content.split("\n\n")
         final_messages = []
         for msg in messages_split_by_newlines:
             if len(msg) <= max_length_per_message:
                 final_messages.append(msg)
+                continue
             messages_spilt_by_punctuation = []
             current_segment = ""
             for char in msg:
