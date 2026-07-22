@@ -2,9 +2,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
+from .memory import MemoryManager
+
 if TYPE_CHECKING:
     from .events import Event
-    from .memory import MemoryManager
 
 from .constants import BOREDOM_RATE, LONELINESS_RATE
 
