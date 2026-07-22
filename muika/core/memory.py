@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import uuid
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from nonebot import logger
 from nonebot_plugin_orm import get_scoped_session
 from pydantic import BaseModel, Field
 
 from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
-
-# ─────────────────────────────────────────────────────────────────
-# Enums
-# ─────────────────────────────────────────────────────────────────
+from muika.models import Resource
 
 
 class MemoryLayer(str, Enum):
@@ -45,11 +43,6 @@ class MemoryCategory(str, Enum):
     """关系 / 交互状态（STATE 层专用）"""
 
 
-# ─────────────────────────────────────────────────────────────────
-# Pydantic Schemas
-# ─────────────────────────────────────────────────────────────────
-
-
 class MemoryRecord(BaseModel):
     """CORE / STATE / PREFERENCE 层的单条记忆条目。"""
 
@@ -76,12 +69,14 @@ class ArchiveEntry(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
-class SessionTurn(BaseModel):
-    """Session 级单条对话记录（短期记忆，纯内存，不持久化）。"""
+@dataclass
+class SessionTurn:
+    """Session 级单条对话记录"""
 
-    role: Literal["user", "muika", "system"]
+    role: Literal["user", "muika", "agent"]
     content: str
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=datetime.now)
+    resources: List[Resource] = field(default_factory=list)
 
 
 class SessionState(BaseModel):
@@ -93,17 +88,11 @@ class SessionState(BaseModel):
     """True：系统首次对话。False：Resume 模式（已有历史记忆的新 Session）。"""
 
 
-# ─────────────────────────────────────────────────────────────────
-# MemoryManager
-# ─────────────────────────────────────────────────────────────────
-
-
 class MemoryManager:
     def __init__(self, max_turns: int = 16):
-        # Session 级短期记忆（不持久化）
         self.recent_turns: deque[SessionTurn] = deque(maxlen=max_turns)
+        """Session 中的对话内容"""
 
-        # 长期记忆（运行时缓存，DB 为持久化层）
         self.records: dict[str, MemoryRecord] = {}
         """CORE / STATE / PREFERENCE 层。key 格式：'{layer}:{category}:{key}'"""
 
@@ -111,8 +100,6 @@ class MemoryManager:
         """ARCHIVE 层 — 历史 Session 摘要。"""
 
         self.session: SessionState = SessionState()
-
-    # ──────────────────────────── 持久化 ────────────────────────────
 
     async def load(self):
         """从数据库加载全量记忆，若有历史数据则进入 Resume 模式。"""
@@ -165,8 +152,6 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"[Memory] Failed to load from DB: {e}")
 
-    # ──────────────────────────── Session 管理 ────────────────────────────
-
     def new_session(self):
         """
         创建新的 Session（通常由 bot_connect 事件触发）。
@@ -181,13 +166,11 @@ class MemoryManager:
             f"prior_records={len(self.records)} prior_archives={len(self.archives)}"
         )
 
-    # ──────────────────────────── 上下文记录 ────────────────────────────
-
-    def add_context(self, role: Literal["user", "muika", "system"], content: str):
+    def add_context(
+        self, role: Literal["user", "muika", "agent"], content: str, resources: Optional[list[Resource]] = None
+    ):
         """记录一条 Session 级对话记录。"""
-        self.recent_turns.append(SessionTurn(role=role, content=content))
-
-    # ──────────────────────────── 记忆操作 ────────────────────────────
+        self.recent_turns.append(SessionTurn(role=role, content=content, resources=resources or []))
 
     def _record_key(self, layer: MemoryLayer, category: MemoryCategory, key: str) -> str:
         return f"{layer.value}:{category.value}:{key}"

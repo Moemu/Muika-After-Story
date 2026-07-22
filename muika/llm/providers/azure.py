@@ -106,14 +106,18 @@ class Azure(BaseLLM):
         if request.system:
             messages.append(SystemMessage(request.system))
 
-        for msg in request.history:
-            user_msg = (
-                UserMessage(msg.message)
-                if not msg.resources
-                else self.__build_multi_messages(ModelRequest(msg.message, resources=msg.resources))
-            )
-            messages.append(user_msg)
-            messages.append(AssistantMessage(msg.respond))
+        history = self._normalize_session_turns(request.history)
+
+        for msg in history:
+            if msg.role == "user":
+                user_msg = (
+                    UserMessage(msg.content)
+                    if not msg.resources
+                    else self.__build_multi_messages(ModelRequest(msg.content, resources=msg.resources))
+                )
+                messages.append(user_msg)
+            else:
+                messages.append(AssistantMessage(msg.content))
 
         user_message = UserMessage(request.prompt) if not request.resources else self.__build_multi_messages(request)
 

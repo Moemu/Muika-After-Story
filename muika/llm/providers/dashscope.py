@@ -129,14 +129,18 @@ class Dashscope(BaseLLM):
         if request.system:
             messages.append({"role": "system", "content": request.system})
 
-        for msg in request.history:
-            user_msg = (
-                self.__build_multi_messages(ModelRequest(msg.message, resources=msg.resources))
-                if all((self.config.multimodal, msg.resources))
-                else {"role": "user", "content": msg.message}
-            )
-            messages.append(user_msg)
-            messages.append({"role": "assistant", "content": msg.respond})
+        history = self._normalize_session_turns(request.history)
+
+        for msg in history:
+            if msg.role != "user":
+                messages.append({"role": "assistant", "content": msg.content})
+            else:
+                user_msg = (
+                    self.__build_multi_messages(ModelRequest(msg.content, resources=msg.resources))
+                    if all((self.config.multimodal, msg.resources))
+                    else {"role": "user", "content": msg.content}
+                )
+                messages.append(user_msg)
 
         user_msg = (
             {"role": "user", "content": request.prompt}

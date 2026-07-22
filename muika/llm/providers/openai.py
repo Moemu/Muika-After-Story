@@ -88,15 +88,17 @@ class Openai(BaseLLM):
             messages.append({"role": "system", "content": request.system})
 
         if request.history:
-            for index, item in enumerate(request.history):
-                user_content = (
-                    {"role": "user", "content": item.message}
-                    if not all([item.resources, self.config.multimodal])
-                    else self.__build_multi_messages(ModelRequest(item.message, resources=item.resources))
-                )
-
-                messages.append(user_content)
-                messages.append({"role": "assistant", "content": item.respond})
+            history = self._normalize_session_turns(request.history)
+            for item in history:
+                if item.role == "user":
+                    user_content = (
+                        {"role": "user", "content": item.content}
+                        if not all([item.resources, self.config.multimodal])
+                        else self.__build_multi_messages(ModelRequest(item.content, resources=item.resources))
+                    )
+                    messages.append(user_content)
+                else:
+                    messages.append({"role": "assistant", "content": item.content})
 
         user_content = (
             {"role": "user", "content": request.prompt}

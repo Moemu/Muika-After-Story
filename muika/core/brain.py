@@ -7,7 +7,7 @@ from nonebot import logger
 from muika.config import get_model_config_manager, mas_config
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
-from muika.models import Message, Resource
+from muika.models import Resource
 from muika.template import PromptTemplatesData, generate_prompt_from_template
 
 from .events import Event
@@ -146,7 +146,6 @@ class MuikaBrain:
         event: Event,
         state: MuikaState,
         memory: MemoryManager,
-        conversation_history: List[Message],
         resources: Optional[List[Resource]] = None,
         injected_preferences: Optional[List[MemoryRecord]] = None,
     ) -> str:
@@ -154,10 +153,10 @@ class MuikaBrain:
         Pure roleplay response generation.
         Returns a string that might contain `<Butler: command>` tags.
         """
-        is_continuation = bool(conversation_history)
+        is_continuation = bool(memory.recent_turns)
         logger.debug(
             f"[Brain] generate_reply | event={event.type} "
-            f"continuation={is_continuation} history_len={len(conversation_history)}"
+            f"continuation={is_continuation} history_len={len(memory.recent_turns)}"
         )
 
         memory_context = memory.get_memory_prompt()
@@ -187,10 +186,10 @@ class MuikaBrain:
             template_data.is_first_session = memory.session.is_first_session
 
         # Construct the immediate event context if it's the start of the interaction
-        if not conversation_history:
-            if event.type == "user_message":
-                context_msg = f"User said: '{event.payload.message.message}'"
-            elif event.type == "time_tick":
+        if event.type == "user_message":
+            prompt = f"User said: '{event.payload.message.message}'"
+        elif not memory.recent_turns:
+            if event.type == "time_tick":
                 context_msg = "A quiet moment passed."
             elif event.type == "scheduled_trigger":
                 context_msg = f"A scheduled reminder just went off: '{event.payload.what}'"
@@ -200,10 +199,17 @@ class MuikaBrain:
                 context_msg = f"Event triggered: {event.type}"
 
             prompt = f"Event Trigger: {context_msg}\nRespond naturally."
-            history = []
         else:
             prompt = "Please continue."
-            history = conversation_history
+
+        # 历史记录去重
+        history = memory.recent_turns.copy()
+        if history:
+            item = history[-1]
+            if item.role == "user" and event.type == "user_message":
+                user_msg = event.payload.message.message
+                if user_msg == item.content:
+                    history.pop()
 
         request = ModelRequest(
             prompt=prompt,

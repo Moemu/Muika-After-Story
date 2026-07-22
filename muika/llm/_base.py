@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Literal, Union, overload
+from copy import deepcopy
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    List,
+    Literal,
+    Sequence,
+    Union,
+    overload,
+)
 
 from ._config import ModelConfig
 from ._schema import (
@@ -9,6 +19,9 @@ from ._schema import (
     ModelRequest,
     ModelStreamCompletions,
 )
+
+if TYPE_CHECKING:
+    from muika.core.memory import SessionTurn
 
 
 class BaseLLM(ABC):
@@ -53,6 +66,55 @@ class BaseLLM(ABC):
         missing_fields = [field for field in require_fields if not getattr(self.config, field, None)]
         if missing_fields:
             raise ValueError(f"对于 {self.config.provider} 以下配置是必需的: {', '.join(missing_fields)}")
+
+    @staticmethod
+    def _normalize_session_turns(
+        turns: Sequence["SessionTurn"],
+        *,
+        merge_agent=True,
+    ) -> List["SessionTurn"]:
+        """
+        将任意顺序的 SessionTurn 转换为 SDK 可接受的 user/assistant 交替格式。
+
+        规则:
+        - agent -> assistant
+        - 连续 assistant 合并
+        - 连续 user 合并
+        """
+        from muika.core.memory import SessionTurn
+
+        normalized: List[SessionTurn] = []
+        turns = deepcopy(turns)
+
+        for current in turns:
+
+            # agent 归一化
+            if merge_agent and current.role == "agent":
+                current.role = "user"
+
+            # 处理开头 assistant
+            if not normalized and current.role == "muika":
+                normalized.append(SessionTurn(role="user", content="[conversation resumed]"))
+
+            # 合并连续相同 role
+            if normalized and normalized[-1].role == current.role:
+                normalized[-1].content += "\n" + current.content
+                normalized[-1].resources.extend(current.resources)
+                continue
+
+            normalized.append(current)
+
+        # 保证 user 开头
+        if normalized and normalized[0].role != "user":
+            normalized.insert(
+                0,
+                SessionTurn(
+                    role="user",
+                    content="",
+                ),
+            )
+
+        return normalized
 
     def _build_messages(self, request: "ModelRequest") -> list:
         """

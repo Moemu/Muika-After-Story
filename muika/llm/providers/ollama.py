@@ -68,9 +68,13 @@ class Ollama(BaseLLM):
         if request.system:
             messages.append({"role": "system", "content": request.system})
 
-        for index, item in enumerate(request.history):
-            messages.append(self.__build_multi_messages(ModelRequest(item.message, resources=item.resources)))
-            messages.append({"role": "assistant", "content": item.respond})
+        history = self._normalize_session_turns(request.history)
+
+        for item in history:
+            if item.role == "user":
+                messages.append(self.__build_multi_messages(ModelRequest(item.content, resources=item.resources)))
+            else:
+                messages.append({"role": "assistant", "content": item.content})
 
         message = self.__build_multi_messages(request)
 

@@ -7,8 +7,6 @@ from typing import Literal, Optional
 
 from nonebot import logger
 
-from muika.models import Message
-
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
 from .constants import (  # noqa: F401
@@ -99,7 +97,6 @@ class Muika:
 
     async def loop(self):
         last_tick_time = time.time()
-        inner_conversation_context: list[Message] = []
 
         while self.is_alive:
             current_time = time.time()
@@ -131,7 +128,6 @@ class Muika:
                 f"boredom={self.state.boredom:.2f} "
                 f"attention={self.state.attention:.2f}"
             )
-            inner_conversation_context.clear()
 
             # ── Session lifecycle ─────────────────────────────────────────────────
             if event.type == "session_end":
@@ -149,7 +145,7 @@ class Muika:
 
             # ── Emotional pipeline (main Brain + Butler) ──────────────────────────
             injected_preferences = await self._fetch_preferences(event)
-            await self._run_brain_pipeline(event, inner_conversation_context, injected_preferences)
+            await self._run_brain_pipeline(event, injected_preferences)
 
     @staticmethod
     def _log_event(event: Event) -> None:
@@ -234,23 +230,18 @@ class Muika:
     async def _run_brain_pipeline(
         self,
         event: Event,
-        inner_conversation_context: list[Message],
         injected_preferences: list,
     ) -> None:
         """迭代式大小姐 ↔ Butler 管线（情绪驱动路径）。"""
         max_inner_loops = 4
         for loop_idx in range(max_inner_loops):
-            logger.debug(
-                f"[Brain] turn {loop_idx + 1}/{max_inner_loops} | history_len={len(inner_conversation_context)}"
-            )
+            logger.debug(f"[Brain] turn {loop_idx + 1}/{max_inner_loops} | history_len={len(self.memory.recent_turns)}")
             reply = await self.brain.generate_reply(
                 event=event,
                 state=self.state,
                 memory=self.memory,
-                conversation_history=inner_conversation_context,
                 injected_preferences=injected_preferences or None,
             )
-            inner_conversation_context.append(Message(message=reply, userid="Muika", profile="self"))
 
             butler_commands = re.findall(r"<Butler:\s*(.+?)>", reply, re.DOTALL)
             clean_reply = re.sub(r"<Butler:\s*(.+?)>", "", reply, flags=re.DOTALL).strip()
@@ -273,13 +264,10 @@ class Muika:
                     logger.debug(f"[Loop] Butler silent op complete — no report injected for: {cmd[:60]!r}")
                     continue
                 logger.info(f"[Butler →] {butler_report!r}")
-                inner_conversation_context.append(
-                    Message(
-                        message=f"[Butler reports]: {butler_report}",
-                        userid="System",
-                        profile="self",
-                        resources=cmd_resources,
-                    )
+                self.memory.add_context(
+                    content=f"[Butler reports]: {butler_report}",
+                    role="agent",
+                    resources=cmd_resources,
                 )
                 any_observation = True
 

@@ -76,16 +76,8 @@ class Message:
     """群组id，私聊设为-1"""
     message: str = ""
     """消息主体"""
-    respond: str = ""
-    """模型回复（不包含思维过程）"""
-    history: int = 1
-    """消息是否可用于对话历史中，以整数形式映射布尔值"""
     resources: List[Resource] = field(default_factory=list)
     """多模态消息内容"""
-    usage: int = -1
-    """使用的总 tokens, 若模型加载器不支持则设为-1"""
-    profile: str = "_default"
-    """消息所属存档"""
 
     @property
     def format_time(self) -> datetime:

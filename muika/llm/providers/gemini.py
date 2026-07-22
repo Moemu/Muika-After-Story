@@ -138,13 +138,17 @@ class Gemini(BaseLLM):
         messages: List[ContentOrDict] = []
 
         if request.history:
-            for index, item in enumerate(request.history):
-                messages.append(
-                    Content(
-                        role="user", parts=self._build_user_parts(ModelRequest(item.message, resources=item.resources))
+            history = self._normalize_session_turns(request.history)
+            for item in history:
+                if item.role != "user":
+                    messages.append(Content(role="model", parts=[Part.from_text(text=item.content)]))
+                else:
+                    messages.append(
+                        Content(
+                            role="user",
+                            parts=self._build_user_parts(ModelRequest(item.content, resources=item.resources)),
+                        )
                     )
-                )
-                messages.append(Content(role="model", parts=[Part.from_text(text=item.respond)]))
 
         messages.append(Content(role="user", parts=self._build_user_parts(request)))
 

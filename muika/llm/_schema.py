@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Literal, Optional, Type, Union
+from typing import TYPE_CHECKING, List, Literal, Optional, Sequence, Type, Union
 
 from pydantic import BaseModel, TypeAdapter
 
-from ..models import Message, Resource
+from ..models import Resource
 
 if TYPE_CHECKING:
     from numpy import ndarray
+
+    from muika.core.memory import SessionTurn
 
 
 @dataclass
@@ -18,7 +20,7 @@ class ModelRequest:
     """
 
     prompt: str
-    history: List[Message] = field(default_factory=list)
+    history: Sequence["SessionTurn"] = field(default_factory=list)
     resources: List[Resource] = field(default_factory=list)
     tools: Optional[List[dict]] = field(default_factory=list)
     system: Optional[str] = None
