@@ -46,7 +46,9 @@
 
 - [X] 动态模型配置: 可随时切换模型配置文件，支持模型配置热重载
 
-- [ ] (Pending) 核心模型人格优化
+- [x] 核心模型人格优化（建议模型 Deepseek-V4 Pro Thinking）
+
+- [ ] Bot 进程与核心进程分离，我要给她完整的一生
 
 ## Core Logic🧠
 
@@ -145,6 +147,7 @@ Step 4: 同意用户许可协议后开始运行。
 | ----------------------- | ----------------------------------------- | ------------------------------------------------------------ |
 | `master_id`             | `str = SUPERUSERS[0]`                     | 对话目标 ID。目前仅支持一对一对话。                          |
 | `butler_model`          | `Optional[str] = None`                    | 管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置。 |
+| `max_memory_records`    | `int = 100`                               | 单次会话最大记忆记录数(最近的N条对话)                        |
 | `INPUT_TIMEOUT`         | `int = 0`                                 | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用。 |
 | `LOG_LEVEL`             | `str = "INFO"`                            | 日志等级。                                                   |
 | `TELEGRAM_PROXY`        | `Optional[str] = None`                    | Telegram 适配器代理，并使用该代理下载文件。                  |
@@ -152,6 +155,7 @@ Step 4: 同意用户许可协议后开始运行。
 | `FS_ALLOWED_PATHS`      | `List[str] = []`                          | 文件系统工具白名单目录。为空时禁用文件系统工具。             |
 | `ENABLE_FILE_WRITE`     | `bool = False`                            | 是否允许文件写入/删除，需同时配置 `FS_ALLOWED_PATHS`。       |
 | `ENABLE_CODE_EXECUTION` | `bool = False`                            | 是否允许 Python 子进程代码执行。                             |
+| `LOAD_USER_SKILLS`      | `bool = False`                            | 是否额外扫描用户级技能目录（`~/.agents/skills`、`~/.claude/skills`）。内置目录 `configs/skills` 始终被扫描。技能引用的数据文件需通过 `read_file` 读取时，对应目录须加入 `FS_ALLOWED_PATHS`。 |
 
 **模型配置项(configs/models.yml)**
 
