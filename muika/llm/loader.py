@@ -3,7 +3,7 @@ import sys
 from importlib.util import find_spec
 from typing import Optional
 
-from nonebot import logger
+from muika.utils.logger import logger
 
 from ._base import BaseLLM
 from ._config import ModelConfig

@@ -3,7 +3,8 @@ from datetime import datetime
 from typing import Optional
 
 import dateparser
-from nonebot import logger
+
+from muika.utils.logger import logger
 
 from .actions.intents import Persistence, PlanFutureEventIntent
 from .events import ScheduledTriggerEvent, ScheduledTriggerPayload

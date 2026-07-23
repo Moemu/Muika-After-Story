@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from nonebot import logger
 from pydantic import Field
 
 from muika.plugin.skills import get_skill_manager
+from muika.utils.logger import logger
 
 from ..schema import ActionOutput
 from ._base import BaseTool

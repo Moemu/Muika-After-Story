@@ -6,7 +6,7 @@ from typing import AsyncGenerator, Literal
 from urllib.parse import urlparse
 
 from arclet.alconna import Alconna, AllParam, Args
-from nonebot import get_driver, logger
+from nonebot import get_driver
 from nonebot.adapters import Bot, Event
 from nonebot.adapters import Message as BotMessage
 from nonebot.exception import FinishedException
@@ -27,6 +27,8 @@ from nonebot_plugin_alconna import (
 )
 from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 from nonebot_plugin_session import SessionIdType, extract_session
+
+from muika.utils.logger import logger
 
 from .config import get_model_config_manager
 from .core import SessionBootstrapEvent, UserMessagePayload, muika

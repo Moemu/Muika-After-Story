@@ -1,9 +1,8 @@
 from typing import Any
 
-from nonebot import logger
-
 from muika.plugin.func_call import get_function_calls
 from muika.plugin.mcp import handle_mcp_tool
+from muika.utils.logger import logger
 
 
 async def function_call_handler(func: str, arguments: dict[str, str] | None = None) -> Any:

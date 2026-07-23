@@ -3,29 +3,25 @@ from __future__ import annotations
 import base64
 import os
 import ssl
-import sys
 import time
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from mimetypes import guess_type
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import fleep
 import httpx
 import nonebot_plugin_localstore as store
-from nonebot import get_bot, logger
+from nonebot import get_bot
 from nonebot.adapters import Event, MessageSegment
 from nonebot.internal.matcher import current_event
-from nonebot.log import default_filter, logger_id
 from nonebot_plugin_userinfo import get_user_info
 
 from ..config import mas_config
 from ..models import Resource
 from .adapters import ADAPTER_CLASSES
-
-if TYPE_CHECKING:
-    from loguru import Record
+from .logger import logger
 
 FILES_DIR = store.get_plugin_data_dir() / "files"
 FILES_CACHED_DIR = store.get_plugin_cache_dir() / "files"
@@ -127,49 +123,6 @@ async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optiona
         return await download_file(url, proxy=mas_config.telegram_proxy)
 
     return None
-
-
-def _mas_filter(record: "Record") -> bool:
-    """MAS 日志过滤器，仅输出 MAS 相关日志"""
-    if mas_config.mas_log_only and (record["name"] is None or not record["name"].startswith("muika")):
-        return False
-
-    return default_filter(record)
-
-
-def init_logger():
-    console_handler_level = mas_config.log_level
-
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
-
-    log_file_path = f"{log_dir}/{time.strftime('%Y-%m-%d')}.log"
-
-    # 移除 NoneBot 默认的日志处理器
-    try:
-        logger.remove(logger_id)
-        # 添加新的日志处理器
-        logger.add(
-            sys.stdout,
-            level=console_handler_level,
-            diagnose=True,
-            format="<lvl>[{level}] {function}: {message}</lvl>",
-            filter=_mas_filter,
-            colorize=True,
-        )
-
-        logger.add(
-            log_file_path,
-            level="DEBUG",
-            format="[{time:YYYY-MM-DD HH:mm:ss}] [{level}] {function}: {message}",
-            encoding="utf-8",
-            rotation="1 day",
-            retention="7 days",
-        )
-    # 如果遇到其他日志处理器已处理，则跳过
-    except ValueError:
-        logger.debug("日志处理器已存在，跳过初始化")
 
 
 def get_version() -> str:

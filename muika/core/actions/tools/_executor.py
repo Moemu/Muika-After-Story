@@ -3,10 +3,10 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Literal
 
-from nonebot import logger
 from pydantic import Field
 
 from muika.config import mas_config
+from muika.utils.logger import logger
 
 from ..schema import ActionOutput
 from ._base import BaseTool

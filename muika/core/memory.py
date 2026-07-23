@@ -7,13 +7,13 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Literal, Optional
 
-from nonebot import logger
 from nonebot_plugin_orm import get_scoped_session
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
 from muika.models import Resource
+from muika.utils.logger import logger
 
 
 class MemoryLayer(str, Enum):

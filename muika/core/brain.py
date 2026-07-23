@@ -2,13 +2,12 @@
 from datetime import datetime
 from typing import List, Optional, TypeVar
 
-from nonebot import logger
-
 from muika.config import get_model_config_manager, mas_config
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
 from muika.template import PromptTemplatesData, generate_prompt_from_template
+from muika.utils.logger import logger
 
 from .events import Event
 from .memory import MemoryManager, MemoryRecord

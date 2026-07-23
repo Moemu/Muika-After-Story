@@ -3,8 +3,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from time import sleep
 
-from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_dir
+
+from muika.utils.logger import logger
 
 DATA_FILE = get_plugin_data_dir() / "user_agreement.json"
 

@@ -1,9 +1,10 @@
 from typing import Any, AsyncGenerator, List, Literal, Optional, Union, overload
 
 import ollama
-from nonebot import logger
 from ollama import ResponseError
 from pydantic import TypeAdapter
+
+from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,

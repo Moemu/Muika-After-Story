@@ -11,7 +11,6 @@
 import inspect
 from typing import Any, Optional, Type, get_type_hints
 
-from nonebot import logger
 from nonebot.adapters import Bot, Event
 from nonebot.internal.matcher import (
     current_bot,
@@ -22,6 +21,8 @@ from nonebot.matcher import Matcher
 from nonebot.rule import Rule
 from nonebot.typing import T_State
 from pydantic import BaseModel
+
+from muika.utils.logger import logger
 
 from ..utils import is_coroutine_callable
 from ._types import ASYNC_FUNCTION_CALL_FUNC, F

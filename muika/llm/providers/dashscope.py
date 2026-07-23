@@ -9,7 +9,8 @@ from dashscope.api_entities.dashscope_response import (
     GenerationResponse,
     MultiModalConversationResponse,
 )
-from nonebot import logger
+
+from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,

@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from nonebot import logger
 from nonebot_plugin_orm import get_scoped_session
 from pydantic import BaseModel, Field
 
@@ -20,6 +19,7 @@ from muika.core.constants import DIGEST_MIN_SCORE
 from muika.core.topic_manager import EventTopic, TopicManager, TopicSource
 from muika.database.crud import TopicHistoryCRUD
 from muika.llm import ModelRequest, load_model
+from muika.utils.logger import logger
 
 _MAX_CANDIDATES_PER_SOURCE = 12
 _MAX_EVALUATIONS_PER_SOURCE = 8

@@ -1,9 +1,10 @@
 import asyncio
 from typing import Dict, List, Optional
 
-from nonebot import logger
 from nonebot.adapters import Event
 from nonebot_plugin_alconna.uniseg import UniMessage, UniMsg
+
+from muika.utils.logger import logger
 
 from ..config import mas_config
 

@@ -25,8 +25,9 @@ from azure.ai.inference.models import (
 )
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
-from nonebot import logger
 from pydantic import TypeAdapter
+
+from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,

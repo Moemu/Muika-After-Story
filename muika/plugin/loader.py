@@ -16,8 +16,9 @@ from typing import Dict, Optional, Set
 
 import nonebot_plugin_localstore as store
 from nonebot import load_plugin as load_plugin_as_nonebot
-from nonebot import logger
 from nonebot.plugin import PluginMetadata
+
+from muika.utils.logger import logger
 
 from .models import Plugin
 from .utils import path_to_module_name

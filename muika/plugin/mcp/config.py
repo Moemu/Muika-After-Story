@@ -3,9 +3,10 @@ import shutil
 from pathlib import Path
 from typing import Any, Literal
 
-from nonebot import logger
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing_extensions import Self
+
+from muika.utils.logger import logger
 
 CONFIG_PATH = Path("./configs/mcp.json")
 

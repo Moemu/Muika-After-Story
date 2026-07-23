@@ -23,10 +23,10 @@ from google.genai.types import (
     Tool,
 )
 from httpx import ConnectError
-from nonebot import logger
 from pydantic import BaseModel, TypeAdapter
 
 from muika.models import Resource
+from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,

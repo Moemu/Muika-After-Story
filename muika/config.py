@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 import yaml as yaml_
-from nonebot import get_driver, get_plugin_config, logger
+from nonebot import get_driver, get_plugin_config
 from pydantic import BaseModel, field_validator
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
+
+from muika.utils.logger import logger
 
 from .llm import ModelConfig
 

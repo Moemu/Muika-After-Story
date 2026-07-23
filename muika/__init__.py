@@ -1,4 +1,4 @@
-from nonebot import logger, require
+from nonebot import require
 from nonebot.plugin import PluginMetadata, inherit_supported_adapters
 
 require("nonebot_plugin_alconna")
@@ -20,7 +20,8 @@ __plugin_meta__ = PluginMetadata(
 
 import nonebot_plugin_localstore as store  # noqa: E402
 
-from .utils.utils import get_version, init_logger  # noqa: E402
+from .utils.logger import init_logger, logger  # noqa: E402
+from .utils.utils import get_version  # noqa: E402
 
 init_logger()
 

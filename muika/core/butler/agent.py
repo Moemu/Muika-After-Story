@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 from typing import Annotated, Literal, Union
 
-from nonebot import logger
 from pydantic import BaseModel, Field, TypeAdapter
 
 from muika.config import get_model_config, mas_config
@@ -42,6 +41,7 @@ from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 from muika.models import Resource
 from muika.plugin.skills import get_skill_manager
+from muika.utils.logger import logger
 
 # ---------------------------------------------------------------------------
 # Prompts  (→ see muika/core/butler/_prompts.py)

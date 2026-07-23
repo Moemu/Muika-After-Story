@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from nonebot import logger
 from nonebot_plugin_orm import get_scoped_session
 
 from muika.database.crud import TopicHistoryCRUD
+from muika.utils.logger import logger
 
 from .state import MuikaState
 

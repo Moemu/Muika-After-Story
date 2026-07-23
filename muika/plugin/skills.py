@@ -9,12 +9,12 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import yaml
-from nonebot import logger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from muika.config import BUILTIN_SKILLS_PATH, USER_SKILL_PATHS, mas_config
+from muika.utils.logger import logger
 
 _SKILL_FILENAME = "SKILL.md"
 """技能定义文件名"""

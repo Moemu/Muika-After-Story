@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any, Optional
 
-from nonebot import logger
+from muika.utils.logger import logger
 
 from .config import get_mcp_server_config
 from .server import Server, Tool

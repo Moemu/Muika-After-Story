@@ -4,7 +4,6 @@ from io import BytesIO
 from typing import Any, AsyncGenerator, List, Literal, Union, overload
 
 import openai
-from nonebot import logger
 from openai import NOT_GIVEN, NotGiven
 from openai.types.chat import ChatCompletionMessage, ChatCompletionToolParam
 from openai.types.shared_params.response_format_json_schema import (
@@ -14,6 +13,7 @@ from openai.types.shared_params.response_format_json_schema import (
 from pydantic import TypeAdapter
 
 from muika.models import Resource
+from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,

@@ -6,8 +6,9 @@ from datetime import datetime
 from random import random
 from typing import Literal, Optional
 
-from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_dir
+
+from muika.utils.logger import logger
 
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
