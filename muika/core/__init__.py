@@ -1,3 +1,11 @@
+"""Muika Core -- persona engine.
+
+Provides state, events, and supporting data types at package level.
+The ``Muika`` class (event loop) should be imported directly from
+``muika.core.loop`` to avoid pulling in heavy dependencies (LLM, DB)
+at package import time.
+"""
+
 from .events import (
     Event,
     RSSUpdate,
@@ -6,19 +14,14 @@ from .events import (
     TimeTickPayload,
     UserMessagePayload,
 )
-from .loop import Muika
 from .state import MuikaState
-
-muika = Muika()
 
 __all__ = [
     "Event",
-    "UserMessagePayload",
-    "TimeTickPayload",
+    "MuikaState",
     "RSSUpdate",
     "SessionBootstrapEvent",
     "SessionEndEvent",
-    "Muika",
-    "muika",
-    "MuikaState",
+    "TimeTickPayload",
+    "UserMessagePayload",
 ]

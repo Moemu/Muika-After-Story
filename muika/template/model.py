@@ -39,8 +39,8 @@ class PromptTemplatesData(BaseModel):
 
     # MuikaState keeps a runtime reference to MemoryManager for action tools.
     # It is not prompt data, so Pydantic must treat it as an opaque object.
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
-    """允许其他模板参数传入"""
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True, defer_build=True)
+    """允许其他模板参数传入。defer_build 避免 MemoryManager 前向引用未解析时报错。"""
 
     @model_validator(mode="after")
     def load_state_desc(self) -> "PromptTemplatesData":

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
@@ -44,7 +46,7 @@ class MuikaState:
     active_topic: Optional["ActiveTopicState"] = field(default=None)
     """当前活跃话题，由 TopicManager 写入，Session 结束时清空并评分。"""
 
-    memory: Optional["MemoryManager"] = field(default=None, repr=False)
+    memory: Optional[MemoryManager] = field(default=None, repr=False)
     """对 MemoryManager 的引用，由外部注入，供 Action 工具访问"""
 
     def tick_state(self, event: "Event", dt: float):

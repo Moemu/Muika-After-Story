@@ -9,18 +9,16 @@ Functions:
     get_plugins: 获取已加载的插件列表
 """
 
+import importlib
 import inspect
 import os
 from pathlib import Path
 from typing import Dict, Optional, Set
 
-import nonebot_plugin_localstore as store
-from nonebot import load_plugin as load_plugin_as_nonebot
-from nonebot.plugin import PluginMetadata
-
+from muika.config import mas_config
 from muika.utils.logger import logger
 
-from .models import Plugin
+from .models import Plugin, PluginMetadata
 from .utils import path_to_module_name
 
 _plugins: Dict[str, Plugin] = {}
@@ -48,14 +46,13 @@ def load_plugin(plugin_path: Path | str, base_path=Path.cwd()) -> Optional[Plugi
             raise ValueError(f"插件 {module_name} 包名出现冲突！")
         _declared_plugins.add(module_name)
 
-        # module = importlib.import_module(plugin_path)
-        nb_plugin = load_plugin_as_nonebot(plugin_path)
-        assert nb_plugin
+        module = importlib.import_module(str(plugin_path))
+        assert module
 
         # get plugin metadata
-        metadata: Optional[PluginMetadata] = nb_plugin.metadata
+        metadata: Optional[PluginMetadata] = module.metadata
 
-        plugin = Plugin(name=nb_plugin.module_name, module=nb_plugin.module, package_name=module_name, meta=metadata)
+        plugin = Plugin(name=module.module_name, module=module.module, package_name=module_name, meta=metadata)
 
         _plugins[plugin.package_name] = plugin
 
@@ -152,12 +149,11 @@ def get_plugin_data_dir() -> Path:
     获取 Muika-After-Story 插件数据目录
 
     对于 MAS 的插件，它们的插件目录位于 MAS 的插件目录中下的 `plugins` 文件夹，并以插件名命名
-    (`nonebot_plugin_localstore.get_plugin_data_dir`)
     """
     plugin_name = _get_caller_plugin_name()
     plugin_name = plugin_name or ".unknown"
 
-    plugin_dir = store.get_plugin_data_dir() / "plugin"
+    plugin_dir = mas_config.data_dir / "plugin"
     plugin_dir = plugin_dir.joinpath(plugin_name).resolve()
     plugin_dir.mkdir(parents=True, exist_ok=True)
 

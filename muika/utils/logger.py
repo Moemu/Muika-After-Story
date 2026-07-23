@@ -1,7 +1,5 @@
-"""Standalone logger module for Muika-After-Story.
-
-Provides a loguru-based logger with console and file handlers,
-replacing the dependency on nonebot's logger.
+"""
+Standalone logger module for Muika-After-Story.
 """
 
 from __future__ import annotations
@@ -46,7 +44,7 @@ def init_logger():
 
     log_file_path = f"{log_dir}/{time.strftime('%Y-%m-%d')}.log"
 
-    # 清除所有已有处理器（包括 nonebot 注册的默认处理器）
+    # 清除所有已有处理器
     logger.remove()
 
     # 添加控制台处理器

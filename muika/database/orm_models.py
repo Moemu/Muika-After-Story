@@ -1,11 +1,18 @@
+"""SQLAlchemy ORM models."""
+
 from typing import Optional
 
-from nonebot_plugin_orm import Model
 from sqlalchemy import Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
-class Usage(Model):
+class Base(DeclarativeBase):
+    """Shared declarative base for all ORM models."""
+
+
+class Usage(Base):
+    __tablename__ = "usage"
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     plugin: Mapped[str] = mapped_column(String)
     type: Mapped[str] = mapped_column(String, nullable=False)
@@ -13,27 +20,29 @@ class Usage(Model):
     tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
 
 
-class MemoryRecordORM(Model):
+class MemoryRecordORM(Base):
+    """Persistent storage for CoreIdentity / RelationshipState / PreferenceProfile layers.
+
+    ``layer`` distinguishes the tier; ``key`` + ``layer`` is treated as unique
+    at the application level (upsert semantics).
     """
-    持久化 CoreIdentity / RelationshipState / PreferenceProfile 三层记忆。
-    layer 字段区分层级，key 与 layer 的组合在应用层保持唯一（upsert 语义）。
-    """
+
+    __tablename__ = "memory_record"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    layer: Mapped[str] = mapped_column(String, index=True)  # MemoryLayer value
-    category: Mapped[str] = mapped_column(String)  # MemoryCategory value
+    layer: Mapped[str] = mapped_column(String, index=True)
+    category: Mapped[str] = mapped_column(String)
     key: Mapped[str] = mapped_column(String, index=True)
     value: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[str] = mapped_column(String)  # ISO8601
+    created_at: Mapped[str] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String)
-    expires_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 仅 STATE 层使用
+    expires_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
-class ArchiveRecordORM(Model):
-    """
-    持久化历史 Session 摘要（ARCHIVE 层）。
-    与 MemoryRecordORM 分表，因为查询模式完全不同（按 session_id / 时间段检索）。
-    """
+class ArchiveRecordORM(Base):
+    """Persistent storage for historical session summaries (ARCHIVE layer)."""
+
+    __tablename__ = "archive_record"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(String, index=True)
@@ -43,14 +52,13 @@ class ArchiveRecordORM(Model):
     created_at: Mapped[str] = mapped_column(String)
 
 
-class TopicHistoryORM(Model):
-    """
-    话题使用历史，用于冷却周期判断和用户参与度评估。
-    topic_id 全局唯一（一行对应一个话题的累计记录）。
-    """
+class TopicHistoryORM(Base):
+    """Topic usage history for cooldown and engagement tracking."""
+
+    __tablename__ = "topic_history"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     topic_id: Mapped[str] = mapped_column(String, unique=True, index=True)
-    last_used_at: Mapped[str] = mapped_column(String)  # ISO8601
+    last_used_at: Mapped[str] = mapped_column(String)
     use_count: Mapped[int] = mapped_column(Integer, default=1)
     engaged_count: Mapped[int] = mapped_column(Integer, default=0)

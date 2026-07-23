@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from nonebot_plugin_orm import async_scoped_session
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .orm_models import ArchiveRecordORM, MemoryRecordORM, TopicHistoryORM, Usage
 
@@ -10,7 +10,7 @@ from .orm_models import ArchiveRecordORM, MemoryRecordORM, TopicHistoryORM, Usag
 class UsageORM:
     @staticmethod
     async def get_usage(
-        session: async_scoped_session,
+        session: AsyncSession,
         plugin: Optional[str],
         date: Optional[str],
         type: Optional[Literal["chat", "embedding"]] = None,
@@ -35,7 +35,7 @@ class UsageORM:
 
     @staticmethod
     async def save_usage(
-        session: async_scoped_session, plugin: str, total_tokens: int, type: Literal["chat", "embedding"] = "chat"
+        session: AsyncSession, plugin: str, total_tokens: int, type: Literal["chat", "embedding"] = "chat"
     ):
         """
         保存用量信息
@@ -60,7 +60,7 @@ class UsageORM:
 class MemoryRecordCRUD:
     @staticmethod
     async def upsert(
-        session: async_scoped_session,
+        session: AsyncSession,
         layer: str,
         category: str,
         key: str,
@@ -98,7 +98,7 @@ class MemoryRecordCRUD:
 
     @staticmethod
     async def delete(
-        session: async_scoped_session,
+        session: AsyncSession,
         layer: str,
         key: str,
     ) -> bool:
@@ -113,7 +113,7 @@ class MemoryRecordCRUD:
         return False
 
     @staticmethod
-    async def get_all(session: async_scoped_session) -> list[MemoryRecordORM]:
+    async def get_all(session: AsyncSession) -> list[MemoryRecordORM]:
         """返回全部记忆记录（供启动时全量加载）。"""
         result = await session.execute(select(MemoryRecordORM))
         return list(result.scalars().all())
@@ -123,7 +123,7 @@ class MemoryRecordCRUD:
 class ArchiveCRUD:
     @staticmethod
     async def add(
-        session: async_scoped_session,
+        session: AsyncSession,
         session_id: str,
         summary: str,
         period_start: str,
@@ -141,7 +141,7 @@ class ArchiveCRUD:
         return record
 
     @staticmethod
-    async def list_all(session: async_scoped_session) -> list[ArchiveRecordORM]:
+    async def list_all(session: AsyncSession) -> list[ArchiveRecordORM]:
         """返回全部历史摘要，按 period_start 升序。"""
         result = await session.execute(select(ArchiveRecordORM).order_by(ArchiveRecordORM.period_start))
         return list(result.scalars().all())
@@ -150,7 +150,7 @@ class ArchiveCRUD:
 class TopicHistoryCRUD:
     @staticmethod
     async def get_by_topic_id(
-        session: async_scoped_session,
+        session: AsyncSession,
         topic_id: str,
     ) -> Optional[TopicHistoryORM]:
         """查找话题历史记录，不存在则返回 None。"""
@@ -159,7 +159,7 @@ class TopicHistoryCRUD:
 
     @staticmethod
     async def record(
-        session: async_scoped_session,
+        session: AsyncSession,
         topic_id: str,
         user_engaged: bool,
     ) -> TopicHistoryORM:

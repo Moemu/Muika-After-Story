@@ -3,8 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, Optional, TypeAlias
 
-from nonebot_plugin_localstore import get_plugin_data_dir
-
+from muika.config import mas_config
 from muika.models import Message
 
 
@@ -12,7 +11,7 @@ def _get_last_connection_time() -> Optional[datetime]:
     """
     从日志文件中获取上一次对话的时间
     """
-    RECORDS_PATH = get_plugin_data_dir() / "connection_records"
+    RECORDS_PATH = mas_config.data_dir / "connection_records"
     RECORDS_PATH.mkdir(exist_ok=True, parents=True)
 
     pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.txt$")

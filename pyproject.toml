@@ -57,7 +57,7 @@ adapters = [
     { name = "OneBot V12", module_name = "nonebot.adapters.onebot.v12" },
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
 ]
-plugins = ["muika"]
+plugins = ["muika_bot"]
 builtin_plugins = []
 
 [tool.pytest.ini_options]

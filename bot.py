@@ -27,6 +27,6 @@ enable_adapters: list[str] = driver.config.model_dump().get("enable_adapters", [
 for adapter in enable_adapters:
     load_specified_adapter(driver, adapter)
 
-nonebot.load_plugin("muika")
+nonebot.load_plugin("muika_bot")
 
 nonebot.run()

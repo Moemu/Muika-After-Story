@@ -4,22 +4,23 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from nonebot_plugin_orm import get_scoped_session
 from pydantic import BaseModel, Field
 
 from muika.config import get_model_config, mas_config
-from muika.core.actions.tools.rss._parser import (
+from muika.database.crud import TopicHistoryCRUD
+from muika.database.db import get_session
+from muika.llm import ModelRequest, load_model
+from muika.utils.logger import logger
+
+from .actions.tools.rss._parser import (
     ParsedResult,
     extract_web_content,
     fetch_web_content,
     parse_rss_feed,
 )
-from muika.core.actions.tools.rss._source import RSS_SOURCES
-from muika.core.constants import DIGEST_MIN_SCORE
-from muika.core.topic_manager import EventTopic, TopicManager, TopicSource
-from muika.database.crud import TopicHistoryCRUD
-from muika.llm import ModelRequest, load_model
-from muika.utils.logger import logger
+from .actions.tools.rss._source import RSS_SOURCES
+from .constants import DIGEST_MIN_SCORE
+from .topic_manager import EventTopic, TopicManager, TopicSource
 
 _MAX_CANDIDATES_PER_SOURCE = 12
 _MAX_EVALUATIONS_PER_SOURCE = 8
@@ -125,95 +126,91 @@ class DigestAgent:
     async def fetch_and_digest(self) -> None:
         """尝试抓取并生成一篇未读新闻的摘要。"""
         sources = [source for source in RSS_SOURCES.values() if source.digest]
-        db_session = get_scoped_session()
 
-        for source in sources:
-            try:
-                logger.debug(f"[DigestAgent] Fetching RSS: {source.name}")
-                rss_content = await fetch_web_content(source.url)
-                entries = parse_rss_feed(rss_content)
+        async with get_session() as db_session:
+            for source in sources:
+                try:
+                    logger.debug(f"[DigestAgent] Fetching RSS: {source.name}")
+                    rss_content = await fetch_web_content(source.url)
+                    entries = parse_rss_feed(rss_content)
 
-                entries = random.sample(entries, min(len(entries), _MAX_CANDIDATES_PER_SOURCE))
+                    entries = random.sample(entries, min(len(entries), _MAX_CANDIDATES_PER_SOURCE))
 
-                scored_candidates: list[ScoredCandidate] = []
-                for idx, entry in enumerate(entries):
-                    if idx >= _MAX_EVALUATIONS_PER_SOURCE:
-                        break
+                    scored_candidates: list[ScoredCandidate] = []
+                    for idx, entry in enumerate(entries):
+                        if idx >= _MAX_EVALUATIONS_PER_SOURCE:
+                            break
 
-                    url_hash = hashlib.md5(entry.link.encode()).hexdigest()[:12]
-                    topic_id = f"event_rss_{source.id}_{url_hash}"
+                        url_hash = hashlib.md5(entry.link.encode()).hexdigest()[:12]
+                        topic_id = f"event_rss_{source.id}_{url_hash}"
 
-                    # 检查是否已处理过
-                    history = await TopicHistoryCRUD.get_by_topic_id(db_session, topic_id)
-                    if history:
-                        continue
+                        history = await TopicHistoryCRUD.get_by_topic_id(db_session, topic_id)
+                        if history:
+                            continue
 
-                    content = await extract_web_content(entry.link)
-                    if not content:
-                        continue
+                        content = await extract_web_content(entry.link)
+                        if not content:
+                            continue
 
-                    assessment = await self._assess_entry_for_muika(
-                        source_name=source.name,
-                        title=entry.title,
-                        content=content,
-                    )
-                    if assessment is None:
-                        continue
-
-                    if (not assessment.keep) or assessment.score < DIGEST_MIN_SCORE:
-                        logger.debug(
-                            f"[DigestAgent] Skip low-fit entry ({assessment.score}) from {source.name}: "
-                            f"{entry.title} reason={assessment.reason}"
+                        assessment = await self._assess_entry_for_muika(
+                            source_name=source.name,
+                            title=entry.title,
+                            content=content,
                         )
-                        continue
+                        if assessment is None:
+                            continue
 
-                    if not assessment.summary.strip():
-                        logger.debug(f"[DigestAgent] Skip kept entry without summary: {entry.title}")
-                        continue
+                        if (not assessment.keep) or assessment.score < DIGEST_MIN_SCORE:
+                            logger.debug(
+                                f"[DigestAgent] Skip low-fit entry ({assessment.score}) from {source.name}: "
+                                f"{entry.title} reason={assessment.reason}"
+                            )
+                            continue
 
-                    scored_candidates.append(
-                        ScoredCandidate(
-                            score=assessment.score,
-                            entry=entry,
-                            topic_id=topic_id,
-                            summary=assessment.summary.strip(),
-                            primary_theme=assessment.primary_theme,
+                        if not assessment.summary.strip():
+                            logger.debug(f"[DigestAgent] Skip kept entry without summary: {entry.title}")
+                            continue
+
+                        scored_candidates.append(
+                            ScoredCandidate(
+                                score=assessment.score,
+                                entry=entry,
+                                topic_id=topic_id,
+                                summary=assessment.summary.strip(),
+                                primary_theme=assessment.primary_theme,
+                            )
                         )
+
+                    if not scored_candidates:
+                        logger.debug(f"[DigestAgent] No candidate passed score gate in source: {source.name}")
+                        continue
+
+                    scored_candidates.sort(key=lambda item: item.score, reverse=True)
+                    chosen = scored_candidates[0]
+
+                    logger.info(
+                        f"[DigestAgent] Digesting selected entry score={chosen.score} source={source.name}: "
+                        f"{chosen.entry.title}"
                     )
 
-                if not scored_candidates:
-                    logger.debug(f"[DigestAgent] No candidate passed score gate in source: {source.name}")
-                    continue
+                    topic = EventTopic(
+                        id=chosen.topic_id,
+                        source=TopicSource.EVENT,
+                        category=source.id,
+                        title=chosen.entry.title,
+                        content=chosen.summary,
+                        date=chosen.entry.published,
+                        cooldown_days=7,
+                        tags=["news", source.id, chosen.primary_theme],
+                    )
+                    self.topic_manager.enqueue_event(topic)
 
-                scored_candidates.sort(key=lambda item: item.score, reverse=True)
-                chosen = scored_candidates[0]
+                    await TopicHistoryCRUD.record(db_session, topic_id=chosen.topic_id, user_engaged=False)
 
-                logger.info(
-                    f"[DigestAgent] Digesting selected entry score={chosen.score} source={source.name}: "
-                    f"{chosen.entry.title}"
-                )
+                    logger.success(f"[DigestAgent] Successfully digested and enqueued: {chosen.topic_id}")
+                    return
 
-                # 压入话题队列
-                topic = EventTopic(
-                    id=chosen.topic_id,
-                    source=TopicSource.EVENT,
-                    category=source.id,
-                    title=chosen.entry.title,
-                    content=chosen.summary,
-                    date=chosen.entry.published,
-                    cooldown_days=7,
-                    tags=["news", source.id, chosen.primary_theme],
-                )
-                self.topic_manager.enqueue_event(topic)
+                except Exception as e:
+                    logger.error(f"[DigestAgent] Error fetching source {source.name}: {e}")
 
-                # 占位符写入记录，避免下次重复抓取
-                await TopicHistoryCRUD.record(db_session, topic_id=chosen.topic_id, user_engaged=False)
-                await db_session.commit()
-
-                logger.success(f"[DigestAgent] Successfully digested and enqueued: {chosen.topic_id}")
-                return  # 每次只处理 1 篇新内容
-
-            except Exception as e:
-                logger.error(f"[DigestAgent] Error fetching source {source.name}: {e}")
-
-        logger.debug("[DigestAgent] No new unread entries found in checked sources.")
+            logger.debug("[DigestAgent] No new unread entries found in checked sources.")

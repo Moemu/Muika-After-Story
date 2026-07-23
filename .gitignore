@@ -149,3 +149,4 @@ configs/*
 !topics.yml
 plugins
 docs
+data

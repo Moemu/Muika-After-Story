@@ -4,13 +4,13 @@ from dataclasses import dataclass, field
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Optional, Type, Union
 
-from nonebot.plugin import PluginMetadata as NonebotPluginMetadata
-
 if TYPE_CHECKING:
+    from nonebot.plugin import PluginMetadata as NonebotPluginMetadata
     from pydantic import BaseModel
 
 
-class PluginMetadata(NonebotPluginMetadata):
+@dataclass
+class PluginMetadata:
     """MAS 插件元数据"""
 
     name: str
@@ -37,7 +37,7 @@ class Plugin:
     """插件模块对象"""
     package_name: str
     """模块包名"""
-    meta: Optional[Union[PluginMetadata, NonebotPluginMetadata]] = None
+    meta: Optional[Union[PluginMetadata, "NonebotPluginMetadata"]] = None
     """插件元数据"""
 
     def __hash__(self) -> int:

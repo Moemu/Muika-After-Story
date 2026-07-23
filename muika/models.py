@@ -71,7 +71,7 @@ class Message:
     若要获取格式化的 datetime 对象，请使用 format_time
     """
     userid: str = ""
-    """Nonebot 的用户id"""
+    """用户id"""
     groupid: str = "-1"
     """群组id，私聊设为-1"""
     message: str = ""

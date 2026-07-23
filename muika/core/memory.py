@@ -7,11 +7,9 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Literal, Optional
 
-from nonebot_plugin_orm import get_scoped_session
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
-from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
 from muika.models import Resource
 from muika.utils.logger import logger
 
@@ -104,51 +102,53 @@ class MemoryManager:
 
     async def load(self):
         """从数据库加载全量记忆，若有历史数据则进入 Resume 模式。"""
+        from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
+        from muika.database.db import get_session
+
         try:
-            session = get_scoped_session()
-
-            db_records = await MemoryRecordCRUD.get_all(session)
-            for r in db_records:
-                storage_key = f"{r.layer}:{r.category}:{r.key}"
-                self.records[storage_key] = MemoryRecord(
-                    id=r.id,
-                    layer=MemoryLayer(r.layer),
-                    category=MemoryCategory(r.category),
-                    key=r.key,
-                    value=r.value,
-                    created_at=datetime.fromisoformat(r.created_at),
-                    updated_at=datetime.fromisoformat(r.updated_at),
-                    expires_at=datetime.fromisoformat(r.expires_at) if r.expires_at else None,
-                )
-
-            db_archives = await ArchiveCRUD.list_all(session)
-            for a in db_archives:
-                self.archives.append(
-                    ArchiveEntry(
-                        id=a.id,
-                        session_id=a.session_id,
-                        summary=a.summary,
-                        period_start=datetime.fromisoformat(a.period_start),
-                        period_end=datetime.fromisoformat(a.period_end),
-                        created_at=datetime.fromisoformat(a.created_at),
+            async with get_session() as session:
+                db_records = await MemoryRecordCRUD.get_all(session)
+                for r in db_records:
+                    storage_key = f"{r.layer}:{r.category}:{r.key}"
+                    self.records[storage_key] = MemoryRecord(
+                        id=r.id,
+                        layer=MemoryLayer(r.layer),
+                        category=MemoryCategory(r.category),
+                        key=r.key,
+                        value=r.value,
+                        created_at=datetime.fromisoformat(r.created_at),
+                        updated_at=datetime.fromisoformat(r.updated_at),
+                        expires_at=datetime.fromisoformat(r.expires_at) if r.expires_at else None,
                     )
+
+                db_archives = await ArchiveCRUD.list_all(session)
+                for a in db_archives:
+                    self.archives.append(
+                        ArchiveEntry(
+                            id=a.id,
+                            session_id=a.session_id,
+                            summary=a.summary,
+                            period_start=datetime.fromisoformat(a.period_start),
+                            period_end=datetime.fromisoformat(a.period_end),
+                            created_at=datetime.fromisoformat(a.created_at),
+                        )
+                    )
+
+                if not self.records and not self.archives:
+                    logger.debug("[Memory] No data in DB — starting fresh (first session).")
+                    return
+
+                self.session.is_first_session = False
+
+                logger.info(
+                    f"[Memory] Loaded from DB — records={len(self.records)} "
+                    f"archives={len(self.archives)} "
+                    f"mode=resume"
                 )
-
-            if not self.records and not self.archives:
-                logger.debug("[Memory] No data in DB — starting fresh (first session).")
-                return
-
-            self.session.is_first_session = False
-
-            logger.info(
-                f"[Memory] Loaded from DB — records={len(self.records)} "
-                f"archives={len(self.archives)} "
-                f"mode=resume"
-            )
-            by_layer: dict[str, int] = {}
-            for r in self.records.values():
-                by_layer[r.layer.value] = by_layer.get(r.layer.value, 0) + 1
-            logger.debug(f"[Memory] Layer breakdown: {by_layer}")
+                by_layer: dict[str, int] = {}
+                for r in self.records.values():
+                    by_layer[r.layer.value] = by_layer.get(r.layer.value, 0) + 1
+                logger.debug(f"[Memory] Layer breakdown: {by_layer}")
 
         except Exception as e:
             logger.error(f"[Memory] Failed to load from DB: {e}")
@@ -203,17 +203,19 @@ class MemoryManager:
             )
 
         # 持久化到 DB
+        from muika.database.crud import MemoryRecordCRUD
+        from muika.database.db import get_session
+
         try:
-            db_session = get_scoped_session()
-            await MemoryRecordCRUD.upsert(
-                db_session,
-                layer=layer.value,
-                category=category.value,
-                key=key,
-                value=value,
-                expires_at=expires_at.isoformat() if expires_at else None,
-            )
-            await db_session.commit()
+            async with get_session() as db_session:
+                await MemoryRecordCRUD.upsert(
+                    db_session,
+                    layer=layer.value,
+                    category=category.value,
+                    key=key,
+                    value=value,
+                    expires_at=expires_at.isoformat() if expires_at else None,
+                )
         except Exception as e:
             logger.error(f"[Memory] DB upsert failed for {storage_key!r}: {e}")
 
@@ -231,10 +233,12 @@ class MemoryManager:
             del self.records[storage_key]
             logger.debug(f"[Memory] Forgotten: {storage_key}")
             # 持久化删除到 DB
+            from muika.database.crud import MemoryRecordCRUD
+            from muika.database.db import get_session
+
             try:
-                db_session = get_scoped_session()
-                await MemoryRecordCRUD.delete(db_session, layer=layer.value, key=key)
-                await db_session.commit()
+                async with get_session() as db_session:
+                    await MemoryRecordCRUD.delete(db_session, layer=layer.value, key=key)
             except Exception as e:
                 logger.error(f"[Memory] DB delete failed for {storage_key!r}: {e}")
         else:
@@ -256,16 +260,18 @@ class MemoryManager:
         self.archives.append(entry)
         logger.debug(f"[Memory] Archive added for session {self.session.session_id}")
         # 持久化到 DB
+        from muika.database.crud import ArchiveCRUD
+        from muika.database.db import get_session
+
         try:
-            db_session = get_scoped_session()
-            await ArchiveCRUD.add(
-                db_session,
-                session_id=self.session.session_id,
-                summary=summary,
-                period_start=period_start.isoformat(),
-                period_end=period_end.isoformat(),
-            )
-            await db_session.commit()
+            async with get_session() as db_session:
+                await ArchiveCRUD.add(
+                    db_session,
+                    session_id=self.session.session_id,
+                    summary=summary,
+                    period_start=period_start.isoformat(),
+                    period_end=period_end.isoformat(),
+                )
         except Exception as e:
             logger.error(f"[Memory] DB archive insert failed: {e}")
 

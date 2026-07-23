@@ -11,15 +11,6 @@
 import inspect
 from typing import Any, Optional, Type, get_type_hints
 
-from nonebot.adapters import Bot, Event
-from nonebot.internal.matcher import (
-    current_bot,
-    current_event,
-    current_matcher,
-)
-from nonebot.matcher import Matcher
-from nonebot.rule import Rule
-from nonebot.typing import T_State
 from pydantic import BaseModel
 
 from muika.utils.logger import logger
@@ -34,13 +25,11 @@ _caller_data: dict[str, "Caller"] = {}
 
 
 class Caller:
-    def __init__(self, description: str, params: Optional[Type[BaseModel]] = None, rule: Optional[Rule] = None):
+    def __init__(self, description: str, params: Optional[Type[BaseModel]] = None):
         self._name: str = ""
         """函数名称"""
         self._description: str = description
         """函数描述"""
-        self._rule: Optional[Rule] = rule
-        """启用规则"""
         self._parameters: dict[str, Parameter] = {}
         """函数参数字典"""
         self._parameters_model: Optional[Type[BaseModel]] = params
@@ -88,15 +77,9 @@ class Caller:
         for name, param in sig.parameters.items():
             param_type = hints.get(name, None)
 
+            # 依赖注入发生段，留空作备用
             if param_type and isinstance(param_type, type):
-                if issubclass(param_type, Bot):
-                    inject_args[name] = current_bot.get()
-
-                elif issubclass(param_type, Event):
-                    inject_args[name] = current_event.get()
-
-                elif issubclass(param_type, Matcher):
-                    inject_args[name] = current_matcher.get()
+                pass
 
             # 填充默认值
             elif param.default != inspect.Parameter.empty:
@@ -163,7 +146,7 @@ class Caller:
         }
 
 
-def on_function_call(description: str, params: Optional[Type[BaseModel]] = None, rule: Optional[Rule] = None) -> Caller:
+def on_function_call(description: str, params: Optional[Type[BaseModel]] = None) -> Caller:
     """
     返回一个Caller类，可用于装饰一个函数，使其注册为一个可被AI调用的function call函数
 
@@ -172,7 +155,7 @@ def on_function_call(description: str, params: Optional[Type[BaseModel]] = None,
 
     :return: Caller对象
     """
-    caller = Caller(description=description, params=params, rule=rule)
+    caller = Caller(description=description, params=params)
     return caller
 
 
@@ -192,12 +175,8 @@ async def get_function_list() -> list[dict[str, dict]]:
     :return: 所有已注册的function call函数列表
     """
     tools: list[dict[str, dict]] = []
-    bot: Bot = current_bot.get()
-    event: Event = current_event.get()
-    state: T_State = {}
 
     for name, caller in _caller_data.items():
-        if caller._rule is None or await caller._rule(bot, event, state):
-            tools.append(caller.data())
+        tools.append(caller.data())
 
     return tools

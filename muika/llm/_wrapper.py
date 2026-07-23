@@ -4,10 +4,10 @@ import asyncio
 from functools import wraps
 from typing import TYPE_CHECKING, AsyncGenerator, Awaitable, Callable, TypeAlias, Union
 
-from nonebot_plugin_orm import get_scoped_session
+from muika.database.crud import UsageORM
+from muika.database.db import get_session
+from muika.plugin.loader import _get_caller_plugin_name
 
-from ..database.crud import UsageORM
-from ..plugin.loader import _get_caller_plugin_name
 from ._schema import (
     EmbeddingsBatchResult,
     ModelCompletions,
@@ -41,8 +41,8 @@ def record_plugin_usage(func: ASK_FUNC):
             total_usage = response.usage if response.usage > 0 else 0
 
             async with _usage_write_lock:
-                session = get_scoped_session()
-                await UsageORM.save_usage(session, plugin_name, total_usage)
+                async with get_session() as session:
+                    await UsageORM.save_usage(session, plugin_name, total_usage)
 
             return response
 
@@ -59,8 +59,8 @@ def record_plugin_usage(func: ASK_FUNC):
                     yield chunk
             finally:
                 async with _usage_write_lock:
-                    session = get_scoped_session()
-                    await UsageORM.save_usage(session, plugin_name, total_usage)
+                    async with get_session() as session:
+                        await UsageORM.save_usage(session, plugin_name, total_usage)
 
         return generator_wrapper()
 

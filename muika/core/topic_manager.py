@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from nonebot_plugin_orm import get_scoped_session
 
 from muika.database.crud import TopicHistoryCRUD
+from muika.database.db import get_session
 from muika.utils.logger import logger
 
 from .state import MuikaState
@@ -114,38 +114,40 @@ class TopicManager:
 
     async def _get_available_candidates(self) -> dict[str, list[tuple[StaticTopic, float]]]:
         """获取所有度过冷却期的话题，并根据历史互动率计算独立权重。"""
+        from muika.database.crud import TopicHistoryCRUD
+        from muika.database.db import get_session
+
         candidates: dict[str, list[tuple[StaticTopic, float]]] = {}
         try:
-            db_session = get_scoped_session()
-            now = datetime.now()
+            async with get_session() as db_session:
+                now = datetime.now()
 
-            for category in self.store.categories():
-                valid_topics: list[tuple[StaticTopic, float]] = []
-                for topic in self.store.get_by_category(category):
-                    history_record = await TopicHistoryCRUD.get_by_topic_id(db_session, topic.id)
+                for category in self.store.categories():
+                    valid_topics: list[tuple[StaticTopic, float]] = []
+                    for topic in self.store.get_by_category(category):
+                        history_record = await TopicHistoryCRUD.get_by_topic_id(db_session, topic.id)
 
-                    if not history_record:
-                        valid_topics.append((topic, 1.0))
-                        continue
+                        if not history_record:
+                            valid_topics.append((topic, 1.0))
+                            continue
 
-                    last_used_time = datetime.fromisoformat(history_record.last_used_at)
-                    if (now - last_used_time) < timedelta(days=topic.cooldown_days):
-                        continue
+                        last_used_time = datetime.fromisoformat(history_record.last_used_at)
+                        if (now - last_used_time) < timedelta(days=topic.cooldown_days):
+                            continue
 
-                    # 计算互动率权重惩罚：如果多次抛出但用户不理睬，则降低选中概率
-                    topic_weight = 1.0
-                    if history_record.use_count >= 2:
-                        engagement_rate = history_record.engaged_count / history_record.use_count
-                        if engagement_rate < 0.3:
-                            topic_weight = 0.3
-                        elif engagement_rate < 0.5:
-                            topic_weight = 0.6
+                        topic_weight = 1.0
+                        if history_record.use_count >= 2:
+                            engagement_rate = history_record.engaged_count / history_record.use_count
+                            if engagement_rate < 0.3:
+                                topic_weight = 0.3
+                            elif engagement_rate < 0.5:
+                                topic_weight = 0.6
 
-                    valid_topics.append((topic, topic_weight))
+                        valid_topics.append((topic, topic_weight))
 
-                if valid_topics:
-                    candidates[category] = valid_topics
-            return candidates
+                    if valid_topics:
+                        candidates[category] = valid_topics
+                return candidates
         except Exception as e:
             logger.error(f"[TopicManager] DB cooldown check failed: {e}")
             return {
@@ -214,9 +216,8 @@ class TopicManager:
     async def record_topic_used(self, topic_id: str, *, user_engaged: bool) -> None:
         """将话题使用记录写入 TopicHistory，供后续冷却期检查。"""
         try:
-            db_session = get_scoped_session()
-            await TopicHistoryCRUD.record(db_session, topic_id=topic_id, user_engaged=user_engaged)
-            await db_session.commit()
+            async with get_session() as db_session:
+                await TopicHistoryCRUD.record(db_session, topic_id=topic_id, user_engaged=user_engaged)
             logger.debug(f"[TopicManager] Recorded topic {topic_id!r} (engaged={user_engaged})")
         except Exception as e:
             logger.error(f"[TopicManager] Failed to record topic history for {topic_id!r}: {e}")

@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 import yaml as yaml_
-from nonebot import get_driver, get_plugin_config
-from pydantic import BaseModel, field_validator
+from pydantic import ValidationError, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
@@ -27,12 +27,11 @@ USER_SKILL_PATHS = (Path.home() / ".agents" / "skills", Path.home() / ".claude" 
 """用户级技能目录，仅在 load_user_skills 启用时扫描"""
 
 _model_config_manager: Optional["ModelConfigManager"] = None
-_default_master_id = list(get_driver().config.superusers)[0] if get_driver().config.superusers else ""
 
 
-class MASConfig(BaseModel):
-    master_id: str = _default_master_id
-    """对话目标ID"""
+class MASConfig(BaseSettings):
+    master_id: str = ""
+    """对话目标ID。"""
     max_memory_records: int = 100
     """最大记忆记录数(最近的N条对话)"""
     persona_template: str = "Muika.md.jinja2"
@@ -67,14 +66,32 @@ class MASConfig(BaseModel):
     """是否额外扫描用户级技能目录（~/.agents/skills 与 ~/.claude/skills）。
     内置技能目录 configs/skills 始终会被扫描。"""
 
+    core_ws_url: str = "ws://127.0.0.1:8765/ws"
+    """Core 进程的 WebSocket 地址。Bot 通过此地址连接 Core。"""
+
+    data_dir: Path = Path("./data")
+    """数据目录路径，用于存储连接记录等运行时数据。默认为当前工作目录。"""
+
     @field_validator("master_id")
     def validate_master_id(cls, v):
-        if not v:
-            logger.warning("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
-        return v
+        if v:
+            return v
+
+        superusers = os.getenv("SUPERUSERS")
+        if not superusers:
+            raise ValidationError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
+
+        try:
+            v = str(list(superusers)[0])
+            return v
+        except Exception as exc:
+            logger.error(exc)
+            raise ValidationError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
+
+    model_config = SettingsConfigDict(extra="allow")
 
 
-mas_config = get_plugin_config(MASConfig)
+mas_config = MASConfig()
 
 
 class ConfigFileHandler(FileSystemEventHandler):

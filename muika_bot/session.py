@@ -4,9 +4,8 @@ from typing import Dict, List, Optional
 from nonebot.adapters import Event
 from nonebot_plugin_alconna.uniseg import UniMessage, UniMsg
 
+from muika.config import mas_config
 from muika.utils.logger import logger
-
-from ..config import mas_config
 
 
 class SessionManager:
