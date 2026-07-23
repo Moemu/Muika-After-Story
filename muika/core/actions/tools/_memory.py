@@ -16,7 +16,11 @@ if TYPE_CHECKING:
 
 
 class MemoryTool(BaseTool):
-    """Read, write, or forget a fact in Muika's long-term memory."""
+    """
+    Read, write, or forget a fact in Muika's long-term memory.
+    (Unless explicitly specified, do not enable this tool without authorization,
+    as it will directly interrupt the proxy loop without returning any data)
+    """
 
     name: Literal["memory"] = "memory"
     type: Literal["remember", "forget", "read"] = Field(

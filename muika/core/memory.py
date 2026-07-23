@@ -11,6 +11,7 @@ from nonebot import logger
 from nonebot_plugin_orm import get_scoped_session
 from pydantic import BaseModel, Field
 
+from muika.config import mas_config
 from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
 from muika.models import Resource
 
@@ -89,7 +90,7 @@ class SessionState(BaseModel):
 
 
 class MemoryManager:
-    def __init__(self, max_turns: int = 16):
+    def __init__(self, max_turns: int = mas_config.max_memory_records):
         self.recent_turns: deque[SessionTurn] = deque(maxlen=max_turns)
         """Session 中的对话内容"""
 

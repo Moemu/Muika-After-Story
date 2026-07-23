@@ -1,8 +1,30 @@
+import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Optional, TypeAlias
 
+from nonebot_plugin_localstore import get_plugin_data_dir
+
 from muika.models import Message
+
+
+def _get_last_connection_time() -> Optional[datetime]:
+    """
+    从日志文件中获取上一次对话的时间
+    """
+    RECORDS_PATH = get_plugin_data_dir() / "connection_records"
+    RECORDS_PATH.mkdir(exist_ok=True, parents=True)
+
+    pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.txt$")
+
+    log_files = [p for p in RECORDS_PATH.iterdir() if p.is_file() and pattern.match(p.name)]
+
+    if not log_files:
+        return None
+
+    last_file = max(log_files, key=lambda p: p.stem).stem
+
+    return datetime.strptime(last_file, "%Y-%m-%d %H-%M-%S")
 
 
 @dataclass
@@ -52,7 +74,21 @@ class ScheduledTriggerEvent:
 @dataclass(frozen=True)
 class SessionBootstrapEvent:
     timestamp: datetime = field(default_factory=datetime.now)
+    last_chat_time: Optional[datetime] = field(default_factory=_get_last_connection_time)
     type: Literal["session_bootstrap"] = "session_bootstrap"
+
+    @property
+    def absence_bucket(self) -> str:
+        """计算当前 Session 的缺席时间段"""
+        if not self.last_chat_time:
+            return "short"
+        absence_duration = datetime.now() - self.last_chat_time
+        if absence_duration < timedelta(hours=3):
+            return "short"
+        elif absence_duration < timedelta(days=1):
+            return "medium"
+        else:
+            return "long"
 
 
 @dataclass(frozen=True)

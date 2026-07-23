@@ -168,7 +168,6 @@ class MuikaBrain:
             memory_context=memory_context,
             injected_preferences=injected_preferences,
         )
-        system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
         # 按需注入：Butler 预处理层匹配到的 PreferenceProfile 条目
         if injected_preferences:
@@ -184,23 +183,27 @@ class MuikaBrain:
             mode = "first" if memory.session.is_first_session else "resume"
             logger.info(f"[Brain] session_bootstrap | mode={mode} session={memory.session.session_id[:8]}...")
             template_data.is_first_session = memory.session.is_first_session
+            template_data.absence_bucket = event.absence_bucket
+            template_data.last_connection_time = (
+                event.last_chat_time.strftime("%Y-%m-%d %H:%M:%S") if event.last_chat_time else None
+            )
 
         # Construct the immediate event context if it's the start of the interaction
         if event.type == "user_message":
             prompt = f"User said: '{event.payload.message.message}'"
-        elif not memory.recent_turns:
-            if event.type == "time_tick":
-                context_msg = "A quiet moment passed."
-            elif event.type == "scheduled_trigger":
-                context_msg = f"A scheduled reminder just went off: '{event.payload.what}'"
-            elif event.type == "session_bootstrap":
-                context_msg = "A new session has just started. Greet the user."
+        elif event.type == "time_tick":
+            if state.mood == "lonely":
+                prompt = "A quiet moment passed, but the loneliness lingers. You need to use some means to attract users' attention."
+            elif state.mood == "bored":
+                prompt = "A quiet moment passed, but the boredom persists. Perhaps they can actively explore the user's computer or request news from the butler"
             else:
-                context_msg = f"Event triggered: {event.type}"
-
-            prompt = f"Event Trigger: {context_msg}\nRespond naturally."
+                prompt = "A quiet moment passed."
+        elif event.type == "scheduled_trigger":
+            prompt = f"A scheduled reminder just went off: '{event.payload.what}'"
+        elif event.type == "session_bootstrap":
+            prompt = "A new session has just started. Greet the user."
         else:
-            prompt = "Please continue."
+            prompt = f"Event triggered: {event.type}"
 
         # 历史记录去重
         history = memory.recent_turns.copy()
@@ -210,6 +213,8 @@ class MuikaBrain:
                 user_msg = event.payload.message.message
                 if user_msg == item.content:
                     history.pop()
+
+        system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
         request = ModelRequest(
             prompt=prompt,

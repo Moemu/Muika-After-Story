@@ -31,6 +31,8 @@ _default_master_id = list(get_driver().config.superusers)[0] if get_driver().con
 class MASConfig(BaseModel):
     master_id: str = _default_master_id
     """对话目标ID"""
+    max_memory_records: int = 100
+    """最大记忆记录数(最近的N条对话)"""
     persona_template: str = "Muika.md.jinja2"
     """默认人格模板"""
 

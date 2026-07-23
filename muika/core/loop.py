@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import time
 from datetime import datetime
@@ -6,6 +7,7 @@ from random import random
 from typing import Literal, Optional
 
 from nonebot import logger
+from nonebot_plugin_localstore import get_plugin_data_dir
 
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
@@ -146,6 +148,7 @@ class Muika:
             # ── Emotional pipeline (main Brain + Butler) ──────────────────────────
             injected_preferences = await self._fetch_preferences(event)
             await self._run_brain_pipeline(event, injected_preferences)
+            self._save_last_connection_time()
 
     @staticmethod
     def _log_event(event: Event) -> None:
@@ -248,10 +251,10 @@ class Muika:
 
             if butler_commands:
                 logger.info(f"[Brain] intercepted {len(butler_commands)} butler command(s)")
-            if clean_reply:
+            if reply:
                 logger.info(f"[Muika → User] {clean_reply!r}")
                 await self.executor.send_message(clean_reply)
-                self.memory.add_context("muika", clean_reply)
+                self.memory.add_context("muika", reply)
             if not butler_commands:
                 logger.debug("[Brain] no butler commands, turn complete.")
                 break
@@ -346,3 +349,17 @@ class Muika:
 
         self.memory.new_session()
         logger.info("[Loop] Session reset complete — waiting for next user interaction silently.")
+
+    @staticmethod
+    def _save_last_connection_time():
+        RECORDS_PATH = get_plugin_data_dir() / "connection_records"
+        RECORDS_PATH.mkdir(exist_ok=True, parents=True)
+
+        RECORD_FILE = RECORDS_PATH / (datetime.strftime(datetime.now(), "%Y-%m-%d %H-%M-%S") + ".txt")
+        RECORD_FILE.write_text("")
+
+        # 自动删除多余的记录文件
+        while len(os.listdir(RECORDS_PATH)) > 3:
+            oldest_file = min((p for p in RECORDS_PATH.iterdir() if p.is_file()), key=lambda p: p.stat().st_mtime)
+            oldest_file.unlink()
+            logger.debug(f"Deleted old connection record: {oldest_file.name}")

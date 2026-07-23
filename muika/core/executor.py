@@ -43,6 +43,8 @@ class Executor:
         发送消息给用户
         """
         target = Target(self.master_id, private=True)
+        # 移除 agent 指令会导致 4 个同时出现的换行符，要么替换为 2 个，要么提示用户
+        message = message.strip().replace("\n\n\n\n", "\n\n")
         messages = self._split_message(message)
         for msg in messages:
             await UniMessage(msg).send(target=target, bot=get_bot())

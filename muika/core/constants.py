@@ -10,7 +10,7 @@ CURIOSITY_THRESHOLD: float = 0.6  # 好奇心超过此值时主动发起对话
 SESSION_IDLE_TIMEOUT: float = 60.0 * 30  # 会话无交互超时时长（秒，30 分钟）
 
 # Butler Agent 参数
-MAX_BUTLER_LOOPS: int = 3  # 管家 Agent 单次命令最大内循环次数
+MAX_BUTLER_LOOPS: int = 10  # 管家 Agent 单次命令最大内循环次数
 
 # Digest Agent 参数
 DIGEST_MIN_SCORE: int = 55  # 话题评估最低分，低于该值不进入主动话题队列

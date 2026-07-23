@@ -34,6 +34,8 @@ class PromptTemplatesData(BaseModel):
 
     current_time: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     time_tone_hint: Optional[str] = None
+    absence_bucket: Optional[str] = None
+    last_connection_time: Optional[str] = None
 
     # MuikaState keeps a runtime reference to MemoryManager for action tools.
     # It is not prompt data, so Pydantic must treat it as an opaque object.

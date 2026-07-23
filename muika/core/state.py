@@ -55,6 +55,13 @@ class MuikaState:
         self.boredom = min(1.0, self.boredom + (BOREDOM_RATE * dt))
         self.curiosity *= 0.99  # 探索欲缓慢下降
 
+        if self.loneliness > 0.8:
+            self.mood = "lonely"
+        elif self.boredom > 0.7:
+            self.mood = "bored"
+        else:
+            self.mood = "calm"
+
         # 2. 基于规则的状态机
         now = datetime.now()
 
