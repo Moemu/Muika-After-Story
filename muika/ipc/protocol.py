@@ -117,6 +117,13 @@ class QueryResponse(IPCMessage):
     """查询结果数据"""
 
 
+class ActionResponse(IPCMessage):
+
+    type: Literal["action_response"] = "action_response"
+    action: str
+    status: str
+
+
 class ErrorMessage(IPCMessage):
     """Core 报告一个错误。"""
 
@@ -129,6 +136,6 @@ class ErrorMessage(IPCMessage):
 
 # Core → Bot 联合类型
 CoreToBotMessage = Annotated[
-    Union[SendMessage, StateUpdate, QueryResponse, ErrorMessage],
+    Union[ActionResponse, SendMessage, StateUpdate, QueryResponse, ErrorMessage],
     Field(discriminator="type"),
 ]

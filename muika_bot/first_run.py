@@ -3,11 +3,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from time import sleep
 
-from nonebot_plugin_localstore import get_plugin_data_dir
-
+from muika.config import mas_config
 from muika.utils.logger import logger
 
-DATA_FILE = get_plugin_data_dir() / "user_agreement.json"
+DATA_FILE = mas_config.data_dir / "user_agreement.json"
 
 AGREEMENT_TITLE = (
     "感谢你选择 Muika-After-Story（以下简称 MAS）。请仔细阅读以下条款，在你开始使用 MAS 之前，你必须同意以下许可协议："

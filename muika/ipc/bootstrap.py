@@ -11,10 +11,13 @@ import argparse
 import asyncio
 import os
 import signal
+from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from muika.config import get_model_config_manager
 from muika.core.events import (
     SessionBootstrapEvent,
     SessionEndEvent,
@@ -24,9 +27,12 @@ from muika.core.events import (
 from muika.core.executor import Executor
 from muika.core.loop import Muika
 from muika.core.state import MuikaState
-from muika.ipc import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer, SendMessage, StateUpdate
+from muika.database.db import close_db, init_db
 from muika.models import Message
 from muika.utils.logger import init_logger, logger
+
+from .protocol import ActionResponse, ErrorMessage, QueryResponse, SendMessage
+from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
 
 
 class CoreBootstrap:
@@ -62,6 +68,8 @@ class CoreBootstrap:
 
         self._shutdown_event = asyncio.Event()
 
+        self.is_bootstraped = False
+
     async def start(self) -> None:
         """Boot all components."""
         logger.info("Muika Core is booting...")
@@ -72,7 +80,6 @@ class CoreBootstrap:
 
         self._muika.start()
 
-        self._state_push_task = asyncio.create_task(self._push_state_periodically())
         logger.success(
             f"Muika Core is ready -- ws://{self._host}:{self._port}/ws "
             f"(health: http://{self._host}:{self._port}/health)"
@@ -80,22 +87,14 @@ class CoreBootstrap:
 
     async def stop(self) -> None:
         """Gracefully shut down all components."""
+        if self._shutdown_event.is_set():
+            return
+
         logger.info("Muika Core is shutting down...")
+
         self._shutdown_event.set()
-
         self._muika.stop()
-
-        if hasattr(self, "_state_push_task"):
-            self._state_push_task.cancel()
-            try:
-                await self._state_push_task
-            except asyncio.CancelledError:
-                pass
-
         await self._ws_server.stop()
-
-        from muika.database.db import close_db
-
         await close_db()
 
         logger.success("Muika Core stopped")
@@ -107,7 +106,7 @@ class CoreBootstrap:
         self._ws_server.register_handler("debug", self._handle_debug)
         self._ws_server.register_handler("config_changed", self._handle_config_changed)
 
-    async def _handle_event(self, message: dict) -> Optional[dict]:
+    async def _handle_event(self, message: dict) -> ActionResponse | ErrorMessage:
         """Forward a Bot event into the Muika event queue."""
         event_data = message.get("event", {})
         event_type = event_data.get("event_type", "unknown")
@@ -123,30 +122,37 @@ class CoreBootstrap:
                 groupid=msg_data.get("groupid", "-1"),
             )
             await self._muika.create_event(UserMessageEvent(UserMessagePayload(msg)))
-            return {"status": "queued", "event_type": event_type}
+            return ActionResponse(action=event_type, status="queued")
 
-        if event_type == "session_bootstrap":
+        if event_type == "bot_connected" and not self.is_bootstraped:
+            # 避免重复开始新对话
+            if self.is_bootstraped:
+                return ActionResponse(action=event_type, status="ok")
+            self.is_bootstraped = True
             self._muika.memory.new_session()
             last_chat_str = payload.get("last_chat_time")
             last_chat = datetime.fromisoformat(last_chat_str) if last_chat_str else None
             await self._muika.create_event(SessionBootstrapEvent(last_chat_time=last_chat))
-            return {"status": "bootstrapped"}
+            return ActionResponse(action=event_type, status="queued")
 
         if event_type == "session_end":
             await self._muika.create_event(SessionEndEvent())
-            return {"status": "session_ended"}
+            return ActionResponse(action=event_type, status="queued")
 
         logger.debug(f"[Core] Unknown event type: {event_type}")
-        return {"status": "unknown_event", "event_type": event_type}
+        return ErrorMessage(message="unknown_event_type")
 
-    async def _handle_query(self, message: dict) -> Optional[dict]:
+    async def _handle_query(self, message: dict) -> QueryResponse | ErrorMessage:
         """Handle state queries from the Bot."""
         query_type = message.get("query", "state")
         if query_type == "state":
-            return {"query": "state", "data": _serialize_state(self._muika.state)}
-        return {"query": query_type, "data": {}}
+            state = deepcopy(self._muika.state)
+            state.memory = None
+            return QueryResponse(query="state", data=asdict(state))
 
-    async def _handle_debug(self, message: dict) -> Optional[dict]:
+        return ErrorMessage(message="unknown_state")
+
+    async def _handle_debug(self, message: dict) -> ActionResponse | ErrorMessage:
         """Handle debug commands from the Bot."""
         action = message.get("action", "")
         field = message.get("field")
@@ -155,66 +161,29 @@ class CoreBootstrap:
 
         if action == "trigger_topic":
             await self._muika._run_topic_pipeline()
-            return {"action": "trigger_topic", "status": "ok"}
+            return ActionResponse(action="trigger_topic", status="ok")
 
         if action == "set_state" and field and value is not None:
             _apply_state_field(self._muika.state, field, value)
-            return {"action": "set_state", "field": field, "status": "ok"}
+            return ActionResponse(action="set_state", status="ok")
 
         if action == "reset_topic":
             self._muika.state.active_topic = None
-            return {"action": "reset_topic", "status": "ok"}
+            return ActionResponse(action="reset_topic", status="ok")
 
-        return {"action": action, "status": "unknown_action"}
+        return ErrorMessage(message="unknown_action")
 
-    async def _handle_config_changed(self, message: dict) -> Optional[dict]:
+    async def _handle_config_changed(self, message: dict) -> ActionResponse | ErrorMessage:
         """Handle model config change notification from the Bot."""
         config_name = message.get("config_name")
         logger.info(f"[Core] Config changed: {config_name}")
         try:
-            from muika.config import get_model_config_manager
-
             manager = get_model_config_manager()
             manager._on_config_changed()
         except Exception as e:
             logger.warning(f"[Core] Failed to reload model: {e}")
-        return {"status": "acknowledged"}
-
-    async def _push_state_periodically(self, interval: float = 5.0) -> None:
-        """Push MuikaState snapshots to the Bot at regular intervals."""
-        while not self._shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
-                break
-            except asyncio.TimeoutError:
-                if self._ws_server.has_connection:
-                    state_dict = _serialize_state(self._muika.state)
-                    await self._ws_server.send_to_bot(StateUpdate(state=state_dict))
-
-
-def _serialize_state(s: MuikaState) -> dict:
-    """Convert a MuikaState to a JSON-serializable dict."""
-    at = s.active_topic
-    return {
-        "mood": s.mood,
-        "attention": s.attention,
-        "loneliness": s.loneliness,
-        "boredom": s.boredom,
-        "curiosity": s.curiosity,
-        "last_interaction": s.last_interaction.isoformat() if s.last_interaction else None,
-        "last_proactive_at": s.last_proactive_at.isoformat() if s.last_proactive_at else None,
-        "active_topic": (
-            {
-                "topic_id": at.topic_id,
-                "topic_type": at.topic_type,
-                "topic_seed": at.topic_seed,
-                "started_at": at.started_at.isoformat() if at else None,
-                "user_engaged": at.user_engaged,
-            }
-            if at
-            else None
-        ),
-    }
+            ErrorMessage(message="unknown error", detail=str(e))
+        return ActionResponse(action="config_changed", status="ok")
 
 
 def _apply_state_field(s: MuikaState, field: str, value: Any) -> None:
@@ -260,8 +229,6 @@ async def run_core(
 ) -> None:
     """Async entry point for the Core process."""
     init_logger()
-
-    from muika.database.db import init_db
 
     await init_db()
 

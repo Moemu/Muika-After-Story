@@ -20,7 +20,7 @@ from aiohttp import WSMsgType, web
 
 from muika.utils.logger import logger
 
-from .protocol import CoreToBotMessage, ErrorMessage, QueryResponse
+from .protocol import CoreToBotMessage, ErrorMessage
 
 # 默认监听地址和端口
 DEFAULT_HOST = "127.0.0.1"
@@ -30,7 +30,7 @@ DEFAULT_PORT = 8765
 _MAX_PENDING_MESSAGES = 256
 
 
-Handler = Callable[[dict], Coroutine[Any, Any, Optional[Dict[str, Any]]]]
+Handler = Callable[[dict], Coroutine[Any, Any, CoreToBotMessage]]
 """消息处理器签名：接收解析后的 JSON dict，可选地返回响应数据"""
 
 
@@ -111,26 +111,20 @@ class CoreWsServer:
         return self._ws is not None and not self._ws.closed
 
     async def send_to_bot(self, message: CoreToBotMessage) -> bool:
-        """向 Bot 发送一条消息。
-
-        如果 Bot 已连接，立即发送；否则暂存到待发送队列。
-
-        Returns
-        -------
-        bool
-            True 表示消息已发送或已暂存，False 表示队列满丢弃
         """
-        if self.has_connection:
-            try:
-                await self._ws.send_str(message.model_dump_json())  # type: ignore[union-attr]
-                return True
-            except Exception as e:
-                logger.warning(f"[CoreWsServer] Failed to send message to Bot: {e}")
-                self._ws = None
-                # 发送失败时回退到暂存队列
-                return self._queue_or_drop(message)
+        向 Bot 发送一条消息。
+        """
+        if not self.has_connection:
+            logger.warning(f"[CoreWsServer] Bot 未连接，将暂存消息: {message}")
+            return self._queue_or_drop(message)
 
-        return self._queue_or_drop(message)
+        try:
+            await self._ws.send_str(message.model_dump_json())  # type: ignore[union-attr]
+            return True
+        except Exception as e:
+            logger.warning(f"[CoreWsServer] Failed to send message to Bot: {e}")
+            # 发送失败时回退到暂存队列
+            return self._queue_or_drop(message)
 
     def _queue_or_drop(self, message: CoreToBotMessage) -> bool:
         if len(self._pending) >= _MAX_PENDING_MESSAGES:
@@ -230,13 +224,13 @@ class CoreWsServer:
         handler = self._handlers.get(msg_type)
 
         if handler is None:
-            logger.debug(f"[CoreWsServer] No handler for type={msg_type!r} — ignoring")
+            logger.warning(f"[CoreWsServer] No handler for type={msg_type!r} — ignoring")
             return
 
         try:
             result = await handler(data)
             if result is not None:
-                await self.send_to_bot(QueryResponse(query=msg_type, data=result))
+                await self.send_to_bot(result)
         except Exception:
             logger.exception(f"[CoreWsServer] Handler for type={msg_type!r} raised")
             await self.send_to_bot(

@@ -7,7 +7,6 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Optional
 
 import httpx
-import nonebot_plugin_localstore as store
 from nonebot import get_bot
 from nonebot.adapters import Event, MessageSegment
 from nonebot.internal.matcher import current_event
@@ -18,11 +17,8 @@ from muika.utils.logger import logger
 
 from .adapters import ADAPTER_CLASSES
 
-FILES_DIR = store.get_plugin_data_dir() / "files"
-FILES_CACHED_DIR = store.get_plugin_cache_dir() / "files"
-
+FILES_DIR = mas_config.data_dir / "downloads"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
-FILES_CACHED_DIR.mkdir(parents=True, exist_ok=True)
 
 User_Agent = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -31,16 +27,13 @@ User_Agent = (
 )
 
 
-async def download_file(
-    file_url: str, file_name: Optional[str] = None, proxy: Optional[str] = None, cache: bool = False
-) -> str:
+async def download_file(file_url: str, file_name: Optional[str] = None, proxy: Optional[str] = None) -> str:
     """
     保存文件至本地目录(在未提供后缀的情况下, 默认为.jpg后缀)
 
     :param file_url: 图片在线地址
     :param file_name: 要保存的文件名
     :param proxy: 代理地址
-    :param cache: 保存至缓存目录
 
     :return: 保存后的本地目录
     """
@@ -51,7 +44,7 @@ async def download_file(
 
     async with httpx.AsyncClient(proxy=proxy, verify=ssl_context) as client:
         r = await client.get(file_url, headers={"User-Agent": User_Agent})
-        file_dir = FILES_CACHED_DIR if cache else FILES_DIR
+        file_dir = FILES_DIR
         local_path = (file_dir / file_name).resolve()
         with open(local_path, "wb") as file:
             file.write(r.content)

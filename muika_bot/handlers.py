@@ -17,6 +17,7 @@ from nonebot import get_bot, get_driver
 from nonebot.adapters import Bot, Event
 from nonebot.adapters import Message as BotMessage
 from nonebot.matcher import Matcher
+from nonebot.params import Depends
 from nonebot.permission import SUPERUSER
 from nonebot.rule import to_me
 from nonebot_plugin_alconna import (
@@ -40,11 +41,11 @@ from muika.models import Resource
 from muika.plugin import load_plugins
 from muika.plugin.mcp import initialize_servers
 from muika.utils.logger import logger
-from muika_bot.utils.utils import download_file, get_file_via_adapter
 
 from .first_run import user_agreement
 from .ipc_client import IpcClient
 from .session import SessionManager
+from .utils.utils import download_file, get_file_via_adapter
 
 COMMAND_PREFIXES = [".", "/"]
 PLUGINS_PATH = Path("./plugins")
@@ -52,53 +53,18 @@ MCP_CONFIG_PATH = Path("./configs/mcp.json")
 COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 3
 
-connect_time = 0.0
 driver = get_driver()
 session_manager = SessionManager()
 
 _ipc_client: IpcClient = IpcClient(core_url=mas_config.core_ws_url)
-_cached_state: dict = {}
 _message_target = Target(id=mas_config.master_id, private=True)
 
 
-def startup_plugins() -> None:
-    """Load external plugins from the plugins directory."""
-    if PLUGINS_PATH.exists():
-        logger.info("Loading external plugins...")
-        load_plugins("./plugins")
+async def _get_ipc_client() -> IpcClient:
+    if not _ipc_client.is_connected:
+        await UniMessage("IPC 进程未连接").finish()
 
-
-def _split_message(content: str, max_length_per_message: int = 250) -> list[str]:
-    messages_split_by_newlines = content.split("\n\n")
-    final_messages = []
-    for msg in messages_split_by_newlines:
-        if len(msg) <= max_length_per_message:
-            final_messages.append(msg)
-            continue
-        messages_spilt_by_punctuation = []
-        current_segment = ""
-        for char in msg:
-            current_segment += char
-            if char in COMMON_PUNCTUATION:
-                messages_spilt_by_punctuation.append(current_segment)
-                current_segment = ""
-        if current_segment:
-            messages_spilt_by_punctuation.append(current_segment)
-
-        final_messages.extend(messages_spilt_by_punctuation)
-    return final_messages
-
-
-async def _send_message(message: str):
-    """
-    发送消息给用户
-    """
-    # 移除 agent 指令会导致 4 个同时出现的换行符，要么替换为 2 个，要么提示用户
-    message = message.strip().replace("\n\n\n\n", "\n\n")
-    messages = _split_message(message)
-    for msg in messages:
-        await UniMessage(msg).send(target=_message_target, bot=get_bot())
-        await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
+    return _ipc_client
 
 
 def _init_ipc_client() -> IpcClient:
@@ -111,10 +77,17 @@ def _init_ipc_client() -> IpcClient:
             return
         await _send_message(content)
 
-    @_ipc_client.on_message("state_update")
+    @_ipc_client.on_message("action_response")
+    async def _handle_action_response(data: dict) -> None:
+        logger.debug(f"Received Action Response: {data}")
+
+    @_ipc_client.on_message("query_response")
     async def _handle_state_update(data: dict) -> None:
-        global _cached_state
-        _cached_state = data.get("state", {})
+        state = data.get("data")
+        if not state:
+            return
+        message = _format_state_display(state)
+        await _send_message(message)
 
     @_ipc_client.on_message("error")
     async def _handle_error(data: dict) -> None:
@@ -139,7 +112,9 @@ async def startup() -> None:
         logger.warning("Core connection timed out, messages will be queued")
 
     logger.info("Loading MAS plugins...")
-    startup_plugins()
+    if PLUGINS_PATH.exists():
+        logger.info("Loading external plugins...")
+        load_plugins("./plugins")
 
     if MCP_CONFIG_PATH.exists():
         logger.info("Loading MCP Server config")
@@ -152,18 +127,14 @@ async def startup() -> None:
 @driver.on_bot_connect
 async def bot_connected() -> None:
     """Handle Bot platform connection."""
-    global connect_time
     logger.success("Bot connected")
-    if not connect_time:
-        connect_time = time.time()
 
-    if _ipc_client and _ipc_client.is_connected:
-        await _ipc_client.send_event("session_bootstrap")
-        logger.info("[Bootstrap] Session bootstrap sent via IPC.")
+    if _ipc_client.is_connected:
+        logger.info("[Bootstrap] bot_connected event sent via IPC.")
     else:
         logger.warning("[Bootstrap] Core not connected -- bootstrap event queued.")
-        if _ipc_client:
-            await _ipc_client.send_event("session_bootstrap")
+
+    await _ipc_client.send_event("bot_connected")
 
 
 at_event = on_alconna(
@@ -262,6 +233,39 @@ async def _extract_multi_resources(message: UniMsg, event: Event) -> list[Resour
     return resources
 
 
+def _split_message(content: str, max_length_per_message: int = 250) -> list[str]:
+    messages_split_by_newlines = content.split("\n\n")
+    final_messages = []
+    for msg in messages_split_by_newlines:
+        if len(msg) <= max_length_per_message:
+            final_messages.append(msg)
+            continue
+        messages_spilt_by_punctuation = []
+        current_segment = ""
+        for char in msg:
+            current_segment += char
+            if char in COMMON_PUNCTUATION:
+                messages_spilt_by_punctuation.append(current_segment)
+                current_segment = ""
+        if current_segment:
+            messages_spilt_by_punctuation.append(current_segment)
+
+        final_messages.extend(messages_spilt_by_punctuation)
+    return final_messages
+
+
+async def _send_message(message: str):
+    """
+    发送消息给用户
+    """
+    # 移除 agent 指令会导致 4 个同时出现的换行符，要么替换为 2 个，要么提示用户
+    message = message.strip().replace("\n\n\n\n", "\n\n")
+    messages = _split_message(message)
+    for msg in messages:
+        await UniMessage(msg).send(target=_message_target, bot=get_bot())
+        await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
+
+
 @at_event.handle()
 async def handle_supported_adapters(
     bot_message: UniMsg,
@@ -270,6 +274,7 @@ async def handle_supported_adapters(
     matcher: Matcher,
     target: MsgTarget,
     ext: ReplyRecordExtension,
+    ipc_client: IpcClient = Depends(_get_ipc_client),
 ) -> None:
     """Main message handler -- receives user messages and forwards to Core."""
     if any((bot_message.startswith("."), bot_message.startswith("/"))):
@@ -301,20 +306,17 @@ async def handle_supported_adapters(
     if not any((message_text, message_resource)):
         return
 
-    if _ipc_client is not None:
-        await _ipc_client.send_event(
-            "user_message",
-            {
-                "message": {
-                    "message": message_text,
-                    "userid": userid,
-                    "groupid": group_id,
-                },
-                "resources": [r.to_dict() for r in message_resource],
+    await ipc_client.send_event(
+        "user_message",
+        {
+            "message": {
+                "message": message_text,
+                "userid": userid,
+                "groupid": group_id,
             },
-        )
-    else:
-        logger.warning("[Bot] No IPC client, message dropped")
+            "resources": [r.to_dict() for r in message_resource],
+        },
+    )
 
 
 @command_model.assign("help")
@@ -329,30 +331,18 @@ async def handle_model_help() -> None:
 
 
 @command_model.assign("reload")
-async def handle_model_reload() -> None:
-    logger.info("Reloading model config...")
-    config_manager = get_model_config_manager()
-    try:
-        config_manager._on_config_changed()
-    except Exception as e:
-        await UniMessage(str(e)).finish()
-    await UniMessage(f"已成功重载模型配置文件: {config_manager.current_config}").finish()
+async def handle_model_reload(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_config_changed()
+    await UniMessage("[System] 已发送重载请求").finish()
 
 
 @command_model.assign("load")
-async def handle_model_load(config: Match[str] = AlconnaMatch("config_name")) -> None:
-    config_manager = get_model_config_manager()
+async def handle_model_load(
+    config: Match[str] = AlconnaMatch("config_name"), ipc_client: IpcClient = Depends(_get_ipc_client)
+) -> None:
     config_name = config.result if config.available else None
-    try:
-        new_config = config_manager.get_model_config(config_name)
-        config_manager.change_current_config(new_config)
-    except (ValueError, FileNotFoundError) as e:
-        await UniMessage(str(e)).finish()
-    await UniMessage(
-        f"已成功加载 {config_name}"
-        if config_name
-        else f"未指定模型配置名，已加载默认模型配置: {config_manager.current_config}"
-    ).finish()
+    await ipc_client.send_config_changed(config_name)
+    await UniMessage("[System] 已发送模型配置变更请求").finish()
 
 
 @command_model.assign("list")
@@ -390,31 +380,21 @@ def _format_state_display(state: dict) -> str:
 
 
 @command_debug.assign("topic")
-async def handle_debug_topic() -> None:
-    await UniMessage("Debug: 正在触发话题管线...").send()
-    if _ipc_client:
-        await _ipc_client.send_debug("trigger_topic")
-        await UniMessage("已发送话题触发请求到 Core").send()
+async def handle_debug_topic(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_debug("trigger_topic")
+    await UniMessage("已发送话题触发请求到 Core").finish()
 
 
 @command_debug.assign("state")
-async def handle_debug_state() -> None:
-    if _ipc_client:
-        await _ipc_client.send_query("state")
-        await asyncio.sleep(0.3)
-        state = _cached_state
-        if not state:
-            await UniMessage("等待 Core 状态响应中，请稍后再试...").finish()
-            return
-        await UniMessage(_format_state_display(state)).finish()
-    else:
-        await UniMessage("未连接到 Core 进程").finish()
+async def handle_debug_state(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_query("state")
 
 
 @command_debug.assign("state-set")
 async def handle_debug_state_set(
     field: Match[str] = AlconnaMatch("field"),
     value: Match[str] = AlconnaMatch("value"),
+    ipc_client: IpcClient = Depends(_get_ipc_client),
 ) -> None:
     _FLOAT_FIELDS = {"attention", "loneliness", "boredom", "curiosity"}
     _STR_FIELDS = {"mood"}
@@ -426,18 +406,12 @@ async def handle_debug_state_set(
     if field_name not in _ALL_FIELDS:
         await UniMessage(f"未知字段 '{field_name}'，可修改的字段: {', '.join(sorted(_ALL_FIELDS))}").finish()
 
-    if _ipc_client:
-        val = float(raw_value) if field_name in _FLOAT_FIELDS else raw_value
-        await _ipc_client.send_debug("set_state", field=field_name, value=val)
-        await UniMessage(f"已发送状态修改请求: {field_name} = {val}").finish()
-    else:
-        await UniMessage("未连接到 Core 进程").finish()
+    val = float(raw_value) if field_name in _FLOAT_FIELDS else raw_value
+    await ipc_client.send_debug("set_state", field=field_name, value=val)
+    await UniMessage(f"已发送状态修改请求: {field_name} = {val}").finish()
 
 
 @command_debug.assign("topic-reset")
-async def handle_debug_topic_reset() -> None:
-    if _ipc_client:
-        await _ipc_client.send_debug("reset_topic")
-        await UniMessage("已发送话题重置请求到 Core").finish()
-    else:
-        await UniMessage("未连接到 Core 进程").finish()
+async def handle_debug_topic_reset(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_debug("reset_topic")
+    await UniMessage("已发送话题重置请求到 Core").finish()
