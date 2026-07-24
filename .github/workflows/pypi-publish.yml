@@ -1,0 +1,27 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  pypi-publish:
+    name: upload release to PyPI
+    environment: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pdm-project/setup-pdm@v4
+
+      - name: Publish to PyPI
+        run: pdm publish
