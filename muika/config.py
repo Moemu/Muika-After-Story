@@ -88,7 +88,7 @@ class MASConfig(BaseSettings):
             logger.error(exc)
             raise ValidationError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
 
-    model_config = SettingsConfigDict(extra="allow")
+    model_config = SettingsConfigDict(extra="allow", env_file=".env")
 
 
 mas_config = MASConfig()
