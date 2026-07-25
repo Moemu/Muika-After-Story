@@ -141,6 +141,26 @@ class ArchiveCRUD:
         return record
 
     @staticmethod
+    async def updated(
+        session: AsyncSession,
+        session_id: str,
+        summary: str,
+        period_start: str,
+        period_end: str,
+    ) -> ArchiveRecordORM:
+        """更新一条历史 Session 摘要。"""
+        stmt = await session.execute(select(ArchiveRecordORM).where(ArchiveRecordORM.session_id == session_id).limit(1))
+        existing = stmt.scalar_one_or_none()
+
+        if not existing:
+            return await ArchiveCRUD.add(session, session_id, summary, period_start, period_end)
+
+        existing.summary = summary
+        existing.period_start = period_start
+        existing.period_end = period_end
+        return existing
+
+    @staticmethod
     async def list_all(session: AsyncSession) -> list[ArchiveRecordORM]:
         """返回全部历史摘要，按 period_start 升序。"""
         result = await session.execute(select(ArchiveRecordORM).order_by(ArchiveRecordORM.period_start))

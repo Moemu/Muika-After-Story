@@ -8,6 +8,8 @@ BOREDOM_RATE: float = 1.0 / TIME_TO_FULL_BOREDOM  # 每秒无聊感增长率
 # 主循环行为参数
 CURIOSITY_THRESHOLD: float = 0.6  # 好奇心超过此值时主动发起对话
 SESSION_IDLE_TIMEOUT: float = 60.0 * 30  # 会话无交互超时时长（秒，30 分钟）
+AUTO_SUMMARY_INTERVAL: float = 60.0 * 5  # 自动摘要间隔（秒，5 分钟，无论是否有交互）
+AUTO_SUMMARY_MIN_TURNS: int = 6  # 自动摘要的最少对话轮数
 
 # Butler Agent 参数
 MAX_BUTLER_LOOPS: int = 10  # 管家 Agent 单次命令最大内循环次数

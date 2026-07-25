@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -42,5 +43,6 @@ def generate_prompt_from_template(template_name: str, templates_data: PromptTemp
         return ""
 
     prompt = template.render(templates_data.model_dump())
+    prompt = re.sub(r"\n{3,}", "\n\n", prompt).strip()  # 将连续的换行符压缩为两个换行符
 
     return prompt

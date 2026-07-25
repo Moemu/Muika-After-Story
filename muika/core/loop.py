@@ -14,6 +14,8 @@ from muika.utils.logger import logger
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
 from .constants import (
+    AUTO_SUMMARY_INTERVAL,
+    AUTO_SUMMARY_MIN_TURNS,
     CURIOSITY_THRESHOLD,
     DIGEST_INTERVAL_SECONDS,
     DIGEST_STARTUP_DELAY,
@@ -24,7 +26,7 @@ from .constants import (
 from .digest_agent import DigestAgent
 from .events import Event, SessionEndEvent, TimeTickEvent
 from .executor import Executor
-from .memory import MemoryCategory, MemoryLayer, MemoryManager
+from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
 
@@ -54,6 +56,8 @@ class Muika:
         self._session_end_triggered: bool = False
         self._is_collecting_event: bool = False
         self._last_digest_time: float = 0.0
+        self._last_summary_turn: Optional[SessionTurn] = None
+        self._last_summary_time: float = datetime.now().timestamp()
         self._digest_interval: float = DIGEST_INTERVAL_SECONDS
 
         asyncio.create_task(self.memory.load())
@@ -185,6 +189,18 @@ class Muika:
                 self._session_end_triggered = True
                 await self.create_event(SessionEndEvent())
 
+            summary_idle_seconds = current_time - self._last_summary_time
+            lastest_turn = self.memory.recent_turns[-1] if self.memory.recent_turns else None
+            if (
+                summary_idle_seconds >= AUTO_SUMMARY_INTERVAL
+                and len(self.memory.recent_turns) >= AUTO_SUMMARY_MIN_TURNS
+                and lastest_turn != self._last_summary_turn
+            ):
+                self._last_summary_turn = lastest_turn
+                self._last_summary_time = current_time
+                logger.info(f"[Loop] Auto summary triggered after {summary_idle_seconds / 60:.1f} min of idle.")
+                asyncio.create_task(self._update_session_memory())
+
     async def _record_first_conversation(self) -> None:
         """首次 session 时将 first_conversation_time 写入 CoreIdentity 记忆。"""
         first_time = datetime.now().isoformat()
@@ -305,6 +321,24 @@ class Muika:
         logger.info("Muika is going to sleep.")
         self.is_alive = False
 
+    async def _update_session_memory(self):
+        """
+        更新 Session 记忆
+        """
+        turns = list(self.memory.recent_turns)
+        has_user_turn = any(t.role == "user" for t in turns)
+        if not turns or not has_user_turn:
+            return
+
+        summary = await self.butler_agent.summarize_session(turns)
+        period_start = self.memory.session.started_at
+        period_end = datetime.now()
+        await self.memory.update_archive(
+            summary=summary,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
     async def _handle_session_end(self):
         """
         Session 结束处理流程：归纳摘要 → 写入 ARCHIVE → 记录话题历史 → 重置 Session。
@@ -314,16 +348,13 @@ class Muika:
 
         # 仅在用户实际参与过对话时才归档：纯 Muika 独白无需写入长期记忆
         has_user_turn = any(t.role == "user" for t in turns)
+        # 如果 truns 为空，说明是首次启动的空 Session，应该直接跳过归档，避免写入 fabricated memory
+        has_summarized_lastest_turn = (self._last_summary_turn == self.memory.recent_turns[-1]) if turns else True
+        reached_min_turns = len(turns) >= AUTO_SUMMARY_MIN_TURNS
 
-        if turns and has_user_turn:
-            period_start = self.memory.session.started_at
-            period_end = datetime.now()
-            summary = await self.butler_agent.summarize_session(turns)
-            await self.memory.add_archive(
-                summary=summary,
-                period_start=period_start,
-                period_end=period_end,
-            )
+        if turns and has_user_turn and reached_min_turns and not has_summarized_lastest_turn:
+            await self._update_session_memory()
+            summary = self.memory.archives[-1].summary if self.memory.archives else ""
             logger.info(
                 f"[Loop] Session archived -- "
                 f"session_id={self.memory.session.session_id[:8]}... "
@@ -351,6 +382,8 @@ class Muika:
         self.state.last_proactive_at = None
 
         self.memory.new_session()
+        self._last_summary_turn = None
+        self._last_summary_time = datetime.now().timestamp()
         logger.info("[Loop] Session reset complete -- waiting for next user interaction silently.")
 
     @staticmethod

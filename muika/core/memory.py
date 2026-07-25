@@ -10,6 +10,8 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
+from muika.database.crud import ArchiveCRUD
+from muika.database.db import get_session
 from muika.models import Resource
 from muika.utils.logger import logger
 
@@ -259,9 +261,6 @@ class MemoryManager:
         )
         self.archives.append(entry)
         logger.debug(f"[Memory] Archive added for session {self.session.session_id}")
-        # 持久化到 DB
-        from muika.database.crud import ArchiveCRUD
-        from muika.database.db import get_session
 
         try:
             async with get_session() as db_session:
@@ -274,6 +273,34 @@ class MemoryManager:
                 )
         except Exception as e:
             logger.error(f"[Memory] DB archive insert failed: {e}")
+
+    async def update_archive(
+        self,
+        summary: str,
+        period_start: datetime,
+        period_end: datetime,
+    ) -> None:
+        """更新一条历史 Session 摘要（ARCHIVE 层）。"""
+        archive_entry = next((a for a in self.archives if a.session_id == self.session.session_id), None)
+        if archive_entry:
+            archive_entry.summary = summary
+            archive_entry.period_start = period_start
+            archive_entry.period_end = period_end
+            logger.debug(f"[Memory] Archive updated for session {self.session.session_id}")
+        else:
+            return await self.add_archive(summary, period_start, period_end)
+
+        try:
+            async with get_session() as db_session:
+                await ArchiveCRUD.updated(
+                    db_session,
+                    session_id=self.session.session_id,
+                    summary=summary,
+                    period_start=period_start.isoformat(),
+                    period_end=period_end.isoformat(),
+                )
+        except Exception as e:
+            logger.error(f"[Memory] DB archive update failed: {e}")
 
     # ──────────────────────────── Prompt 构建 ────────────────────────────
 
@@ -356,6 +383,35 @@ class MemoryManager:
             lines.append(f"- {r.key}: {r.value}")
         return "\n".join(lines)
 
+    def get_archive_prompt(self, max_items: int = 3) -> str:
+        """
+        返回 ARCHIVE 层的最近条目，仅在 Resume 模式下注入。
+        按 period_end 降序，最多返回 max_items 条。
+        """
+        if self.session.is_first_session:
+            logger.debug("[Memory] get_archive_prompt: first session, skipping ARCHIVE injection.")
+            return ""
+
+        records = sorted(
+            self.archives,
+            key=lambda r: r.period_end,
+            reverse=True,
+        )[:max_items]
+
+        if not records:
+            logger.debug("[Memory] get_archive_prompt: resume mode but no ARCHIVE records found.")
+            return ""
+
+        logger.debug(
+            f"[Memory] get_archive_prompt: injecting {len(records)} ARCHIVE record(s):"
+            f" {[r.session_id for r in records]}"
+        )
+        lines = ["## Recent Session Archives"]
+        for r in records:
+            created_at_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"- Session {created_at_str}: {r.summary}")
+        return "\n".join(lines)
+
     def get_preference_records(self) -> list[MemoryRecord]:
         """返回所有 PreferenceProfile 条目，供 Butler 预处理层检索用。"""
         prefs = list(self._iter_layer(MemoryLayer.PREFERENCE))
@@ -371,8 +427,8 @@ class MemoryManager:
         构建注入 system prompt 的完整记忆上下文：
           - CORE 层：永久注入
           - STATE 层：Resume 模式下注入（最多 3 条）
-          - PREFERENCE / ARCHIVE：不注入，由 Butler 按需检索
-          - recent_turns：追加 Session 级对话上下文
+          - PREFERENCE: 不注入，由 Butler 按需检索
+          - ARCHIVE: 追加最近 3 条的对话摘要
         """
         parts: list[str] = []
 
@@ -384,12 +440,8 @@ class MemoryManager:
         if resume:
             parts.append(resume)
 
-        if self.recent_turns:
-            parts.append(
-                "\n## Recent Context (Most recent at bottom): (Do NOT respond to these directly unless relevant)"
-            )
-            for turn in self.recent_turns:
-                prefix = {"user": "User", "muika": "You", "system": "System"}.get(turn.role, turn.role)
-                parts.append(f"{prefix}: {turn.content}")
+        archive = self.get_archive_prompt()
+        if archive:
+            parts.append(archive)
 
         return "\n".join(parts)
