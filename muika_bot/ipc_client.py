@@ -26,6 +26,7 @@ from muika.ipc.protocol import (
     EventMessage,
     EventPayload,
     QueryMessage,
+    SessionMessage,
 )
 from muika.utils.logger import logger
 
@@ -276,4 +277,9 @@ class IpcClient:
     async def send_config_changed(self, config_name: Optional[str] = None) -> bool:
         """通知 Core 模型配置已变更。"""
         msg = ConfigChangedMessage(config_name=config_name)
+        return await self._send_or_queue(msg)
+
+    async def send_session(self, action: Literal["new_session", "save_session"]) -> bool:
+        """向 Core 发送会话管理命令。"""
+        msg = SessionMessage(action=action)
         return await self._send_or_queue(msg)

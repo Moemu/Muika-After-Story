@@ -408,8 +408,8 @@ class MemoryManager:
         )
         lines = ["## Recent Session Archives"]
         for r in records:
-            created_at_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            lines.append(f"- Session {created_at_str}: {r.summary}")
+            period_end_str = r.period_end.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"- Session {period_end_str}: {r.summary}")
         return "\n".join(lines)
 
     def get_preference_records(self) -> list[MemoryRecord]:

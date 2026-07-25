@@ -78,9 +78,17 @@ class ConfigChangedMessage(IPCMessage):
     """变更的配置名，为空表示默认配置"""
 
 
+class SessionMessage(IPCMessage):
+    """Bot 请求 Core 执行会话管理操作。"""
+
+    type: Literal["session"] = "session"
+    action: Literal["new_session", "save_session"]
+    """new_session: 总结并重置会话; save_session: 仅总结当前会话"""
+
+
 # Bot → Core 联合类型
 BotToCoreMessage = Annotated[
-    Union[EventMessage, QueryMessage, DebugMessage, ConfigChangedMessage],
+    Union[EventMessage, QueryMessage, DebugMessage, ConfigChangedMessage, SessionMessage],
     Field(discriminator="type"),
 ]
 

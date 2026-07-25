@@ -181,6 +181,33 @@ command_debug = on_alconna(
     permission=SUPERUSER,
 )
 
+command_session = on_alconna(
+    Alconna(
+        COMMAND_PREFIXES,
+        "session",
+        Subcommand("new", help_text="结束当前会话并开始新会话"),
+        Subcommand("summarize", alias={"save"}, help_text="立即保存当前会话摘要"),
+        meta=CommandMeta("Muika session management"),
+    ),
+    priority=10,
+    block=True,
+    skip_for_unmatch=False,
+    permission=SUPERUSER,
+)
+
+command_new = on_alconna(
+    Alconna(
+        COMMAND_PREFIXES,
+        "new",
+        meta=CommandMeta("New session shortcut"),
+    ),
+    aliases={"clear"},
+    priority=10,
+    block=True,
+    skip_for_unmatch=False,
+    permission=SUPERUSER,
+)
+
 
 def _get_media_filename(media: uniseg.segment.Media, type: Literal["audio", "image", "video", "file"]) -> str:
     """Generate a unique filename for a multimodal media segment."""
@@ -415,3 +442,19 @@ async def handle_debug_state_set(
 async def handle_debug_topic_reset(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
     await ipc_client.send_debug("reset_topic")
     await UniMessage("已发送话题重置请求到 Core").finish()
+
+
+# ─── Session 命令 ───
+
+
+@command_new.handle()
+@command_session.assign("new")
+async def handle_session_new(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_session("new_session")
+    await UniMessage("[System] 已发送新会话请求").finish()
+
+
+@command_session.assign("summarize")
+async def handle_session_summarize(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_session("save_session")
+    await UniMessage("[System] 已发送会话保存请求").finish()

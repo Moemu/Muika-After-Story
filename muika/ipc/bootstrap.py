@@ -107,6 +107,7 @@ class CoreBootstrap:
         self._ws_server.register_handler("query", self._handle_query)
         self._ws_server.register_handler("debug", self._handle_debug)
         self._ws_server.register_handler("config_changed", self._handle_config_changed)
+        self._ws_server.register_handler("session", self._handle_session)
 
     async def _handle_event(self, message: dict) -> ActionResponse | ErrorMessage:
         """Forward a Bot event into the Muika event queue."""
@@ -186,6 +187,21 @@ class CoreBootstrap:
             logger.warning(f"[Core] Failed to reload model: {e}")
             ErrorMessage(message="unknown error", detail=str(e))
         return ActionResponse(action="config_changed", status="ok")
+
+    async def _handle_session(self, message: dict) -> ActionResponse | ErrorMessage:
+        """Handle session management commands from the Bot."""
+        action = message.get("action", "")
+        logger.info(f"[Core] Session action: {action}")
+
+        if action == "new_session":
+            await self._muika._handle_session_end()
+            return ActionResponse(action="new_session", status="ok")
+
+        if action == "save_session":
+            await self._muika._update_session_memory()
+            return ActionResponse(action="save_session", status="ok")
+
+        return ErrorMessage(message="unknown_session_action")
 
 
 def _apply_state_field(s: MuikaState, field: str, value: Any) -> None:
