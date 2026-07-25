@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -14,7 +15,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
-from muika.utils.logger import logger
+from muika.utils.logger import init_logger, logger
 
 from .llm import ModelConfig
 
@@ -72,6 +73,10 @@ class MASConfig(BaseSettings):
     data_dir: Path = Path("./data")
     """数据目录路径，用于存储连接记录等运行时数据。默认为当前工作目录。"""
 
+    ipc_secret: str = ""
+    """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
+    留空时 Core 启动会自动生成并写入 .env 文件。"""
+
     @field_validator("master_id")
     def validate_master_id(cls, v):
         if v:
@@ -87,6 +92,38 @@ class MASConfig(BaseSettings):
         except Exception as exc:
             logger.error(exc)
             raise ValidationError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
+
+    @staticmethod
+    def generate_ipc_secret() -> str:
+        """
+        创建一个新的 IPC 密钥
+
+        :return: 有效的 IPC 密钥
+        """
+        token = secrets.token_urlsafe(32)
+
+        env_path = Path(".env")
+        try:
+            env_data = env_path.read_text(encoding="utf-8")
+        except UnicodeEncodeError:
+            env_data = env_path.read_text(encoding="gbk")
+
+        env_data = env_data.strip()
+        env_data += f"\nIPC_SECRET={token}\n"
+
+        env_path.write_text(env_data, encoding="utf-8")
+
+        logger.info(f"[Config] Auto-generated IPC secret and wrote to {env_path}")
+        return token
+
+    @field_validator("ipc_secret")
+    def validate_ipc_secret(cls, v):
+        if v:
+            return v
+
+        init_logger()
+        logger.warning("未设置 ipc_secret, 将随机生成一个并写入 .env 文件中")
+        return cls.generate_ipc_secret()
 
     model_config = SettingsConfigDict(extra="allow", env_file=".env")
 

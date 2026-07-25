@@ -18,6 +18,7 @@ from typing import Any, Callable, Coroutine, Dict, Optional
 
 from aiohttp import WSMsgType, web
 
+from muika.config import mas_config
 from muika.utils.logger import logger
 
 from .protocol import CoreToBotMessage, ErrorMessage
@@ -37,15 +38,20 @@ Handler = Callable[[dict], Coroutine[Any, Any, CoreToBotMessage]]
 class CoreWsServer:
     """Core 侧 WebSocket 服务器。
 
-    Parameters
-    ----------
-    host: 监听地址，默认 127.0.0.1（仅本地）
-    port: 监听端口，默认 8765
+    :param host: 监听地址，默认 127.0.0.1
+    :param port: 监听端口，默认 8765
+    :param secret: IPC 预共享密钥，Bot 连接时需在 ``X-Auth-Token`` header 中携带
     """
 
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+    def __init__(
+        self,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
+        secret: str = mas_config.ipc_secret,
+    ) -> None:
         self._host = host
         self._port = port
+        self._secret = secret
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
 
@@ -173,6 +179,16 @@ class CoreWsServer:
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         """GET /ws —— WebSocket 连接处理器。"""
+
+        # 认证校验
+        if self._secret:
+            token = request.headers.get("X-Auth-Token", "")
+            if token != self._secret:
+                logger.warning("[CoreWsServer] Rejected unauthenticated connection")
+                ws = web.WebSocketResponse()
+                await ws.prepare(request)
+                await ws.close(code=4003, message=b"Unauthorized")
+                return ws
 
         # 拒绝重复连接
         if self.has_connection:

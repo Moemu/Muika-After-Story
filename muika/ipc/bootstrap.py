@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from muika.config import get_model_config_manager
+from muika.config import get_model_config_manager, mas_config
 from muika.core.events import (
     SessionBootstrapEvent,
     SessionEndEvent,
@@ -41,6 +41,7 @@ class CoreBootstrap:
     :param host: WebSocket listen address.
     :param port: WebSocket listen port.
     :param data_dir: directory for runtime data (connection records, etc.).
+    :param ipc_secret: IPC 预共享密钥。
     """
 
     def __init__(
@@ -48,12 +49,13 @@ class CoreBootstrap:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         data_dir: Optional[Path] = None,
+        ipc_secret: str = mas_config.ipc_secret,
     ) -> None:
         self._host = host
         self._port = port
         self._data_dir = data_dir or Path(".")
 
-        self._ws_server = CoreWsServer(host=host, port=port)
+        self._ws_server = CoreWsServer(host=host, port=port, secret=ipc_secret)
 
         async def send_func(content: str) -> None:
             """Route messages from Muika to the Bot via WebSocket."""
@@ -232,7 +234,7 @@ async def run_core(
 
     await init_db()
 
-    bootstrap = CoreBootstrap(host=host, port=port, data_dir=data_dir)
+    bootstrap = CoreBootstrap(host=host, port=port, data_dir=data_dir, ipc_secret=mas_config.ipc_secret)
     await bootstrap.start()
 
     stop_event = asyncio.Event()

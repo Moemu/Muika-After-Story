@@ -18,6 +18,7 @@ from typing import Any, Callable, Coroutine, Dict, Literal, Optional, overload
 import aiohttp
 from aiohttp import WSMsgType
 
+from muika.config import mas_config
 from muika.ipc.protocol import (
     BotToCoreMessage,
     ConfigChangedMessage,
@@ -45,14 +46,11 @@ class IpcClient:
 
     在 ``bot_connect`` 时建立 WebSocket 连接，在整个 Bot 生命周期中
     维持连接并处理消息收发。
-
-    Parameters
-    ----------
-    core_url: Core WebSocket 地址，如 ``"ws://127.0.0.1:8765/ws"``
     """
 
-    def __init__(self, core_url: str = "ws://127.0.0.1:8765/ws") -> None:
+    def __init__(self, core_url: str = mas_config.core_ws_url, secret: str = mas_config.ipc_secret) -> None:
         self._url = core_url
+        self._secret = secret
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -85,7 +83,10 @@ class IpcClient:
     async def _connect_once(self) -> None:
         """单次连接尝试。"""
         logger.info(f"[IpcClient] Connecting to Core at {self._url}...")
-        self._ws = await self._session.ws_connect(self._url)  # type: ignore[union-attr]
+        headers = {}
+        if self._secret:
+            headers["X-Auth-Token"] = self._secret
+        self._ws = await self._session.ws_connect(self._url, headers=headers)  # type: ignore[union-attr]
         self._connected = True
         self._reconnect_count = 0
         self._connected_event.set()
