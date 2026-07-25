@@ -4,9 +4,8 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from pydantic.json_schema import GenerateJsonSchema
-from typing_extensions import deprecated
 
 
 class FunctionCallJsonSchema(GenerateJsonSchema):
@@ -46,35 +45,3 @@ class Parameter(BaseModel):
             "description": self.description,
             **{key: value for key, value in self.properties.items() if value is not None},
         }
-
-
-class ParamTypes:
-    STRING = "string"
-    INTEGER = "integer"
-    ARRAY = "array"
-    OBJECT = "object"
-    BOOLEAN = "boolean"
-    NUMBER = "number"
-
-
-@deprecated("由于此方法缺乏灵活性，请改用 `on_function_call` 中的 params 参数并传入 pydantic 模型")
-class String(Parameter):
-    type: str = ParamTypes.STRING
-    properties: dict[str, Any] = Field(default_factory=dict)
-    enum: list[str] | None = None
-
-
-@deprecated("由于此方法缺乏灵活性，请改用 `on_function_call` 中的 params 参数并传入 pydantic 模型")
-class Integer(Parameter):
-    type: str = ParamTypes.INTEGER
-    properties: dict[str, Any] = Field(default_factory=dict, examples=[{"minimum": 0, "maximum": 100}])
-
-    minimum: int | None = None
-    maximum: int | None = None
-
-
-@deprecated("由于此方法缺乏灵活性，请改用 `on_function_call` 中的 params 参数并传入 pydantic 模型")
-class Array(Parameter):
-    type: str = ParamTypes.ARRAY
-    properties: dict[str, Any] = Field(default_factory=lambda: {"items": {"type": "string"}})
-    items: str = Field("string", description="数组元素类型")

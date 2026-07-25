@@ -1,78 +1,50 @@
 """
-Butler Agent — maps freeform natural-language commands (from Muika's <Butler:> tags) to typed
-Action objects using an LLM, then dispatches to their handle() methods.
+Butler Agent — maps freeform natural-language commands (from Muika's <Butler:> tags) to
+tool-augmented LLM calls, then returns the final text response to the Brain.
 
-The butler operates as a mini-agent with its own inner loop:
-  1. Select the most appropriate tool via LLM (structured JSON output).
-  2. Execute the tool → get ActionOutput.
-  3. Analyse the result via a second LLM call: either synthesise a concise natural-language
-     report ("done") or request a retry with a different approach.
-  4. Repeat up to MAX_BUTLER_LOOPS times; return a plain str to the caller.
+The butler operates by passing all registered tools to the LLM via ModelRequest.tools.
+The LLM provider (DashScope / OpenAI / etc.) handles tool call dispatch internally:
+  1. LLM decides which tool(s) to call → provider executes via function_call_handler.
+  2. Provider feeds tool results back to LLM → LLM produces final text.
+  3. Butler returns that text as the butler report.
 
 This means execute_command() always returns a human-readable string, and Muika (the Brain)
 never receives raw tool data — just a polished butler report.
 
-External plugins simply subclass BaseAction (or BaseTool/BaseIntent) and implement handle().
+External plugins register tools via @on_function_call decorator.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Annotated, Literal, Union
-
-from pydantic import BaseModel, Field, TypeAdapter
 
 from muika.config import get_model_config, mas_config
 
-# Import modules for built-in action side-effects so subclasses are loaded.
-from muika.core.actions import BaseAction
-from muika.core.actions import intents as _intents  # noqa: F401
+# Import tool modules so @on_function_call registrations happen at import time.
 from muika.core.actions import tools as _tools  # noqa: F401
 from muika.core.butler._prompts import (
-    ANALYSIS_PROMPT,
     PREFERENCE_MATCH_PROMPT,
     SESSION_SUMMARY_PROMPT,
     TOOL_SELECTION_PROMPT,
 )
-from muika.core.constants import MAX_BUTLER_LOOPS
 from muika.core.executor import Executor
 from muika.core.memory import MemoryRecord, SessionTurn
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 from muika.models import Resource
+from muika.plugin.func_call import get_function_list
+from muika.plugin.func_call._context import (
+    clear_butler_context,
+    get_resources,
+    set_butler_context,
+)
 from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
-
-# ---------------------------------------------------------------------------
-# Prompts  (→ see muika/core/butler/_prompts.py)
-# ---------------------------------------------------------------------------
 
 # Re-bind with private aliases to avoid breaking the rest of this module.
 _TOOL_SELECTION_PROMPT = TOOL_SELECTION_PROMPT
 _PREFERENCE_MATCH_PROMPT = PREFERENCE_MATCH_PROMPT
 _SESSION_SUMMARY_PROMPT = SESSION_SUMMARY_PROMPT
-_ANALYSIS_PROMPT = ANALYSIS_PROMPT
-
-# ---------------------------------------------------------------------------
-# Analysis response schema
-# ---------------------------------------------------------------------------
-
-
-class _AnalysisDone(BaseModel):
-    status: Literal["done"]
-    report: str
-
-
-class _AnalysisRetry(BaseModel):
-    status: Literal["retry"]
-    reason: str
-
-
-_AnalysisResult = Annotated[
-    Union[_AnalysisDone, _AnalysisRetry],
-    Field(discriminator="status"),
-]
-_analysis_adapter: TypeAdapter[_AnalysisResult] = TypeAdapter(_AnalysisResult)
 
 
 # ---------------------------------------------------------------------------
@@ -82,50 +54,19 @@ _analysis_adapter: TypeAdapter[_AnalysisResult] = TypeAdapter(_AnalysisResult)
 
 class ButlerAgent:
     """
-    Receives a natural-language command, iteratively selects and executes tools,
-    and returns a plain-string butler report to the Brain.
+    Receives a natural-language command, passes it to the LLM with all registered tools,
+    and returns the LLM's final text response as a butler report.
 
-    The Union type for tool selection is built dynamically from __subclasses__(),
-    so external plugins that subclass BaseAction are auto-discovered.
+    Tool call dispatch is handled entirely by the LLM provider — the Butler does not
+    need its own execution loop.
     """
-
-    @staticmethod
-    def _leaf_action_classes(base_cls: type[BaseAction]) -> list[type[BaseAction]]:
-        leaves: list[type[BaseAction]] = []
-
-        def walk(cls: type[BaseAction]) -> None:
-            subs = cls.__subclasses__()
-            if not subs:
-                if not cls.__name__.startswith("Base") and getattr(cls, "is_enabled", lambda: True)():
-                    leaves.append(cls)
-                return
-            for sub in subs:
-                walk(sub)
-
-        walk(base_cls)
-        return leaves
 
     def __init__(self) -> None:
         butler_cfg = get_model_config(mas_config.butler_model) if mas_config.butler_model else None
         self.model = load_model(butler_cfg)
-        action_classes = self._leaf_action_classes(BaseAction)
+        self.tools = get_function_list()
 
-        if not action_classes:
-            raise RuntimeError("No Action subclasses found. Did you forget to import them?")
-
-        logger.debug(
-            f"[ButlerAgent] Discovered {len(action_classes)} action(s): " f"{[c.__name__ for c in action_classes]}"
-        )
-
-        # Build a Pydantic discriminated union over all concrete action classes
-        ActionUnion = Annotated[  # type: ignore[valid-type]
-            Union[tuple(action_classes)],  # type: ignore[arg-type]
-            Field(discriminator="name"),
-        ]
-        self._action_adapter: TypeAdapter[BaseAction] = TypeAdapter(ActionUnion)
-
-        # JSON schema embedded in the tool-selection prompt
-        self._schema_json = json.dumps(self._action_adapter.json_schema(), ensure_ascii=False, indent=2)
+        logger.debug(f"Loaded {len(self.tools)} tools.")
 
         # 技能管理器：启动时扫描技能目录并启动热重载监听
         self._skill_manager = get_skill_manager()
@@ -217,125 +158,42 @@ class ButlerAgent:
         executor: Executor,
     ) -> tuple[str, list[Resource]]:
         """
-        Execute *command* using a mini inner loop:
-          • select tool → execute → analyse result → retry or return.
-        Returns (report, resources) — the report is a plain-string butler report,
-        and resources are any images/files produced by the tool.
+        Execute *command* by passing it to the LLM with all registered tools.
+
+        The LLM provider handles tool call dispatch internally. Returns (report, resources).
         """
         logger.info(f"[Butler] Executing command: {command!r}")
 
-        # Maintains the execution context for complex/multi-step requests
-        execution_history: list[dict[str, str]] = []
-        collected_resources: list[Resource] = []
-
-        for attempt in range(1, MAX_BUTLER_LOOPS + 1):
-            logger.debug(f"[Butler] Attempt {attempt}/{MAX_BUTLER_LOOPS}")
-
-            # ── Step 1: LLM selects tool ──────────────────────────────────
-            prompt_payload = f"Command: {command}"
-            if execution_history:
-                prompt_payload += "\n\n### Execution History ###\n"
-                for i, turn in enumerate(execution_history, 1):
-                    prompt_payload += (
-                        f"--- Round {i} ---\n"
-                        f"Tool: {turn['tool']}\n"
-                        f"Arguments: {turn['args']}\n"
-                        f"Output Preview: {turn['output'][:500]}...\n"
-                        f"Analysis/Next Steps: {turn.get('analysis', 'None')}\n"
-                    )
-
-            # 每次调用时组装系统提示，确保技能热重载即时生效
+        # 注入 Butler 上下文，让工具函数能访问 state 和 executor
+        set_butler_context(state, executor)
+        try:
+            # 组装系统提示，注入可用技能列表
             system = _TOOL_SELECTION_PROMPT
             skills_section = self._skill_manager.render_prompt_section()
             if skills_section:
                 system += f"\n\n{skills_section}"
-            system += f"\n\nAvailable actions (JSON schema):\n{self._schema_json}"
 
-            selection_request = ModelRequest(
-                prompt=prompt_payload,
+            request = ModelRequest(
+                prompt=f"Command: {command}",
                 system=system,
-                format="json",
-                json_schema=self._action_adapter,
+                tools=self.tools,
             )
 
             try:
-                sel_completion = await self.model.ask(request=selection_request, stream=False)
-                raw_action = sel_completion.text
-                logger.debug(f"[Butler] Tool selection response: {raw_action!r}")
+                completion = await self.model.ask(request=request, stream=False)
+                report = completion.text.strip()
             except Exception as e:
-                logger.error(f"[Butler] Tool selection LLM error: {e}")
-                return (f"I encountered an error while choosing a tool: {e}", [])
+                logger.error(f"[Butler] LLM error: {e}")
+                return (f"I encountered an error while executing the command: {e}", [])
 
-            try:
-                action = self._action_adapter.validate_json(raw_action)
-            except Exception as e:
-                logger.error(f"[Butler] Failed to parse action JSON: {e}\nRaw: {raw_action!r}")
-                return (f"I failed to understand how to handle that command: {e}", [])
+            # 收集工具执行过程中产生的资源（图片等）
+            resources = get_resources()
 
-            logger.info(f"[Butler] Dispatching: {type(action).__name__}")
+            if report:
+                logger.info(f"[Butler] Report ready ({len(report)} chars): {report[:120]!r}")
+            else:
+                logger.debug("[Butler] Empty report (silent operation).")
 
-            # ── Step 2: Execute tool ──────────────────────────────────────
-            try:
-                output = await action.handle(state, executor)
-                tool_result_text = output.content
-                if output.resources:
-                    collected_resources.extend(output.resources)
-            except Exception as e:
-                logger.exception(f"[Butler] {type(action).__name__} raised: {e}")
-                tool_result_text = f"[Tool error] {e}"
-                output = None  # mark as non-silent on error
-
-            logger.debug(f"[Butler] Raw tool output ({len(tool_result_text)} chars): {tool_result_text[:300]!r}")
-
-            # 副作用操作（silent=True）无需 Analysis 和回报，直接返回空字符串
-            if output is not None and output.silent:
-                logger.debug(
-                    f"[Butler] Silent operation ({type(action).__name__}) — "
-                    f"skipping Analysis LLM, no report injected."
-                )
-                return ("", [])
-
-            # Record this turn in the history
-            turn_record = {
-                "tool": type(action).__name__,
-                "args": action.model_dump_json(exclude_none=True),
-                "output": tool_result_text,
-            }
-            execution_history.append(turn_record)
-
-            # ── Step 3: Analyse result ────────────────────────────────────
-            # The analysis step gets the whole history so it understands the full context
-            analysis_prompt = (
-                f"{prompt_payload}\n\n"
-                f"--- Round {attempt} (Current) ---\n"
-                f"Tool used: {turn_record['tool']}\n"
-                f"Arguments: {turn_record['args']}\n"
-                f"Tool result:\n{tool_result_text}\n\n"
-                f"Determine if the overall command '{command}' is complete, or if a retry/next step is needed."
-            )
-
-            analysis_request = ModelRequest(
-                prompt=analysis_prompt,
-                system=_ANALYSIS_PROMPT,
-                format="json",
-                json_schema=_analysis_adapter,
-            )
-
-            try:
-                ana_completion = await self.model.ask(request=analysis_request, stream=False)
-                analysis = _analysis_adapter.validate_json(ana_completion.text)
-            except Exception as e:
-                # If analysis itself fails, treat the raw output as the report
-                logger.warning(f"[Butler] Analysis LLM failed ({e}), falling back to raw output")
-                return (tool_result_text, collected_resources)
-
-            if analysis.status == "done":
-                logger.info(f"[Butler] Report ready after {attempt} attempt(s).")
-                return (analysis.report, collected_resources)  # type: ignore[union-attr]
-
-            # status == "retry"
-            reason: str = analysis.reason  # type: ignore[union-attr]
-            logger.info(f"[Butler] Requesting next step / retry: {reason}")
-            turn_record["analysis"] = reason
-
-        return ("I was unable to complete the task after several steps. Please try a different approach.", [])
+            return (report, resources)
+        finally:
+            clear_butler_context()

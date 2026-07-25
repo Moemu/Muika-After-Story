@@ -1,28 +1,16 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import Literal, Optional
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from muika.core.memory import MemoryCategory, MemoryLayer
+from muika.plugin.func_call import on_function_call
+from muika.plugin.func_call._context import get_state
 from muika.utils.logger import logger
 
-from ..schema import ActionOutput
-from ._base import BaseTool
 
-if TYPE_CHECKING:
-    from muika.core.executor import Executor
-    from muika.core.state import MuikaState
-
-
-class MemoryTool(BaseTool):
-    """
-    Read, write, or forget a fact in Muika's long-term memory.
-    (Unless explicitly specified, do not enable this tool without authorization,
-    as it will directly interrupt the proxy loop without returning any data)
-    """
-
-    name: Literal["memory"] = "memory"
+class MemoryParams(BaseModel):
     type: Literal["remember", "forget", "read"] = Field(
         ...,
         description=(
@@ -68,42 +56,55 @@ class MemoryTool(BaseTool):
         description="Memory value, required for 'remember'.",
     )
 
-    async def handle(self, state: "MuikaState", executor: "Executor") -> ActionOutput:
-        if state.memory is None:
-            return ActionOutput(content="[MemoryTool] MemoryManager not available.")
 
-        if self.type == "read":
-            mem = state.memory.records
-            if not mem:
-                return ActionOutput(content="No memories stored yet.")
-            lines = [
-                f"[{v.layer.value}/{v.category.value}] {v.key}: {v.value}"
-                for _, v in sorted(mem.items(), key=lambda x: x[1].layer.value)
-                if self.category is None or v.category == self.category
-            ]
-            return ActionOutput(content="\n".join(lines) if lines else "No matching memories found.")
+@on_function_call(
+    "Read, write, or forget a fact in Muika's long-term memory. "
+    "(Unless explicitly specified, do not enable this tool without authorization, "
+    "as it will directly interrupt the proxy loop without returning any data)",
+    params=MemoryParams,
+)
+async def memory(
+    type: str,
+    category: str = "user",
+    layer: str = "preference",
+    key: Optional[str] = None,
+    value: Optional[str] = None,
+):
+    state = get_state()
+    if state is None or state.memory is None:
+        return "MemoryManager not available."
 
-        if self.type == "remember":
-            if not self.key or self.value is None:
-                return ActionOutput(content="[MemoryTool] 'key' and 'value' are required for 'remember'.")
-            await state.memory.upsert_memory(
-                layer=self.layer,
-                category=self.category,
-                key=self.key,
-                value=self.value,
-            )
-            logger.info(f"[MemoryTool] Saved [{self.layer.value}/{self.category.value}] {self.key} = {self.value!r}")
-            return ActionOutput(
-                content=f"Memory saved - [{self.layer.value}/{self.category.value}] {self.key} = {self.value!r}",
-                silent=True,
-            )
+    mem_category = MemoryCategory(category)
+    mem_layer = MemoryLayer(layer)
 
-        if not self.key:
-            return ActionOutput(content="[MemoryTool] 'key' is required for 'forget'.")
+    if type == "read":
+        mem = state.memory.records
+        if not mem:
+            return "No memories stored yet."
+        lines = [
+            f"[{v.layer.value}/{v.category.value}] {v.key}: {v.value}"
+            for _, v in sorted(mem.items(), key=lambda x: x[1].layer.value)
+            if mem_category is None or v.category == mem_category
+        ]
+        return "\n".join(lines) if lines else "No matching memories found."
 
-        await state.memory.forget_memory(layer=self.layer, category=self.category, key=self.key)
-        logger.info(f"[MemoryTool] Forgot [{self.layer.value}/{self.category.value}] {self.key}")
-        return ActionOutput(
-            content=f"Memory forgotten - [{self.layer.value}/{self.category.value}] {self.key}",
-            silent=True,
+    if type == "remember":
+        if not key or value is None:
+            return "'key' and 'value' are required for 'remember'."
+        await state.memory.upsert_memory(
+            layer=mem_layer,
+            category=mem_category,
+            key=key,
+            value=value,
         )
+        logger.info(f"[Memory] Saved [{mem_layer.value}/{mem_category.value}] {key} = {value!r}")
+        return ""
+
+    if type == "forget":
+        if not key:
+            return "'key' is required for 'forget'."
+        await state.memory.forget_memory(layer=mem_layer, category=mem_category, key=key)
+        logger.info(f"[Memory] Forgot [{mem_layer.value}/{mem_category.value}] {key}")
+        return ""
+
+    return f"Unknown memory operation: {type!r}"

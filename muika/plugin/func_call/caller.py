@@ -13,8 +13,6 @@ from typing import Any, Optional, Type, get_type_hints
 
 from pydantic import BaseModel
 
-from muika.utils.logger import logger
-
 from ..utils import is_coroutine_callable
 from ._types import ASYNC_FUNCTION_CALL_FUNC, F
 from .parameter import FunctionCallJsonSchema, Parameter
@@ -62,7 +60,7 @@ class Caller:
         self.module_name = module_name
 
         _caller_data[self._name] = self
-        logger.debug(f"Function Call 函数 {self.module_name}.{self._name} 已成功加载")
+        # logger.debug(f"Function Call 函数 {self.module_name}.{self._name} 已成功加载")
         return func
 
     async def _inject_dependencies(self, kwargs: dict) -> dict:
@@ -168,7 +166,7 @@ def get_function_calls() -> dict[str, Caller]:
     return _caller_data
 
 
-async def get_function_list() -> list[dict[str, dict]]:
+def get_function_list() -> list[dict[str, dict]]:
     """
     获取所有已注册的function call函数，并转换为工具格式
 

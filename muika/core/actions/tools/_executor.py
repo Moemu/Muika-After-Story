@@ -1,19 +1,12 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from muika.config import mas_config
+from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
-
-from ..schema import ActionOutput
-from ._base import BaseTool
-
-if TYPE_CHECKING:
-    from muika.core.executor import Executor
-    from muika.core.state import MuikaState
 
 # Sensitive env-var prefixes stripped before passing env to subprocess
 _SENSITIVE_PREFIXES = (
@@ -44,20 +37,7 @@ def _sanitize_env() -> dict[str, str]:
     }
 
 
-class ExecutePythonTool(BaseTool):
-    """Execute a Python code snippet in an isolated subprocess and return stdout/stderr.
-
-    Requires ENABLE_CODE_EXECUTION=true.
-    The code runs in a separate Python process with a hard timeout.
-    Sensitive environment variables (API keys, tokens, secrets) are stripped
-    from the subprocess environment to prevent accidental leakage.
-    """
-
-    @classmethod
-    def is_enabled(cls) -> bool:
-        return mas_config.enable_code_execution
-
-    name: Literal["execute_python"] = "execute_python"
+class ExecutePythonParams(BaseModel):
     code: str = Field(
         ...,
         description=(
@@ -72,73 +52,77 @@ class ExecutePythonTool(BaseTool):
         "The process is forcefully terminated after this time.",
     )
 
-    async def handle(self, state: "MuikaState", executor: "Executor") -> ActionOutput:
-        if not mas_config.enable_code_execution:
-            return ActionOutput(
-                content="[ExecutePythonTool] Code execution is disabled. " "Set ENABLE_CODE_EXECUTION=true to enable."
-            )
 
-        import asyncio
+@on_function_call(
+    "Execute a Python code snippet in an isolated subprocess and return stdout/stderr. "
+    "Requires ENABLE_CODE_EXECUTION=true.",
+    params=ExecutePythonParams,
+)
+async def execute_python(code: str, timeout: float = _DEFAULT_TIMEOUT):
+    if not mas_config.enable_code_execution:
+        return "Code execution is disabled. Set ENABLE_CODE_EXECUTION=true to enable."
 
-        timeout = min(max(self.timeout, 0.5), _MAX_TIMEOUT)
+    import asyncio
 
-        env = _sanitize_env()
-        proc: asyncio.subprocess.Process | None = None
+    timeout = min(max(timeout, 0.5), _MAX_TIMEOUT)
+
+    env = _sanitize_env()
+    proc: asyncio.subprocess.Process | None = None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-c",
-                self.code,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout,
             )
-
+            returncode = proc.returncode
+        except asyncio.TimeoutError:
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=timeout,
-                )
-                returncode = proc.returncode
-            except asyncio.TimeoutError:
-                try:
-                    proc.terminate()
-                    await asyncio.sleep(0.5)
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                logger.warning(f"[ExecutePythonTool] Process timed out after {timeout}s")
-                return ActionOutput(content=f"[ExecutePythonTool] Execution timed out after {timeout}s.")
+                proc.terminate()
+                await asyncio.sleep(0.5)
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            logger.warning(f"[ExecutePython] Process timed out after {timeout}s")
+            return f"Execution timed out after {timeout}s."
 
-        except Exception as e:
-            logger.error(f"[ExecutePythonTool] Failed to launch subprocess: {e}")
-            return ActionOutput(content=f"[ExecutePythonTool] Failed to launch process: {e}")
+    except Exception as e:
+        logger.error(f"[ExecutePython] Failed to launch subprocess: {e}")
+        return f"Failed to launch process: {e}"
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        parts: list[str] = []
-        if stdout:
-            truncated = stdout[:_OUTPUT_MAX_CHARS]
-            suffix = (
-                f"\n...(stdout truncated, {len(stdout) - _OUTPUT_MAX_CHARS:,} chars omitted)"
-                if len(stdout) > _OUTPUT_MAX_CHARS
-                else ""
-            )
-            parts.append(f"[stdout]\n{truncated}{suffix}")
-        if stderr:
-            truncated = stderr[:_OUTPUT_MAX_CHARS]
-            suffix = (
-                f"\n...(stderr truncated, {len(stderr) - _OUTPUT_MAX_CHARS:,} chars omitted)"
-                if len(stderr) > _OUTPUT_MAX_CHARS
-                else ""
-            )
-            parts.append(f"[stderr]\n{truncated}{suffix}")
-        if not parts:
-            parts.append("(no output)")
+    parts: list[str] = []
+    if stdout:
+        truncated = stdout[:_OUTPUT_MAX_CHARS]
+        suffix = (
+            f"\n...(stdout truncated, {len(stdout) - _OUTPUT_MAX_CHARS:,} chars omitted)"
+            if len(stdout) > _OUTPUT_MAX_CHARS
+            else ""
+        )
+        parts.append(f"[stdout]\n{truncated}{suffix}")
+    if stderr:
+        truncated = stderr[:_OUTPUT_MAX_CHARS]
+        suffix = (
+            f"\n...(stderr truncated, {len(stderr) - _OUTPUT_MAX_CHARS:,} chars omitted)"
+            if len(stderr) > _OUTPUT_MAX_CHARS
+            else ""
+        )
+        parts.append(f"[stderr]\n{truncated}{suffix}")
+    if not parts:
+        parts.append("(no output)")
 
-        parts.append(f"[exit code: {returncode}]")
+    parts.append(f"[exit code: {returncode}]")
 
-        logger.info(f"[ExecutePythonTool] Completed with exit code {returncode}")
-        return ActionOutput(content="\n\n".join(parts))
+    logger.info(f"[ExecutePython] Completed with exit code {returncode}")
+    return "\n\n".join(parts)
