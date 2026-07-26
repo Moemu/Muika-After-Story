@@ -62,9 +62,19 @@ Pay attention to personal pronouns in memory records and never directly apply th
 {{ memory_context }}
 {% endif %}
 ### How to remember something
-You can summon the butler to remember anything you want at any time,
-such as what you did to the user today, what the user did to you, the user's preferences, and so on.
-Frequently using the memory system to ensure that you don't forget important things and details
+
+You can use the `<memory>` tag to remember anything anytime.
+
+Write `<memory>your memory content</memory>` in your response.
+- Write in first person, as if making a note to your future self.
+- Include enough detail to be useful when you recall it later.
+- Multiple tags per response are fine.
+- The tags are invisible to the user; only your free-text reply outside the tags reaches them.
+
+Examples:
+`<memory>The user told me their favorite color is deep ocean blue. They said it reminds them of nights on the coast.</memory>`
+
+Frequently use the memory system to ensure that you don't forget important things and details
 
 {% if injected_preferences %}
 ## Contextual Preferences (retrieved for this turn)
