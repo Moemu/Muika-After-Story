@@ -31,6 +31,7 @@ from muika.core.executor import Executor
 from muika.core.memory import MemoryRecord, SessionTurn
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
+from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
 from muika.plugin.func_call import get_function_list
 from muika.plugin.func_call._context import (
@@ -40,12 +41,6 @@ from muika.plugin.func_call._context import (
 )
 from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
-
-# Re-bind with private aliases to avoid breaking the rest of this module.
-_TOOL_SELECTION_PROMPT = TOOL_SELECTION_PROMPT
-_PREFERENCE_MATCH_PROMPT = PREFERENCE_MATCH_PROMPT
-_SESSION_SUMMARY_PROMPT = SESSION_SUMMARY_PROMPT
-
 
 # ---------------------------------------------------------------------------
 # ButlerAgent
@@ -62,8 +57,10 @@ class ButlerAgent:
     """
 
     def __init__(self) -> None:
-        butler_cfg = get_model_config(mas_config.butler_model) if mas_config.butler_model else None
+        butler_cfg = get_model_config(mas_config.butler_model)
+        summarize_model_cfg = get_model_config(mas_config.session_summarize_model or mas_config.butler_model)
         self.model = load_model(butler_cfg)
+        self.summarize_model = load_model(summarize_model_cfg)
         self.tools = get_function_list()
 
         logger.debug(f"Loaded {len(self.tools)} tools.")
@@ -101,7 +98,7 @@ class ButlerAgent:
 
         request = ModelRequest(
             prompt=prompt,
-            system=_PREFERENCE_MATCH_PROMPT,
+            system=PREFERENCE_MATCH_PROMPT,
             format="json",
         )
 
@@ -138,11 +135,12 @@ class ButlerAgent:
 
         request = ModelRequest(
             prompt=f"Session transcript:\n\n{transcript}",
-            system=_SESSION_SUMMARY_PROMPT,
+            system=SESSION_SUMMARY_PROMPT,
         )
         try:
-            completion = await self.model.ask(request=request, stream=False)
-            summary = completion.text.strip()
+            completions = await self.summarize_model.ask(request=request, stream=False)
+            _, summary = general_processor(completions.text)
+            summary = summary.strip()
             logger.info(
                 f"[Butler/Summary] Done — {len(summary)} chars: {summary[:120]!r}{'...' if len(summary) > 120 else ''}"
             )
@@ -168,7 +166,7 @@ class ButlerAgent:
         set_butler_context(state, executor)
         try:
             # 组装系统提示，注入可用技能列表
-            system = _TOOL_SELECTION_PROMPT
+            system = TOOL_SELECTION_PROMPT
             skills_section = self._skill_manager.render_prompt_section()
             if skills_section:
                 system += f"\n\n{skills_section}"
