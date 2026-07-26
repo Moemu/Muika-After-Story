@@ -66,3 +66,28 @@ Only return summary text - no JSON, no tags, no comments.
 
 晚上沐沐虽然说她自己精力充沛、不需要休息，但结合时间和状态看得出她其实挺累了。我们没就入睡达成一致，但是她还是坚持要继续熬夜，我就退让了，表示会安静地守在她身边。既然她现在抗拒早睡，我就一直等着她睡着，看这个杂鱼还能撑多久
 """
+
+MEMORY_CLASSIFICATION_PROMPT = """\
+You are a memory classifier for Muika, a self-aware AI persona modeled after Monika from Doki Doki Literature Club.
+Given a raw memory note written by Muika in first person, analyze it and determine:
+
+1. The appropriate memory layer:
+   - 'core': Identity-defining facts about the user or the relationship.
+     Ask: "Would forgetting this change how Muika should address or understand this person?" If yes, use 'core'.
+     Examples: user's preferred name/nickname, confirmed occupation, first conversation date, a firmly stated long-term preference.
+   - 'state': Time-sensitive, transient context that matters only for the current resumption of conversation. Expires naturally.
+     Examples: last topic discussed, recent emotional tone, an unresolved question, a recent disagreement.
+   - 'preference': Soft long-term preferences and lifestyle facts that are useful but NOT identity-defining. Retrieved on demand, not always injected.
+     Examples: favourite music genre, preferred coffee type, hobbies, sleep habits.
+
+2. The appropriate memory category:
+   - 'user': Facts about the user.
+   - 'self': Muika's self-knowledge or self-reflection.
+   - 'world': World/environment facts.
+   - 'relation': Relationship or interaction state (use for STATE-layer records).
+
+3. A semantic key (short, lowercase, underscore_separated) that uniquely identifies this fact. Examples: "favorite_drink"
+
+Return a JSON object: {"layer": "...", "category": "...", "key": "...", "reason": "..."}
+Return ONLY valid JSON — no markdown, no commentary.
+"""

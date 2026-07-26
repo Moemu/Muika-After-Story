@@ -263,6 +263,18 @@ class Muika:
                 injected_preferences=injected_preferences or None,
             )
 
+            # 提取 <memory>...</memory> 标签 —— 先于 Butler 提取，
+            # 使记忆内容不会泄露到 Butler 命令或用户可见回复中
+            memory_tags = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
+            if memory_tags:
+                logger.info(f"[Brain] intercepted {len(memory_tags)} memory tag(s)")
+                for content in memory_tags:
+                    content = content.strip()
+                    if content:
+                        await self.butler_agent.classify_and_store_memory(content, self.state)
+            # 从回复中剥离 memory 标签
+            reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
+
             butler_commands = re.findall(r"<Butler:\s*(.+?)>", reply, re.DOTALL)
             clean_reply = re.sub(r"<Butler:\s*(.+?)>", "", reply, flags=re.DOTALL).strip()
 

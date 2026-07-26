@@ -24,12 +24,13 @@ from muika.config import get_model_config, mas_config
 # Import tool modules so @on_function_call registrations happen at import time.
 from muika.core.actions import tools as _tools  # noqa: F401
 from muika.core.butler._prompts import (
+    MEMORY_CLASSIFICATION_PROMPT,
     PREFERENCE_MATCH_PROMPT,
     SESSION_SUMMARY_PROMPT,
     TOOL_SELECTION_PROMPT,
 )
 from muika.core.executor import Executor
-from muika.core.memory import MemoryRecord, SessionTurn
+from muika.core.memory import MemoryCategory, MemoryLayer, MemoryRecord, SessionTurn
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
@@ -153,6 +154,53 @@ class ButlerAgent:
         except Exception as e:
             logger.error(f"[Butler/Summary] Summarization LLM failed: {e}")
             return f"[Summary failed: {e}]"
+
+    async def classify_and_store_memory(
+        self,
+        content: str,
+        state: MuikaState,
+        max_retry: int = 3,
+    ):
+        """
+        对从 <memory> 标签提取的原始记忆内容进行分类并存入记忆系统。
+        """
+        if not content.strip():
+            logger.debug("[Butler/Memory] Empty content -- skipping.")
+            return
+
+        logger.info(f"[Butler/Memory] Classifying: {content[:80]!r}...")
+
+        request = ModelRequest(
+            prompt=f"Raw memory note:\n\n{content}",
+            system=MEMORY_CLASSIFICATION_PROMPT,
+            format="json",
+        )
+
+        try:
+            completion = await self.model.ask(request=request, stream=False)
+            data = json.loads(completion.text)
+            layer = MemoryLayer(data["layer"])
+            category = MemoryCategory(data["category"])
+            key = data["key"]
+        except Exception as e:
+            logger.warning(f"[Butler/Memory] Classification LLM failed: {e}, retrying...")
+            if max_retry > 0:
+                return await self.classify_and_store_memory(content, state, max_retry - 1)
+            else:
+                logger.error("[Butler/Memory] Classification LLM failed, give up.")
+                return
+
+        if state.memory is None:
+            logger.warning("[Butler/Memory] MemoryManager not on state -- cannot store.")
+            return
+
+        await state.memory.upsert_memory(
+            layer=layer,
+            category=category,
+            key=key,
+            value=content,
+        )
+        logger.info(f"[Butler/Memory] Stored: [{layer.value}/{category.value}] " f"{key} = {content[:60]!r}...")
 
     async def execute_command(
         self,
