@@ -17,6 +17,7 @@ External plugins register tools via @on_function_call decorator.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from muika.config import get_model_config, mas_config
 
@@ -39,8 +40,11 @@ from muika.plugin.func_call._context import (
     get_resources,
     set_butler_context,
 )
+from muika.plugin.mcp import get_mcp_list
 from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
+
+ENABLE_MCP = Path("./configs/mcp.json").exists()
 
 # ---------------------------------------------------------------------------
 # ButlerAgent
@@ -67,6 +71,7 @@ class ButlerAgent:
 
         # 技能管理器：启动时扫描技能目录并启动热重载监听
         self._skill_manager = get_skill_manager()
+        self._mcp_tools: list[dict[str, dict]] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -170,6 +175,10 @@ class ButlerAgent:
             skills_section = self._skill_manager.render_prompt_section()
             if skills_section:
                 system += f"\n\n{skills_section}"
+
+            if ENABLE_MCP and not self._mcp_tools:
+                self._mcp_tools = await get_mcp_list()
+                self.tools += self._mcp_tools
 
             request = ModelRequest(
                 prompt=f"Command: {command}",

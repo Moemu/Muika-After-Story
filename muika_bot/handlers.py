@@ -38,8 +38,6 @@ from nonebot_plugin_session import SessionIdType, extract_session
 
 from muika.config import get_model_config_manager, mas_config
 from muika.models import Resource
-from muika.plugin import load_plugins
-from muika.plugin.mcp import initialize_servers
 from muika.utils.logger import logger
 
 from .first_run import user_agreement
@@ -120,16 +118,6 @@ async def startup() -> None:
     else:
         logger.warning("Core connection timed out, messages will be queued")
 
-    logger.info("Loading MAS plugins...")
-    if PLUGINS_PATH.exists():
-        logger.info("Loading external plugins...")
-        load_plugins("./plugins")
-
-    if MCP_CONFIG_PATH.exists():
-        logger.info("Loading MCP Server config")
-        await initialize_servers()
-
-    logger.success("Plugin loading complete")
     logger.success("MAS framework is ready")
 
 

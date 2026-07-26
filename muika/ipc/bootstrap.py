@@ -14,6 +14,7 @@ import signal
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from muika.config import get_model_config_manager, mas_config
@@ -29,11 +30,14 @@ from muika.core.state import MuikaState
 from muika.database.crud import UsageORM
 from muika.database.db import close_db, get_session, init_db
 from muika.models import Message
+from muika.plugin.mcp import initialize_servers
 from muika.utils.logger import init_logger, logger
 from muika.utils.utils import get_version
 
 from .protocol import ActionResponse, ErrorMessage, QueryResponse, SendMessage
 from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
+
+MCP_CONFIG_PATH = Path("./configs/mcp.json")
 
 
 class CoreBootstrap:
@@ -277,7 +281,12 @@ async def run_core(
     logger.info(f"Muika-After-Story 版本: {get_version()}")
     logger.info(f"Muika-After-Story 数据目录: {mas_config.data_dir.resolve()}")
 
+    logger.debug("Loading Database...")
     await init_db()
+
+    if MCP_CONFIG_PATH.exists():
+        logger.info("Loading MCP Server config")
+        await initialize_servers()
 
     bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
     await bootstrap.start()
