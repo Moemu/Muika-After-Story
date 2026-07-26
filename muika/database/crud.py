@@ -13,6 +13,7 @@ class UsageORM:
         session: AsyncSession,
         plugin: Optional[str],
         date: Optional[str],
+        model: Optional[str],
         type: Optional[Literal["chat", "embedding"]] = None,
     ) -> int:
         """
@@ -20,14 +21,16 @@ class UsageORM:
 
         :param session: 数据库会话
         :param plugin: (可选)插件名称，如果为 None 则返回所有插件的用量
-        :param date: (可选)日期(`%Y.%m.%d`)，如果为 None 则返回所有日期的用量
+        :param date: (可选)日期(``%Y.%m.%d``)，如果为 None 则返回所有日期的用量
         :param type: (可选)用量类型，默认为 None，表示返回所有类型的用量
         """
-        query = select(func.sum(Usage.tokens))
+        query = select(func.sum(Usage.input_tokens + Usage.output_tokens + Usage.cached_tokens))
         if plugin:
             query = query.where(Usage.plugin == plugin)
         if date:
             query = query.where(Usage.date.like(date))
+        if model:
+            query = query.where(Usage.model == model)
         if type:
             query = query.where(Usage.type == type)
         result = await session.execute(query)
@@ -35,25 +38,45 @@ class UsageORM:
 
     @staticmethod
     async def save_usage(
-        session: AsyncSession, plugin: str, total_tokens: int, type: Literal["chat", "embedding"] = "chat"
+        session: AsyncSession,
+        plugin: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int,
+        type: Literal["chat", "embedding"] = "chat",
     ):
         """
-        保存用量信息
+        保存用量信息（按 plugin + type + date upsert，各字段累加）
         """
-        if total_tokens < 0:
+        if input_tokens < 0 or output_tokens < 0 or cached_tokens < 0:
             return
 
         date = datetime.now().strftime("%Y.%m.%d")
         stmt = await session.execute(
-            select(Usage).where(Usage.plugin == plugin, Usage.type == type, Usage.date == date).limit(1)
+            select(Usage)
+            .where(Usage.plugin == plugin, Usage.model == model, Usage.type == type, Usage.date == date)
+            .limit(1)
         )
         usage = stmt.scalar_one_or_none()
 
         if usage is not None:
-            usage.tokens += total_tokens
+            usage.input_tokens += input_tokens
+            usage.output_tokens += output_tokens
+            usage.cached_tokens += cached_tokens
             return
 
-        session.add(Usage(plugin=plugin, type=type, date=date, tokens=total_tokens))
+        session.add(
+            Usage(
+                plugin=plugin,
+                model=model,
+                type=type,
+                date=date,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+            )
+        )
 
 
 # MemoryRecordCRUD：CORE / STATE / PREFERENCE 层持久化

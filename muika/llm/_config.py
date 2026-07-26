@@ -61,6 +61,9 @@ class ModelConfig(BaseModel):
     audio: Optional[Any] = None
     """多模态音频参数"""
 
+    def __hash__(self) -> int:
+        return hash(f"{self.provider}::{self.api_host}::{self.model_name}")
+
     @field_validator("provider")
     @classmethod
     def check_model_loader(cls, provider: str) -> str:

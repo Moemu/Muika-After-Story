@@ -13,7 +13,6 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from muika.config import mas_config
 from muika.database.orm_models import Base
 
 # Alembic Config 对象，由 alembic.command 传入
@@ -23,9 +22,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 运行时覆盖数据库 URL（来自应用配置，非 alembic.ini 的占位值）
-db_path = mas_config.data_dir / "muika.db"
-config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path}")
+# 数据库 URL 由调用方（db._run_migrations）在运行前通过 set_main_option 设置。
+# CLI 模式下则使用 alembic.ini 中的默认值。
+# 这里不再覆盖，以支持 init_db(db_path=...) 传入自定义路径。
 
 # autogenerate 对比的目标元数据
 target_metadata = Base.metadata

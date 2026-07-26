@@ -5,6 +5,7 @@ import os
 import secrets
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -311,3 +312,12 @@ def get_model_config(model_config_name: Optional[str] = None) -> ModelConfig:
     """
     model_config_manager = get_model_config_manager()
     return model_config_manager.get_model_config(model_config_name)
+
+
+@lru_cache(64)
+def get_name_from_config(config: Optional[ModelConfig] = None) -> str:
+    model_config_manager = get_model_config_manager()
+
+    config = config or get_model_config()
+
+    return model_config_manager.get_name_from_config(config)

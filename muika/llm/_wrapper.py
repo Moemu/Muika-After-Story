@@ -4,6 +4,7 @@ import asyncio
 from functools import wraps
 from typing import TYPE_CHECKING, AsyncGenerator, Awaitable, Callable, TypeAlias, Union
 
+from muika.config import get_name_from_config
 from muika.database.crud import UsageORM
 from muika.database.db import get_session
 from muika.plugin.loader import _get_caller_plugin_name
@@ -13,6 +14,7 @@ from ._schema import (
     ModelCompletions,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
 )
 
 if TYPE_CHECKING:
@@ -35,32 +37,47 @@ def record_plugin_usage(func: ASK_FUNC):
 
         # Call the original 'ask' method
         response = await func(self, request, stream=stream)
+        model_config = get_name_from_config(self.config)
 
         # Handle non-streaming response
         if isinstance(response, ModelCompletions):
-            total_usage = response.usage.total_tokens if response.usage.total_tokens > 0 else 0
+            usg = response.usage
 
             async with _usage_write_lock:
                 async with get_session() as session:
-                    await UsageORM.save_usage(session, plugin_name, total_usage)
+                    await UsageORM.save_usage(
+                        session,
+                        plugin_name,
+                        model_config,
+                        input_tokens=usg.input_tokens,
+                        output_tokens=usg.output_tokens,
+                        cached_tokens=usg.cached_tokens,
+                    )
 
             return response
 
         # Handle streaming response
         # elif isinstance(response, AsyncGenerator):
         async def generator_wrapper() -> AsyncGenerator[ModelStreamCompletions, None]:
-            total_usage = 0
+            last_usage = Usage()
             try:
                 async for chunk in response:
                     if not chunk.succeed:
                         continue
 
-                    total_usage = chunk.usage.total_tokens if chunk.usage.total_tokens > 0 else 0
+                    last_usage = chunk.usage
                     yield chunk
             finally:
                 async with _usage_write_lock:
                     async with get_session() as session:
-                        await UsageORM.save_usage(session, plugin_name, total_usage)
+                        await UsageORM.save_usage(
+                            session,
+                            plugin_name,
+                            model_config,
+                            input_tokens=last_usage.input_tokens,
+                            output_tokens=last_usage.output_tokens,
+                            cached_tokens=last_usage.cached_tokens,
+                        )
 
         return generator_wrapper()
 

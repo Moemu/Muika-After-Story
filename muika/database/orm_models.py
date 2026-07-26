@@ -17,7 +17,10 @@ class Usage(Base):
     plugin: Mapped[str] = mapped_column(String)
     type: Mapped[str] = mapped_column(String, nullable=False)
     date: Mapped[str] = mapped_column(String, nullable=False)
-    tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    cached_tokens: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
 
 
 class MemoryRecordORM(Base):
