@@ -53,6 +53,8 @@ class MASConfig(BaseSettings):
 
     butler_model: Optional[str] = None
     """管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
+    session_summarize_model: Optional[str] = None
+    """会话总结 Agent 所用模型的配置名，建议使用与核心模型相同型号或其量化版本。留空则使用管家模型"""
 
     fs_allowed_paths: List[str] = []
     """文件操作白名单目录列表。空列表时文件系统工具全部禁用。
