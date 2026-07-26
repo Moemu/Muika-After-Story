@@ -21,6 +21,7 @@ from .. import (
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
     register,
 )
 from ..utils.images import get_file_base64
@@ -130,7 +131,7 @@ class Openai(BaseLLM):
         messages: list,
         tools: Union[List[ChatCompletionToolParam], NotGiven],
         response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> ModelCompletions:
         completions = ModelCompletions()
 
@@ -152,7 +153,11 @@ class Openai(BaseLLM):
 
             result = ""
             message = response.choices[0].message  # type:ignore
-            total_tokens += response.usage.total_tokens if response.usage else 0
+            if response.usage:
+                total_usage.input_tokens += response.usage.prompt_tokens or 0
+                total_usage.output_tokens += response.usage.completion_tokens or 0
+                details = getattr(response.usage, "prompt_tokens_details", None)
+                total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
 
             if (
                 hasattr(message, "reasoning_content")  # type:ignore
@@ -177,7 +182,7 @@ class Openai(BaseLLM):
                         "content": function_return,
                     }
                 )
-                return await self._ask_sync(messages, tools, response_format, total_tokens)
+                return await self._ask_sync(messages, tools, response_format, total_usage)
 
             if message.content:  # type:ignore
                 result += message.content  # type:ignore
@@ -188,7 +193,7 @@ class Openai(BaseLLM):
                 completions.resources = [Resource(type="audio", raw=wav_bytes)]
 
             completions.text = result or "（警告：模型无输出！）"
-            completions.usage = total_tokens
+            completions.usage = total_usage
 
         except openai.APIConnectionError as e:
             error_message = f"API 连接错误: {e}"
@@ -210,7 +215,7 @@ class Openai(BaseLLM):
         messages: list,
         tools: Union[List[ChatCompletionToolParam], NotGiven],
         response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         is_insert_think_label = False
         function_id = ""
@@ -240,8 +245,14 @@ class Openai(BaseLLM):
 
                 # 获取 usage （最后一个包中返回）
                 if chunk.usage:
-                    total_tokens += chunk.usage.total_tokens
-                    stream_completions.usage = total_tokens
+                    total_usage.input_tokens += chunk.usage.prompt_tokens or 0
+                    total_usage.output_tokens += chunk.usage.completion_tokens or 0
+                    try:
+                        details = chunk.usage.prompt_tokens_details
+                        total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
+                    except AttributeError:
+                        pass
+                    stream_completions.usage = total_usage
 
                 if not chunk.choices:
                     yield stream_completions
@@ -312,7 +323,7 @@ class Openai(BaseLLM):
                     }
                 )
 
-                async for chunk in self._ask_stream(messages, tools, response_format, total_tokens):
+                async for chunk in self._ask_stream(messages, tools, response_format, total_usage):
                     yield chunk
                 return
 

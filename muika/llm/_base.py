@@ -14,11 +14,7 @@ from typing import (
 )
 
 from ._config import ModelConfig
-from ._schema import (
-    ModelCompletions,
-    ModelRequest,
-    ModelStreamCompletions,
-)
+from ._schema import ModelCompletions, ModelRequest, ModelStreamCompletions, Usage
 
 if TYPE_CHECKING:
     from muika.core.memory import SessionTurn
@@ -123,7 +119,7 @@ class BaseLLM(ABC):
         raise NotImplementedError
 
     async def _ask_sync(
-        self, messages: list, tools: Any, response_format: Any, total_tokens: int = 0
+        self, messages: list, tools: Any, response_format: Any, total_usage: Usage = Usage()
     ) -> "ModelCompletions":
         """
         同步模型调用
@@ -131,7 +127,7 @@ class BaseLLM(ABC):
         raise NotImplementedError
 
     def _ask_stream(
-        self, messages: list, tools: Any, response_format: Any, total_tokens: int = 0
+        self, messages: list, tools: Any, response_format: Any, total_usage: Usage = Usage()
     ) -> AsyncGenerator["ModelStreamCompletions", None]:
         """
         流式输出

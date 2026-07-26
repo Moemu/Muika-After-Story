@@ -6,6 +6,7 @@ from .. import (
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
     register,
 )
 from ..utils.images import get_file_base64
@@ -61,14 +62,17 @@ class Echo(BaseLLM):
             messages.append({"role": "system", "content": request.system})
 
         for item in request.history:
-            user_content = (
-                {"role": "user", "content": item.message}
-                if not all([item.resources, self.config.multimodal])
-                else self._build_multi_messages(ModelRequest(item.message, resources=item.resources))
-            )
-
-            messages.append(user_content)
-            messages.append({"role": "assistant", "content": item.respond})
+            history = self._normalize_session_turns(request.history)
+            for item in history:
+                if item.role == "user":
+                    user_content = (
+                        {"role": "user", "content": item.content}
+                        if not all([item.resources, self.config.multimodal])
+                        else self._build_multi_messages(ModelRequest(item.content, resources=item.resources))
+                    )
+                    messages.append(user_content)
+                else:
+                    messages.append({"role": "assistant", "content": item.content})
 
         user_content = (
             {"role": "user", "content": request.prompt}
@@ -81,12 +85,12 @@ class Echo(BaseLLM):
         return messages
 
     async def _ask_sync(
-        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_tokens: int = 0
+        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage = Usage()
     ) -> ModelCompletions:
         """
         同步模型调用
         """
-        total_tokens += len(messages)
+        total_usage.input_tokens += len(messages)
 
         request_info = f"Model: {self.__class__.__name__};\n"
         request_info += f"Messages: {messages}\n"
@@ -94,10 +98,10 @@ class Echo(BaseLLM):
         request_info += f"Format: {response_format}\n"
         request_info += f"Input Length: {len(messages)}\n\n"
 
-        return ModelCompletions(text=request_info, usage=total_tokens)
+        return ModelCompletions(text=request_info, usage=total_usage)
 
     async def _ask_stream(
-        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_tokens: int = 0
+        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage = Usage()
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
         流式输出
@@ -109,8 +113,8 @@ class Echo(BaseLLM):
         request_info += f"Input Length: {len(messages)}\n\n"
 
         for line in request_info.splitlines(keepends=True):
-            total_tokens += len(line)
-            yield ModelStreamCompletions(chunk=line, usage=total_tokens)
+            total_usage.input_tokens += len(line)
+            yield ModelStreamCompletions(chunk=line, usage=total_usage)
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...

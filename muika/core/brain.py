@@ -134,7 +134,10 @@ class MuikaBrain:
             if not completions.succeed:
                 raise RuntimeError(f"Model call failed: {completions.text}")
             _, result = general_processor(completions.text)
-            logger.info(f"[Brain] expand_topic | id={topic.id!r} chars={len(result)} tokens={completions.usage}")
+            logger.info(
+                f"[Brain] expand_topic | id={topic.id!r} chars={len(result)} "
+                f"tokens={completions.usage.total_tokens}"
+            )
             return result
         except Exception as e:
             logger.error(f"[Brain] expand_topic failed: {e}")
@@ -231,7 +234,8 @@ class MuikaBrain:
             _, result = general_processor(completions.text)
             has_butler = "<Butler:" in result
             logger.debug(
-                f"[Brain] reply generated | chars={len(result)} " f"tokens={completions.usage} butler_cmd={has_butler}"
+                f"[Brain] reply generated | chars={len(result)} "
+                f"tokens={completions.usage.total_tokens} butler_cmd={has_butler}"
             )
             return result
         except Exception as e:

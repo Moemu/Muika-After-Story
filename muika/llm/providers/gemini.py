@@ -34,6 +34,7 @@ from .. import (
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
     register,
 )
 from ..utils.images import get_file_base64
@@ -159,7 +160,7 @@ class Gemini(BaseLLM):
         messages: list[ContentOrDict],
         tools: Optional[List[dict]],
         response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> ModelCompletions:
         gemini_config = self._build_gemini_config(tools, response_format)
         completions = ModelCompletions()
@@ -169,8 +170,9 @@ class Gemini(BaseLLM):
             message = messages[-1].parts  # type:ignore
             response = await chat.send_message(message=message)  # type:ignore
             if response.usage_metadata:
-                total_token_count = response.usage_metadata.total_token_count
-                total_tokens += total_token_count if total_token_count else 0
+                total_usage.input_tokens += response.usage_metadata.prompt_token_count or 0
+                total_usage.output_tokens += response.usage_metadata.candidates_token_count or 0
+                total_usage.cached_tokens += response.usage_metadata.cached_content_token_count or 0
 
             if response.text:
                 completions.text = response.text
@@ -201,10 +203,10 @@ class Gemini(BaseLLM):
                 messages.append(Content(role="model", parts=[Part(function_call=function_call)]))
                 messages.append(Content(role="user", parts=[function_response_part]))
 
-                return await self._ask_sync(messages, tools, response_format, total_tokens)
+                return await self._ask_sync(messages, tools, response_format, total_usage)
 
             completions.text = completions.text or "（警告：模型无输出！）"
-            completions.usage = total_tokens
+            completions.usage = total_usage
             return completions
 
         except errors.APIError as e:
@@ -227,11 +229,13 @@ class Gemini(BaseLLM):
         messages: list,
         tools: Optional[List[dict]],
         response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         gemini_config = self._build_gemini_config(tools, response_format)
         try:
-            current_total_tokens = 0
+            current_input = 0
+            current_output = 0
+            current_cached = 0
             stream = await self.client.aio.models.generate_content_stream(
                 model=self.model_name, contents=messages, config=gemini_config
             )
@@ -244,7 +248,9 @@ class Gemini(BaseLLM):
                     yield stream_completions
 
                 if chunk.usage_metadata and chunk.usage_metadata.total_token_count:
-                    current_total_tokens = chunk.usage_metadata.total_token_count
+                    current_input = chunk.usage_metadata.prompt_token_count or 0
+                    current_output = chunk.usage_metadata.candidates_token_count or 0
+                    current_cached = chunk.usage_metadata.cached_content_token_count or 0
 
                 if (
                     chunk.candidates
@@ -273,16 +279,20 @@ class Gemini(BaseLLM):
                     messages.append(Content(role="model", parts=[Part(function_call=function_call)]))
                     messages.append(Content(role="user", parts=[function_response_part]))
 
-                    async for final_chunk in self._ask_stream(
-                        messages, tools, response_format, total_tokens + current_total_tokens
-                    ):
+                    total_usage.input_tokens += current_input
+                    total_usage.output_tokens += current_output
+                    total_usage.cached_tokens += current_cached
+
+                    async for final_chunk in self._ask_stream(messages, tools, response_format, total_usage):
                         yield final_chunk
                     return
 
             totaltokens_completions = ModelStreamCompletions()
 
-            total_tokens += current_total_tokens
-            totaltokens_completions.usage = total_tokens
+            total_usage.input_tokens += current_input
+            total_usage.output_tokens += current_output
+            total_usage.cached_tokens += current_cached
+            totaltokens_completions.usage = total_usage
             yield totaltokens_completions
 
         except errors.APIError as e:

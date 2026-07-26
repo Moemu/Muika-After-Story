@@ -38,7 +38,7 @@ def record_plugin_usage(func: ASK_FUNC):
 
         # Handle non-streaming response
         if isinstance(response, ModelCompletions):
-            total_usage = response.usage if response.usage > 0 else 0
+            total_usage = response.usage.total_tokens if response.usage.total_tokens > 0 else 0
 
             async with _usage_write_lock:
                 async with get_session() as session:
@@ -55,7 +55,7 @@ def record_plugin_usage(func: ASK_FUNC):
                     if not chunk.succeed:
                         continue
 
-                    total_usage = chunk.usage if chunk.usage > 0 else 0
+                    total_usage = chunk.usage.total_tokens if chunk.usage.total_tokens > 0 else 0
                     yield chunk
             finally:
                 async with _usage_write_lock:

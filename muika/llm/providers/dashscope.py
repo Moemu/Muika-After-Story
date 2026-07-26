@@ -18,6 +18,7 @@ from .. import (
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
     register,
 )
 from ..utils.tools import function_call_handler
@@ -159,7 +160,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         response: GenerationResponse | MultiModalConversationResponse,
-        total_tokens: int,
+        total_usage: Usage = Usage(),
     ) -> ModelCompletions:
         """
         处理 Dashscope 的非流式返回对象
@@ -168,7 +169,7 @@ class Dashscope(BaseLLM):
         :param tools: 工具列表
         :param response_format: 消息回复格式
         :param response: 迭代器主体
-        :param total_tokens: 整个对话的总 token
+        :param total_usage: 整体用量
         """
         completions = ModelCompletions()
 
@@ -179,8 +180,12 @@ class Dashscope(BaseLLM):
             completions.text = f"模型调用失败: {response.status_code}({response.code})"
             return completions
 
-        total_tokens += int(response.usage.total_tokens)
-        completions.usage = total_tokens
+        total_usage.input_tokens += response.usage.input_tokens
+        total_usage.output_tokens += response.usage.output_tokens
+        prompt_tokens_details = getattr(response.usage, "prompt_tokens_details", None)
+        if prompt_tokens_details:
+            total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens ", 0)
+        completions.usage = total_usage
 
         if response.output.text:
             completions.text = response.output.text
@@ -191,7 +196,7 @@ class Dashscope(BaseLLM):
             completions.text = message_content if isinstance(message_content, str) else message_content[0].get("text")
             return completions
 
-        return await self._tool_calls_handle_sync(messages, tools, response_format, response, total_tokens)
+        return await self._tool_calls_handle_sync(messages, tools, response_format, response, total_usage)
 
     async def _Generator_handle(
         self,
@@ -199,7 +204,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         response: Generator[GenerationResponse, None, None] | Generator[MultiModalConversationResponse, None, None],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
         处理 Dashscope 的流式迭代器
@@ -208,7 +213,7 @@ class Dashscope(BaseLLM):
         :param tools: 工具列表
         :param response_format: 消息回复格式
         :param response: 迭代器主体
-        :param total_tokens: 整个对话的总 token
+        :param total_usage: 整体用量
         """
         func_stream = FunctionCallStream()
         thought_stream = ThoughtStream()
@@ -227,8 +232,12 @@ class Dashscope(BaseLLM):
                 return
 
             # 更新 token 消耗
-            total_tokens = chunk.usage.total_tokens
-            stream_completions.usage = total_tokens
+            total_usage.input_tokens = chunk.usage.input_tokens
+            total_usage.output_tokens = chunk.usage.output_tokens
+            prompt_tokens_details = getattr(chunk.usage, "prompt_tokens_details", None)
+            if prompt_tokens_details:
+                total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens ", 0)
+            stream_completions.usage = total_usage
 
             # 优先判断是否是工具调用（OpenAI-style function calling）
             if chunk.output.choices and chunk.output.choices[0].message.get("tool_calls", []):
@@ -250,7 +259,7 @@ class Dashscope(BaseLLM):
         # 流式处理工具调用响应
         if func_stream.enable:
             async for final_chunk in await self._tool_calls_handle_stream(
-                messages, tools, response_format, func_stream, total_tokens
+                messages, tools, response_format, func_stream, total_usage
             ):
                 yield final_chunk
 
@@ -260,7 +269,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         response: GenerationResponse | MultiModalConversationResponse,
-        total_tokens: int,
+        total_usage: Usage = Usage(),
     ) -> ModelCompletions:
         """
         处理非流式工具调用流
@@ -269,7 +278,7 @@ class Dashscope(BaseLLM):
         :param tools: 工具列表
         :param response_format: 消息回复格式
         :param func_stream: 工具调用流实例
-        :param total_tokens: 总 Token 数
+        :param total_usage: 整体用量
         """
         tool_call = response.output.choices[0].message.tool_calls[0]
         tool_call_id = tool_call["id"]
@@ -281,7 +290,7 @@ class Dashscope(BaseLLM):
         messages.append(response.output.choices[0].message)
         messages.append({"role": "tool", "content": function_return, "tool_call_id": tool_call_id})
 
-        return await self._ask(messages, tools, response_format, total_tokens)  # type:ignore
+        return await self._ask(messages, tools, response_format, total_usage)  # type:ignore
 
     async def _tool_calls_handle_stream(
         self,
@@ -289,7 +298,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         func_stream: FunctionCallStream,
-        total_tokens: int,
+        total_usage: Usage = Usage(),
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
         处理流式工具调用流
@@ -298,7 +307,7 @@ class Dashscope(BaseLLM):
         :param tools: 工具列表
         :param response_format: 消息回复格式
         :param func_stream: 工具调用流实例
-        :param total_tokens: 总 Token 数
+        :param total_usage: 整体用量
         """
         function_args = json.loads(func_stream.function_args)
 
@@ -323,14 +332,10 @@ class Dashscope(BaseLLM):
         )
         messages.append({"role": "tool", "content": function_return, "tool_call_id": func_stream.id})
 
-        return await self._ask(messages, tools, response_format, total_tokens)  # type:ignore
+        return await self._ask(messages, tools, response_format, total_usage)  # type:ignore
 
     async def _ask(
-        self,
-        messages: list,
-        tools: List[dict],
-        response_format: Optional[dict],
-        total_tokens: int = 0,
+        self, messages: list, tools: List[dict], response_format: Optional[dict], total_usage: Usage = Usage()
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
         loop = asyncio.get_event_loop()
 
@@ -380,8 +385,8 @@ class Dashscope(BaseLLM):
             )
 
         if isinstance(response, GenerationResponse) or isinstance(response, MultiModalConversationResponse):
-            return await self._GenerationResponse_handle(messages, tools, response_format, response, total_tokens)
-        return self._Generator_handle(messages, tools, response_format, response, total_tokens)
+            return await self._GenerationResponse_handle(messages, tools, response_format, response, total_usage)
+        return self._Generator_handle(messages, tools, response_format, response, total_usage)
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...

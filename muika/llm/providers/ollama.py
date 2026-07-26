@@ -12,6 +12,7 @@ from .. import (
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
     register,
 )
 from ..utils.images import get_file_base64
@@ -88,7 +89,7 @@ class Ollama(BaseLLM):
         messages: list,
         tools: List[dict[str, Any]],
         response_format: Optional[dict[str, Any]],
-        total_tokens: int = -1,
+        total_usage: Usage = Usage(),
     ) -> ModelCompletions:
         completions = ModelCompletions()
 
@@ -141,7 +142,7 @@ class Ollama(BaseLLM):
         messages: list,
         tools: List[dict[str, Any]],
         response_format: Optional[dict[str, Any]],
-        total_tokens: int = -1,
+        total_usage: Usage = Usage(),
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         try:
             response = await self.client.chat(

@@ -14,6 +14,30 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class Usage:
+    """
+    Token 用量明细
+    """
+
+    input_tokens: int = 0
+    """输入 Token 数（prompt tokens）"""
+    output_tokens: int = 0
+    """输出 Token 数（completion tokens）"""
+    cached_tokens: int = 0
+    """缓存命中的 Token 数（cached prompt tokens）"""
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def cached_rate(self) -> float:
+        if self.input_tokens == 0:
+            return 0.0
+        return self.cached_tokens / self.input_tokens
+
+
+@dataclass
 class ModelRequest:
     """
     模型调用请求
@@ -36,8 +60,8 @@ class ModelCompletions:
 
     text: str = ""
     """输出文本内容"""
-    usage: int = -1
-    """总调用用量"""
+    usage: Usage = field(default_factory=Usage)
+    """调用用量明细"""
     resources: List[Resource] = field(default_factory=list)
     """模型输出多模态资源列表"""
     succeed: bool = True
@@ -52,8 +76,8 @@ class ModelStreamCompletions:
 
     chunk: str = ""
     """输出文本块"""
-    usage: int = -1
-    """总调用用量（累增，一般取最后一个块的用量）"""
+    usage: Usage = field(default_factory=Usage)
+    """调用用量明细（累增，一般取最后一个块的用量）"""
     resources: Optional[List[Resource]] = field(default_factory=list)
     """模型输出多模态资源列表"""
     succeed: bool = True
@@ -67,7 +91,7 @@ class EmbeddingsBatchResult:
     """
 
     embeddings: List[List[float]]
-    usage: int = -1
+    usage: Usage = field(default_factory=Usage)
     succeed: bool = True
 
     @property

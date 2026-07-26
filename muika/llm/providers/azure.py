@@ -35,6 +35,7 @@ from .. import (
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
+    Usage,
     register,
 )
 from ..utils.tools import function_call_handler
@@ -142,12 +143,11 @@ class Azure(BaseLLM):
         messages: List[ChatRequestMessage],
         tools: List[ChatCompletionsToolDefinition],
         response_format: Optional[JsonSchemaFormat],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> ModelCompletions:
         client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token))
 
         completions = ModelCompletions()
-        current_total_tokens = total_tokens
 
         try:
             response = await client.complete(
@@ -164,7 +164,10 @@ class Azure(BaseLLM):
             )
             finish_reason = response.choices[0].finish_reason
             if response.usage:
-                current_total_tokens += response.usage.total_tokens
+                total_usage.input_tokens += response.usage.prompt_tokens or 0
+                total_usage.output_tokens += response.usage.completion_tokens or 0
+                details = getattr(response.usage, "prompt_tokens_details", None)
+                total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
 
             if finish_reason == CompletionsFinishReason.STOPPED:
                 completions.text = response.choices[0].message.content
@@ -183,7 +186,7 @@ class Azure(BaseLLM):
                 if (tool_calls is None) or (not self._tool_messages_precheck(tool_calls=tool_calls)):
                     completions.succeed = False
                     completions.text = "(模型内部错误: tool_calls 内容为空)"
-                    completions.usage = current_total_tokens
+                    completions.usage = total_usage
                     return completions
 
                 tool_call = tool_calls[0]
@@ -194,7 +197,7 @@ class Azure(BaseLLM):
                 # Append the function call result fo the chat history
                 messages.append(ToolMessage(tool_call_id=tool_call.id, content=function_return))
 
-                return await self._ask_sync(messages, tools, response_format, current_total_tokens)
+                return await self._ask_sync(messages, tools, response_format, total_usage)
 
             else:
                 completions.succeed = False
@@ -208,7 +211,7 @@ class Azure(BaseLLM):
 
         finally:
             await client.close()
-            completions.usage = current_total_tokens
+            completions.usage = total_usage
             return completions
 
     async def _ask_stream(
@@ -216,10 +219,9 @@ class Azure(BaseLLM):
         messages: List[ChatRequestMessage],
         tools: List[ChatCompletionsToolDefinition],
         response_format: Optional[JsonSchemaFormat],
-        total_tokens: int = 0,
+        total_usage: Usage = Usage(),
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token))
-        current_total_tokens = total_tokens
 
         try:
             response = await client.complete(
@@ -244,8 +246,11 @@ class Azure(BaseLLM):
                 stream_completions = ModelStreamCompletions()
 
                 if chunk.usage:  # chunk.usage 只会在最后一个包中被提供，此时choices为空
-                    current_total_tokens += chunk.usage.total_tokens if chunk.usage else 0
-                    stream_completions.usage = current_total_tokens
+                    total_usage.input_tokens += chunk.usage.prompt_tokens or 0
+                    total_usage.output_tokens += chunk.usage.completion_tokens or 0
+                    details = getattr(chunk.usage, "prompt_tokens_details", None)
+                    total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
+                    stream_completions.usage = total_usage
 
                 if not chunk.choices:
                     yield stream_completions
@@ -292,7 +297,7 @@ class Azure(BaseLLM):
                     # Append the function call result fo the chat history
                     messages.append(ToolMessage(tool_call_id=tool_call_id, content=function_return))
 
-                    async for content in self._ask_stream(messages, tools, response_format, current_total_tokens):
+                    async for content in self._ask_stream(messages, tools, response_format, total_usage):
                         yield content
 
                     return
