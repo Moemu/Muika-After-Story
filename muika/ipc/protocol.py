@@ -56,7 +56,7 @@ class QueryMessage(IPCMessage):
     """Bot 向 Core 查询状态（调试命令）。"""
 
     type: Literal["query"] = "query"
-    query: Literal["state"] = "state"
+    query: Literal["state", "usage"]
 
 
 class DebugMessage(IPCMessage):

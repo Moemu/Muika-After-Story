@@ -27,7 +27,8 @@ from muika.core.events import (
 from muika.core.executor import Executor
 from muika.core.loop import Muika
 from muika.core.state import MuikaState
-from muika.database.db import close_db, init_db
+from muika.database.crud import UsageORM
+from muika.database.db import close_db, get_session, init_db
 from muika.models import Message
 from muika.utils.logger import init_logger, logger
 
@@ -152,6 +153,41 @@ class CoreBootstrap:
             state = deepcopy(self._muika.state)
             state.memory = None
             return QueryResponse(query="state", data=asdict(state))
+
+        if query_type == "usage":
+            async with get_session() as session:
+                records = await UsageORM.get_usage_records(session, days=7)
+            manager = get_model_config_manager()
+            data_rows = []
+            totals = {"input": 0, "output": 0, "cached": 0, "cost": 0.0}
+            for r in records:
+                row = {
+                    "date": r.date,
+                    "plugin": r.plugin,
+                    "model": r.model or "",
+                    "type": r.type,
+                    "input_tokens": r.input_tokens or 0,
+                    "output_tokens": r.output_tokens or 0,
+                    "cached_tokens": r.cached_tokens or 0,
+                }
+                # 查找对应的 ModelConfig 并计算费用
+                config = manager.configs.get(r.model) or manager.configs.get(r.plugin)
+                if config and config.input_price is not None:
+                    row["cost"] = round(
+                        (
+                            (r.input_tokens or 0) * config.input_price
+                            + (r.output_tokens or 0) * (config.output_price or 0)
+                            + (r.cached_tokens or 0) * (config.cached_price or 0)
+                        )
+                        / 1_000_000,
+                        4,
+                    )
+                    totals["cost"] += row["cost"]
+                data_rows.append(row)
+                totals["input"] += r.input_tokens or 0
+                totals["output"] += r.output_tokens or 0
+                totals["cached"] += r.cached_tokens or 0
+            return QueryResponse(query="usage", data={"records": data_rows, "totals": totals})
 
         return ErrorMessage(message="unknown_state")
 

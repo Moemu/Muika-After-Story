@@ -61,6 +61,14 @@ class ModelConfig(BaseModel):
     audio: Optional[Any] = None
     """多模态音频参数"""
 
+    # ── 成本估算（每 1M tokens 的价格，None 表示不启用） ──
+    input_price: Optional[float] = None
+    """每百万输入 token 价格"""
+    output_price: Optional[float] = None
+    """每百万输出 token 价格"""
+    cached_price: Optional[float] = None
+    """每百万缓存命中 token 价格"""
+
     def __hash__(self) -> int:
         return hash(f"{self.provider}::{self.api_host}::{self.model_name}")
 

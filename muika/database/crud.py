@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
 from sqlalchemy import func, select
@@ -77,6 +77,19 @@ class UsageORM:
                 cached_tokens=cached_tokens,
             )
         )
+
+    @staticmethod
+    async def get_usage_records(session: AsyncSession, days: int = 7) -> list[Usage]:
+        """返回最近 N 天按日期降序排列的用量明细行。
+
+        :param session: 数据库会话
+        :param days: 返回最近多少天的数据
+        """
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y.%m.%d")
+        stmt = await session.execute(
+            select(Usage).where(Usage.date >= since).order_by(Usage.date.desc(), Usage.type, Usage.plugin)
+        )
+        return list(stmt.scalars().all())
 
 
 # MemoryRecordCRUD：CORE / STATE / PREFERENCE 层持久化

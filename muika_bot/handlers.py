@@ -82,12 +82,21 @@ def _init_ipc_client() -> IpcClient:
         logger.debug(f"Received Action Response: {data}")
 
     @_ipc_client.on_message("query_response")
-    async def _handle_state_update(data: dict) -> None:
-        state = data.get("data")
-        if not state:
+    async def _handle_query_response(data: dict) -> None:
+        query = data.get("query", "")
+        payload = data.get("data")
+        if not payload:
             return
-        message = _format_state_display(state)
-        await _send_message(message)
+
+        if query == "usage":
+            message = _format_usage_display(payload)
+        elif query == "state":
+            message = _format_state_display(payload)
+        else:
+            return
+
+        if message:
+            await _send_message(message, raw=True)
 
     @_ipc_client.on_message("error")
     async def _handle_error(data: dict) -> None:
@@ -208,6 +217,57 @@ command_new = on_alconna(
     permission=SUPERUSER,
 )
 
+command_usage = on_alconna(
+    Alconna(
+        COMMAND_PREFIXES,
+        "usage",
+        meta=CommandMeta("查看 Token 用量统计"),
+    ),
+    priority=10,
+    block=True,
+    skip_for_unmatch=False,
+    permission=SUPERUSER,
+)
+
+
+def _format_usage_display(data: dict) -> str:
+    """格式化用量数据为用户可读的消息。"""
+    records = data.get("records", [])
+    totals = data.get("totals", {})
+
+    if not records:
+        return "暂无用量数据"
+
+    lines = ["近 7 天 Token 用量:"]
+    current_date = ""
+    for r in records:
+        date = r["date"]
+        if date != current_date:
+            current_date = date
+            lines.append(f"{date}:")
+
+        model_label = r["model"]
+        input_t = r["input_tokens"]
+        output_t = r["output_tokens"]
+        cached_t = r["cached_tokens"]
+
+        row = f"{model_label}: " f"输入 {input_t:,} | 输出 {output_t:,}"
+        if cached_t:
+            cached_r = cached_t / input_t
+            row += f" | 缓存命中 {cached_t:,}({cached_r:.2%})"
+        if r.get("cost") is not None:
+            row += f" → ${r['cost']:.4f}"
+        lines.append(row)
+
+    total_line = f"合计: 输入 {totals['input']:,} | 输出 {totals['output']:,}"
+    if totals.get("cached"):
+        total_line += f" | 缓存命中 {totals['cached']:,}" if totals.get("cached") else ""
+    lines.append(total_line)
+
+    if totals.get("cost"):
+        lines.append(f"预计总费用: ${totals['cost']:.2f}")
+    return "\n".join(lines)
+
 
 def _get_media_filename(media: uniseg.segment.Media, type: Literal["audio", "image", "video", "file"]) -> str:
     """Generate a unique filename for a multimodal media segment."""
@@ -261,33 +321,56 @@ async def _extract_multi_resources(message: UniMsg, event: Event) -> list[Resour
 
 
 def _split_message(content: str, max_length_per_message: int = 250) -> list[str]:
-    messages_split_by_newlines = content.split("\n\n")
+    """将消息按自然边界切分，贪心合并以最小化切出的消息段数量。"""
+    paragraphs = content.split("\n\n")
     final_messages = []
-    for msg in messages_split_by_newlines:
-        if len(msg) <= max_length_per_message:
-            final_messages.append(msg)
-            continue
-        messages_spilt_by_punctuation = []
-        current_segment = ""
-        for char in msg:
-            current_segment += char
-            if char in COMMON_PUNCTUATION:
-                messages_spilt_by_punctuation.append(current_segment)
-                current_segment = ""
-        if current_segment:
-            messages_spilt_by_punctuation.append(current_segment)
 
-        final_messages.extend(messages_spilt_by_punctuation)
+    for paragraph in paragraphs:
+        if len(paragraph) <= max_length_per_message:
+            final_messages.append(paragraph)
+            continue
+
+        # 先按标点切分为自然句段
+        segments = []
+        current = ""
+        for char in paragraph:
+            current += char
+            if char in COMMON_PUNCTUATION:
+                segments.append(current)
+                current = ""
+        if current:
+            segments.append(current)
+
+        # 贪心合并句段，使每条消息尽可能接近 max_length_per_message
+        buffer = ""
+        for seg in segments:
+            if len(buffer) + len(seg) <= max_length_per_message:
+                buffer += seg
+            else:
+                if buffer:
+                    final_messages.append(buffer)
+                    buffer = ""
+                # 若单个句段超过上限，硬切分
+                while len(seg) > max_length_per_message:
+                    final_messages.append(seg[:max_length_per_message])
+                    seg = seg[max_length_per_message:]
+                buffer = seg
+        if buffer:
+            final_messages.append(buffer)
+
     return final_messages
 
 
-async def _send_message(message: str):
+async def _send_message(message: str, raw: bool = False):
     """
     发送消息给用户
     """
-    # 移除 agent 指令会导致 4 个同时出现的换行符，要么替换为 2 个，要么提示用户
-    message = message.strip().replace("\n\n\n\n", "\n\n")
-    messages = _split_message(message)
+    if not raw:
+        # 移除 agent 指令会导致 4 个同时出现的换行符，要么替换为 2 个，要么提示用户
+        message = message.strip().replace("\n\n\n\n", "\n\n")
+        messages = _split_message(message)
+    else:
+        messages = [message]
     for msg in messages:
         await UniMessage(msg).send(target=_message_target, bot=get_bot())
         await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
@@ -458,3 +541,8 @@ async def handle_session_new(ipc_client: IpcClient = Depends(_get_ipc_client)) -
 async def handle_session_summarize(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
     await ipc_client.send_session("save_session")
     await UniMessage("[System] 已发送会话保存请求").finish()
+
+
+@command_usage.handle()
+async def handle_usage(ipc_client: IpcClient = Depends(_get_ipc_client)) -> None:
+    await ipc_client.send_query("usage")

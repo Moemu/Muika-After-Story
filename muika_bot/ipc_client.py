@@ -259,7 +259,7 @@ class IpcClient:
         msg = EventMessage(event=EventPayload(event_type=event_type, payload=payload or {}))
         return await self._send_or_queue(msg)
 
-    async def send_query(self, query_type: Literal["state"]) -> bool:
+    async def send_query(self, query_type: Literal["state", "usage"]) -> bool:
         """向 Core 发送查询。"""
         msg = QueryMessage(query=query_type)
         return await self._send_or_queue(msg)
