@@ -8,7 +8,6 @@ Usage::
 Environment variables:
     MUIKA_CORE_HOST  -- WebSocket listen address (default 127.0.0.1)
     MUIKA_CORE_PORT  -- WebSocket listen port (default 8765)
-    MUIKA_DATA_DIR   -- Data directory (default cwd)
 """
 
 import sys

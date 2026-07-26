@@ -14,7 +14,6 @@ import signal
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from muika.config import get_model_config_manager, mas_config
@@ -31,6 +30,7 @@ from muika.database.crud import UsageORM
 from muika.database.db import close_db, get_session, init_db
 from muika.models import Message
 from muika.utils.logger import init_logger, logger
+from muika.utils.utils import get_version
 
 from .protocol import ActionResponse, ErrorMessage, QueryResponse, SendMessage
 from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
@@ -41,7 +41,6 @@ class CoreBootstrap:
 
     :param host: WebSocket listen address.
     :param port: WebSocket listen port.
-    :param data_dir: directory for runtime data (connection records, etc.).
     :param ipc_secret: IPC 预共享密钥。
     """
 
@@ -49,12 +48,10 @@ class CoreBootstrap:
         self,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
-        data_dir: Optional[Path] = None,
         ipc_secret: str = mas_config.ipc_secret,
     ) -> None:
         self._host = host
         self._port = port
-        self._data_dir = data_dir or Path(".")
 
         self._ws_server = CoreWsServer(host=host, port=port, secret=ipc_secret)
 
@@ -76,7 +73,6 @@ class CoreBootstrap:
     async def start(self) -> None:
         """Boot all components."""
         logger.info("Muika Core is booting...")
-        self._data_dir.mkdir(exist_ok=True, parents=True)
 
         self._register_handlers()
         await self._ws_server.start()
@@ -268,25 +264,22 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=int(os.getenv("MUIKA_CORE_PORT", str(DEFAULT_PORT))),
         help=f"WebSocket listen port (default: {DEFAULT_PORT})",
     )
-    parser.add_argument(
-        "--data-dir",
-        default=os.getenv("MUIKA_DATA_DIR", "."),
-        help="Data directory path (default: cwd)",
-    )
     return parser.parse_args(argv)
 
 
 async def run_core(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-    data_dir: Optional[Path] = None,
 ) -> None:
     """Async entry point for the Core process."""
     init_logger()
 
+    logger.info(f"Muika-After-Story 版本: {get_version()}")
+    logger.info(f"Muika-After-Story 数据目录: {mas_config.data_dir.resolve()}")
+
     await init_db()
 
-    bootstrap = CoreBootstrap(host=host, port=port, data_dir=data_dir, ipc_secret=mas_config.ipc_secret)
+    bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
     await bootstrap.start()
 
     stop_event = asyncio.Event()
@@ -308,8 +301,7 @@ async def run_core(
 def main(argv: Optional[list[str]] = None) -> None:
     """CLI entry point for the Core process."""
     args = _parse_args(argv)
-    data_dir = Path(args.data_dir) if args.data_dir else None
-    asyncio.run(run_core(host=args.host, port=args.port, data_dir=data_dir))
+    asyncio.run(run_core(host=args.host, port=args.port))
 
 
 if __name__ == "__main__":
