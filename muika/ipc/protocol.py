@@ -1,7 +1,5 @@
-"""IPC 消息协议定义 —— Bot ↔ Core 之间通过 WebSocket 传输的 JSON 消息模型。
-
-所有消息继承自 ``IPCMessage`` / ``IPCResponse``，使用 Pydantic discriminated union
-进行序列化和反序列化，与项目中 Butler Agent 的 Action 联合类型风格一致。
+"""
+IPC 消息协议定义 —— Bot ↔ Core 之间通过 WebSocket 传输的 JSON 消息模型。
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ class IPCMessage(BaseModel):
     """所有 IPC 消息的通用信封。"""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    """消息唯一 ID，用于请求-响应匹配"""
+    """消息唯一 ID"""
 
     type: Any
     """消息类型鉴别器"""
@@ -35,60 +33,38 @@ class IPCMessage(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class EventPayload(BaseModel):
-    """事件负载——由 Bot 转发给 Core 的外部事件。"""
+class UserMessageEvent(IPCMessage):
+    """用户发送了一条对话消息。"""
 
-    event_type: str
-    """事件类型: user_message | session_bootstrap | session_end | scheduled_trigger"""
-
-    payload: Dict[str, Any] = Field(default_factory=dict)
-    """事件的具体数据，结构与 muika.core.events 中的 Event dataclass 对应"""
-
-
-class EventMessage(IPCMessage):
-    """Bot 转发一个用户/系统事件到 Core。"""
-
-    type: Literal["event"] = "event"
-    event: EventPayload
+    type: Literal["user_message"] = "user_message"
+    message: str = ""
+    """消息文本"""
+    resources: List[Dict[str, Any]] = Field(default_factory=list)
+    """多模态资源（Resource.to_dict() 格式）"""
 
 
-class QueryMessage(IPCMessage):
-    """Bot 向 Core 查询状态（调试命令）。"""
+class CommandEvent(IPCMessage):
+    """用户发送了一条命令。"""
 
-    type: Literal["query"] = "query"
-    query: Literal["state", "usage"]
-
-
-class DebugMessage(IPCMessage):
-    """Bot 请求 Core 执行调试操作。"""
-
-    type: Literal["debug"] = "debug"
-    action: Literal["trigger_topic", "set_state", "reset_topic"]
-    field: Optional[str] = None
-    """set_state 时的字段名"""
-    value: Optional[Any] = None
-    """set_state 时的字段值"""
+    type: Literal["command"] = "command"
+    raw: str
+    """原始命令文本（含前缀，如 ``".debug state"``）"""
 
 
-class ConfigChangedMessage(IPCMessage):
-    """Bot 通知 Core 模型配置已变更。"""
+class SessionBootstrapEvent(IPCMessage):
+    """Bot 已连接，请求开始新会话。"""
 
-    type: Literal["config_changed"] = "config_changed"
-    config_name: Optional[str] = None
-    """变更的配置名，为空表示默认配置"""
+    type: Literal["session_bootstrap"] = "session_bootstrap"
 
 
-class SessionMessage(IPCMessage):
-    """Bot 请求 Core 执行会话管理操作。"""
+class SessionEndEvent(IPCMessage):
+    """用户主动请求当前会话结束"""
 
-    type: Literal["session"] = "session"
-    action: Literal["new_session", "save_session"]
-    """new_session: 总结并重置会话; save_session: 仅总结当前会话"""
+    type: Literal["session_end"] = "session_end"
 
 
-# Bot → Core 联合类型
 BotToCoreMessage = Annotated[
-    Union[EventMessage, QueryMessage, DebugMessage, ConfigChangedMessage, SessionMessage],
+    Union[UserMessageEvent, CommandEvent, SessionBootstrapEvent, SessionEndEvent],
     Field(discriminator="type"),
 ]
 
@@ -98,34 +74,27 @@ BotToCoreMessage = Annotated[
 
 
 class SendMessage(IPCMessage):
-    """Core 要求 Bot 向用户发送一条消息。"""
+    """Core 要求 Bot 发送一条 LLM 对话消息。"""
 
     type: Literal["send_message"] = "send_message"
-    content: str
-    """要发送的文本内容"""
+    content: str = ""
+    """文本内容"""
     resources: List[Dict[str, Any]] = Field(default_factory=list)
-    """附属的多模态资源（Resource.to_dict() 格式）"""
+    """多模态资源（Resource.to_dict() 格式）"""
 
 
-class StateUpdate(IPCMessage):
-    """Core 推送 MuikaState 的快照给 Bot（供调试命令读取）。"""
+class CommandResult(IPCMessage):
+    """Core 返回一条命令执行结果。"""
 
-    type: Literal["state_update"] = "state_update"
-    state: Dict[str, Any]
-    """MuikaState 的序列化字典"""
-
-
-class QueryResponse(IPCMessage):
-    """Core 对 Bot 查询的响应。"""
-
-    type: Literal["query_response"] = "query_response"
-    query: str
-    """对应的查询类型"""
-    data: Dict[str, Any]
-    """查询结果数据"""
+    type: Literal["command_result"] = "command_result"
+    content: str = ""
+    """文本结果"""
+    resources: List[Dict[str, Any]] = Field(default_factory=list)
+    """多模态资源（Resource.to_dict() 格式）"""
 
 
 class ActionResponse(IPCMessage):
+    """Core 对 Bot 事件的确认响应。"""
 
     type: Literal["action_response"] = "action_response"
     action: str
@@ -142,8 +111,7 @@ class ErrorMessage(IPCMessage):
     """可选的详细错误信息"""
 
 
-# Core → Bot 联合类型
 CoreToBotMessage = Annotated[
-    Union[ActionResponse, SendMessage, StateUpdate, QueryResponse, ErrorMessage],
+    Union[SendMessage, CommandResult, ActionResponse, ErrorMessage],
     Field(discriminator="type"),
 ]

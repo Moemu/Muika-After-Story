@@ -67,15 +67,11 @@ class CoreWsServer:
     # ── 公共 API ──────────────────────────────────────────────────────────
 
     def register_handler(self, message_type: str, handler: Handler) -> None:
-        """注册一个消息类型处理器。
+        """
+        注册一个消息类型处理器。
 
-        当收到 ``type`` 匹配的消息时，调用 *handler* 并将返回值
-        通过 ``query_response`` 发回 Bot。
-
-        Parameters
-        ----------
-        message_type: 消息 ``type`` 字段的值（如 ``"event"``, ``"query"``, ``"debug"``）
-        handler: async 处理函数，接收 ``BotToCoreMessage``，可选返回 dict
+        :param message_type: 消息 ``type`` 字段的值（如 ``"event"``, ``"query"``, ``"debug"``）
+        :param handler: async 处理函数，接收解析后的 JSON dict，可选地返回响应数据
         """
         self._handlers[message_type] = handler
         logger.debug(f"[CoreWsServer] Registered handler for type={message_type!r}")
@@ -241,6 +237,11 @@ class CoreWsServer:
 
         if handler is None:
             logger.warning(f"[CoreWsServer] No handler for type={msg_type!r} — ignoring")
+            await self.send_to_bot(
+                ErrorMessage(
+                    message=f"Unknown type: {msg_type!r}",
+                )
+            )
             return
 
         try:

@@ -1,22 +1,23 @@
 """Message executor -- splits and sends text via a pluggable callback."""
 
 import asyncio
-from typing import Callable, Coroutine
+from typing import Any, Callable, Coroutine, Optional
 
 from .scheduler import Scheduler
 
 COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 1.5
 
-SendFunc = Callable[[str], Coroutine[None, None, None]]
-"""Async callback that delivers a single text message to the platform."""
+SendFunc = Callable[[str, Optional[list[dict[str, Any]]]], Coroutine[None, None, None]]
+"""Async callback that delivers a text message with optional multimodal resources to the platform."""
 
 
 class Executor:
     """Splits long messages into segments and sends them via ``send_func``.
 
     :param event_queue: shared event queue for the Scheduler.
-    :param send_func: async callable that actually delivers a message string.
+    :param send_func: async callable that actually delivers a message string
+                      with optional resources.
     """
 
     def __init__(
@@ -29,31 +30,57 @@ class Executor:
 
     @staticmethod
     def _split_message(content: str, max_length_per_message: int = 250) -> list[str]:
-        """Split *content* into paragraphs, breaking long paragraphs on punctuation."""
-        messages_split_by_newlines = content.split("\n\n")
+        """将消息按自然边界切分，贪心合并以最小化切出的消息段数量。"""
+        paragraphs = content.split("\n\n")
         final_messages = []
-        for msg in messages_split_by_newlines:
-            if len(msg) <= max_length_per_message:
-                final_messages.append(msg)
+
+        for paragraph in paragraphs:
+            if len(paragraph) <= max_length_per_message:
+                final_messages.append(paragraph)
                 continue
-            messages_split_by_punctuation = []
-            current_segment = ""
-            for char in msg:
-                current_segment += char
+
+            # 先按标点切分为自然句段
+            segments = []
+            current = ""
+            for char in paragraph:
+                current += char
                 if char in COMMON_PUNCTUATION:
-                    messages_split_by_punctuation.append(current_segment)
-                    current_segment = ""
-            if current_segment:
-                messages_split_by_punctuation.append(current_segment)
-            final_messages.extend(messages_split_by_punctuation)
+                    segments.append(current)
+                    current = ""
+            if current:
+                segments.append(current)
+
+            # 贪心合并句段，使每条消息尽可能接近 max_length_per_message
+            buffer = ""
+            for seg in segments:
+                if len(buffer) + len(seg) <= max_length_per_message:
+                    buffer += seg
+                else:
+                    if buffer:
+                        final_messages.append(buffer)
+                        buffer = ""
+                    # 若单个句段超过上限，硬切分
+                    while len(seg) > max_length_per_message:
+                        final_messages.append(seg[:max_length_per_message])
+                        seg = seg[max_length_per_message:]
+                    buffer = seg
+            if buffer:
+                final_messages.append(buffer)
+
         return final_messages
 
-    async def send_message(self, message: str) -> None:
-        """Clean up *message*, split it, and deliver each segment via ``send_func``."""
+    async def send_message(self, message: str, resources: Optional[list[dict[str, Any]]] = None) -> None:
+        """Clean up *message*, split it, and deliver each segment via ``send_func``.
+
+        若提供 *resources*，它们将附加到最后一条消息段中。
+        """
         message = message.strip().replace("\n\n\n\n", "\n\n")
-        messages = self._split_message(message)
-        for msg in messages:
-            await self._send_func(msg)
+        messages = self._split_message(message) if message else [""]
+        last_idx = len(messages) - 1
+        for i, msg in enumerate(messages):
+            # 仅最后一段携带 resources
+            res = resources if i == last_idx else None
+            await self._send_func(msg, res)
             await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
 
     async def _delayed_send(self, content: str, delay: int) -> None:

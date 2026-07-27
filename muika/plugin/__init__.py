@@ -1,3 +1,10 @@
+from .command import (
+    COMMAND_PREFIXES,
+    CommandDispatcher,
+    CommandRegistry,
+    get_commands,
+    on_alconna,
+)
 from .loader import (
     get_plugin_by_module_name,
     get_plugin_data_dir,
@@ -15,4 +22,9 @@ __all__ = [
     "PluginMetadata",
     "Plugin",
     "get_plugin_data_dir",
+    "on_alconna",
+    "CommandRegistry",
+    "CommandDispatcher",
+    "get_commands",
+    "COMMAND_PREFIXES",
 ]

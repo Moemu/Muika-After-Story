@@ -4,8 +4,7 @@
 
 1. 将用户消息/系统事件转发给 Core
 2. 接收 Core 的 ``send_message`` 指令并通过 NoneBot 发送
-3. 缓存 Core 推送的 ``state_update`` 供调试命令读取
-4. 自动重连（exponential backoff）
+3. 自动重连（exponential backoff）
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
-from typing import Any, Callable, Coroutine, Dict, Literal, Optional, overload
+from typing import Any, Callable, Coroutine, Dict, Optional, overload
 
 import aiohttp
 from aiohttp import WSMsgType
@@ -21,12 +20,10 @@ from aiohttp import WSMsgType
 from muika.config import mas_config
 from muika.ipc.protocol import (
     BotToCoreMessage,
-    ConfigChangedMessage,
-    DebugMessage,
-    EventMessage,
-    EventPayload,
-    QueryMessage,
-    SessionMessage,
+    CommandEvent,
+    SessionBootstrapEvent,
+    SessionEndEvent,
+    UserMessageEvent,
 )
 from muika.utils.logger import logger
 
@@ -58,9 +55,6 @@ class IpcClient:
         # 消息处理器: type → handler
         self._handlers: Dict[str, MessageHandler] = {}
 
-        # 最近一次收到的 state 快照
-        self._cached_state: Dict[str, Any] = {}
-
         # 待发送事件队列（Core 不可用时暂存）
         self._pending_events: deque[Dict[str, Any]] = deque(maxlen=_MAX_PENDING_EVENTS)
 
@@ -75,11 +69,6 @@ class IpcClient:
     @property
     def is_connected(self) -> bool:
         return self._connected
-
-    @property
-    def cached_state(self) -> Dict[str, Any]:
-        """最近一次从 Core 收到的 MuikaState 快照。"""
-        return self._cached_state
 
     async def _connect_once(self) -> None:
         """单次连接尝试。"""
@@ -252,34 +241,22 @@ class IpcClient:
             self._ws = None
         logger.info("[IpcClient] Disconnected")
 
-    async def send_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        向 Core 发送一个事件。
-        """
-        msg = EventMessage(event=EventPayload(event_type=event_type, payload=payload or {}))
+    async def send_user_message(self, message: str, resources: Optional[list[dict]] = None) -> bool:
+        """向 Core 发送用户对话消息。"""
+        msg = UserMessageEvent(message=message, resources=resources or [])
         return await self._send_or_queue(msg)
 
-    async def send_query(self, query_type: Literal["state", "usage"]) -> bool:
-        """向 Core 发送查询。"""
-        msg = QueryMessage(query=query_type)
+    async def send_command(self, raw: str) -> bool:
+        """向 Core 发送命令。"""
+        msg = CommandEvent(raw=raw)
         return await self._send_or_queue(msg)
 
-    async def send_debug(
-        self,
-        action: Literal["trigger_topic", "set_state", "reset_topic"],
-        field: Optional[str] = None,
-        value: Optional[Any] = None,
-    ) -> bool:
-        """向 Core 发送调试命令。"""
-        msg = DebugMessage(action=action, field=field, value=value)
+    async def send_session_bootstrap(self) -> bool:
+        """通知 Core 开始新会话。"""
+        msg = SessionBootstrapEvent()
         return await self._send_or_queue(msg)
 
-    async def send_config_changed(self, config_name: Optional[str] = None) -> bool:
-        """通知 Core 模型配置已变更。"""
-        msg = ConfigChangedMessage(config_name=config_name)
-        return await self._send_or_queue(msg)
-
-    async def send_session(self, action: Literal["new_session", "save_session"]) -> bool:
-        """向 Core 发送会话管理命令。"""
-        msg = SessionMessage(action=action)
+    async def send_session_end(self) -> bool:
+        """通知 Core 会话结束。"""
+        msg = SessionEndEvent()
         return await self._send_or_queue(msg)

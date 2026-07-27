@@ -76,6 +76,9 @@ class MASConfig(BaseSettings):
     data_dir: Path = Path("./data")
     """数据目录路径，用于存储连接记录等运行时数据。默认为当前工作目录。"""
 
+    plugins_dir: str = "plugins"
+    """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
+
     ipc_secret: str = ""
     """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
     留空时 Core 启动会自动生成并写入 .env 文件。"""
@@ -177,7 +180,7 @@ class ModelConfigManager:
         self.configs: dict[str, ModelConfig] = {}
         """所有模型配置"""
         self.current_config: Optional[ModelConfig] = None
-        """默认模型配置（非主 Muice 使用模型）"""
+        """默认模型配置（非主 MAS 使用模型）"""
         self.observer: Optional[BaseObserver] = None
         """文件监视器"""
         self._listeners: List[Callable] = []

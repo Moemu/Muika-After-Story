@@ -27,39 +27,38 @@ _declared_plugins: Set[str] = set()
 """已声明插件注册表（不一定加载成功）"""
 
 
-def load_plugin(plugin_path: Path | str, base_path=Path.cwd()) -> Optional[Plugin]:
+def load_plugin(module_name: str) -> Optional[Plugin]:
     """
-    加载单个插件
+    加载单个插件模块。
 
-    :param plugins_dirs: 插件路径
-    :param base_path: 外部插件的基准路径
-    :return: 插件对象集合
+    :param module_name: 模块的全限定包名（如 ``"plugins.notes"``）
+    :return: 插件对象，若已有同名插件声明则返回 None
     """
     try:
-        logger.debug(f"加载 MAS 插件: {plugin_path}")
-        if isinstance(plugin_path, Path):
-            module_name = path_to_module_name(plugin_path, base_path)
-        else:
-            module_name = path_to_module_name(Path(plugin_path), base_path)
-
         if module_name in _declared_plugins:
-            raise ValueError(f"插件 {module_name} 包名出现冲突！")
+            logger.warning(f"插件 '{module_name}' 包名出现冲突，跳过加载")
+            return None
         _declared_plugins.add(module_name)
 
-        module = importlib.import_module(str(plugin_path))
-        assert module
+        logger.debug(f"加载 MAS 插件: {module_name}")
+        module = importlib.import_module(module_name)
 
-        # get plugin metadata
-        metadata: Optional[PluginMetadata] = module.metadata
+        metadata: Optional[PluginMetadata] = getattr(module, "metadata", None)
 
-        plugin = Plugin(name=module.module_name, module=module.module, package_name=module_name, meta=metadata)
+        plugin = Plugin(
+            name=metadata.name if metadata else module_name.rsplit(".", 1)[-1],
+            module=module,
+            package_name=module_name,
+            meta=metadata,
+        )
 
         _plugins[plugin.package_name] = plugin
+        logger.success(f"插件 '{plugin.name}' ({module_name}) 已加载")
 
         return plugin
 
     except Exception as e:
-        logger.error(f"加载 MAS 插件 {plugin_path} 失败: {e}")
+        logger.error(f"加载插件 '{module_name}' 失败: {e}")
         return None
 
 
@@ -76,6 +75,9 @@ def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]
 
     for plugin_dir in plugins_dirs:
         plugin_dir_path = Path(plugin_dir) if isinstance(plugin_dir, str) else plugin_dir
+        if not plugin_dir_path.exists():
+            logger.debug(f"插件目录 '{plugin_dir_path}' 不存在，跳过")
+            continue
 
         for plugin in os.listdir(plugin_dir_path):
             plugin_path = Path(os.path.join(plugin_dir_path, plugin))
