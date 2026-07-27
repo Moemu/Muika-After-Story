@@ -9,6 +9,7 @@ dependencies = [
     "alembic>=1.18.0",
     "aiohttp>=3.13.3",
     "aiosqlite>=0.22.1",
+    "arclet-alconna>=1.8.0",
     "dateparser>=1.2.2",
     "feedparser>=6.0.12",
     "fleep>=1.0.1",
