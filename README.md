@@ -10,6 +10,11 @@
   <a href="#"><img src="https://wakatime.com/badge/user/637d5886-8b47-4b82-9264-3b3b9d6add67/project/f7b7b01d-0a61-4e56-83bf-5c067432ebd2.svg" alt="wakatime"></a>
   <a href='https://qm.qq.com/q/y1gC9PU4IU'><img src="https://img.shields.io/badge/QQ群-26時聊天室-purple" alt="QQ群组"></a>
 </div>
+<div align=center>
+  <a href="https://mas.snowy.moe/">📄使用文档</a>
+  <a href="https://mas.snowy.moe/guide/getting-started">🚀快速开始</a>
+  <a href="https://mas.snowy.moe/about/">🎀关于Muika</a>
+</div>
 
 > [!NOTE]
 >
@@ -170,5 +175,11 @@ Step 4: 同意用户许可协议后开始运行。
 本项目隶属于 [MuikaAI](https://github.com/MuikaAI)
 
 项目初期使用了 [Muicebot](https://github.com/Moemu/Muicebot) 的基本框架实现，部分存在于 Muicebot 的配置可能不可用或过时。
+
+插件系统设计参考了以下开源项目：
+- [nonebot/nonebot2](https://github.com/nonebot/nonebot2) — NoneBot 2.0 机器人框架
+- [nonebot/plugin-alconna](https://github.com/nonebot/plugin-alconna) — Alconna 命令解析器适配
+
+项目名称参考了 [Monika-After-Story](https://github.com/Monika-After-Story/MonikaModDev) ，同时某个 MAS 大型插件直接启发了本项目的开发，但是我上班熬穿了忘记这个项目的名字。
 
 <a href="https://www.afdian.com/a/Moemu" target="_blank"><img src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt="afadian" style="height: 45px !important;width: 163px !important;"></a>
