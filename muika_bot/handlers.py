@@ -17,7 +17,7 @@ from nonebot.adapters import Bot, Event
 from nonebot.adapters import Message as BotMessage
 from nonebot.matcher import Matcher
 from nonebot.params import Depends
-from nonebot.rule import to_me
+from nonebot.rule import Rule, to_me
 from nonebot_plugin_alconna import (
     Target,
     UniMessage,
@@ -45,6 +45,17 @@ session_manager = SessionManager()
 
 _ipc_client: IpcClient = IpcClient(core_url=mas_config.core_ws_url, secret=mas_config.ipc_secret)
 _message_target = Target(id=mas_config.master_id, private=True)
+
+
+async def _is_master(event: Event) -> bool:
+    """Rule: only respond to the configured master user."""
+    try:
+        return event.get_user_id() == mas_config.master_id
+    except (AttributeError, NotImplementedError):
+        return False
+
+
+_master_rule = Rule(_is_master)
 
 
 async def _render_resources(resources: list[dict]) -> None:
@@ -244,7 +255,7 @@ async def bot_connected() -> None:
 at_event = on_alconna(
     Alconna(re.compile(".+"), Args["text?", AllParam], separators=""),
     priority=100,
-    rule=to_me(),
+    rule=to_me() & _master_rule,
     block=True,
     extensions=[ReplyRecordExtension()],
 )
