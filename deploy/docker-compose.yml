@@ -2,11 +2,16 @@ services:
   napcat:
     image: mlikiowa/napcat-docker:latest
     container_name: muika-napcat
+  muika-bot:
+    build:
+      context: ..
+      dockerfile: deploy/bot.Dockerfile
+    container_name: muika-bot
     restart: unless-stopped
+    depends_on:
+      - napcat
     ports:
-      - "3000:3000"     # OneBot HTTP API
-      - "3001:3001"     # OneBot WebSocket （muika-bot 连接此端口）
-      - "6099:6099"     # NapCat WebUI —— 管理后台，首次扫码登录用
+      - "6099:6099"     # NapCat WebUI —— 管理后台
     volumes:
       # QQ 持久化数据（登录态、聊天记录缓存等）
       - ./napcat/QQ:/app/.config/QQ
@@ -14,6 +19,15 @@ services:
       - ./napcat/config:/app/napcat/config
       # NapCat 插件目录
       - ./napcat/plugins:/app/napcat/plugins
+      # 运行时数据（日志、下载文件等）
+      - ../data:/app/data
+    env_file:
+      - ../.env.qq
     environment:
-      - NAPCAT_UID=${NAPCAT_UID:-1000}
-      - NAPCAT_GID=${NAPCAT_GID:-1000}
+      DRIVER: "~fastapi+~httpx+~websockets"
+      ONEBOT_WS_URLS: '["ws://napcat:3001"]'
+      CORE_WS_URL: "ws://host.docker.internal:8765/ws"
+    extra_hosts:
+      # Linux Docker 需要手动启用 host.docker.internal
+      # Docker Desktop (Windows/Mac) 不需要此项
+      - "host.docker.internal:host-gateway"

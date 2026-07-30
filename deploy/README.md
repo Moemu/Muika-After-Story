@@ -5,17 +5,17 @@
 ## 架构
 
 ```
-宿主机 (Linux)
+宿主机 (Windows)
 ├── Muika Core                             ── AI 引擎（LLM / 记忆 / Butler Agent）
 │   python -m muika.ipc.bootstrap
 │   ws://0.0.0.0:8765/ws
 │
-└── Docker
+└── Docker  (WSL2 / Other Linux Server)
     ├── muika-napcat                       ── QQ 协议实现（NapCatQQ）
     │   镜像: mlikiowa/napcat-docker:latest
     │   端口: 3000(HTTP) / 3001(WS) / 6099(WebUI)
     │
-    └── muika-bot  (可选)                   ── NoneBot
+    └── muika-bot                 ── NoneBot
         镜像: deploy/bot.Dockerfile (构建)
         nonebot-adapter-onebot  ←→  napcat:3001
         IPC Client  ←→  host.docker.internal:8765
@@ -85,17 +85,16 @@ cp .env.qq .env.qq.local
 
 ---
 
-### Phase 3：启动 NapCat（QQ 协议端）
+### Phase 3：启动 NapCat 和 muika-bot 适配器
 
 ```bash
 cd deploy
 docker compose up -d
 ```
 
-NapCat 容器启动后将暴露三个端口：
-- `3000` — OneBot HTTP API
-- `3001` — OneBot WebSocket（供 muika-bot 连接）
-- `6099` — NapCat WebUI（管理后台）
+这会构建 bot 镜像并启动 Napcat。
+
+NapCat 容器启动后将暴露 `6099` 作为 NapCat WebUI 管理后台
 
 **首次使用需要登录 QQ：**
 
@@ -104,44 +103,7 @@ NapCat 容器启动后将暴露三个端口：
 > 首次登录后 NapCat 可能自动退出，再次执行 `docker compose restart` 即可。
 > 登录成功后的会话会持久化到 `deploy/napcat/QQ/`，下次启动无需重复扫码。
 
----
-
-### Phase 4：启动 muika-bot（NoneBot）
-
-#### 方案 A：Bot 在 Docker 内（推荐）
-
-```bash
-cd deploy
-docker compose -f docker-compose.yml -f docker-compose.with-bot.yml up -d
-```
-
-这会构建 bot 镜像并启动。Bot 在容器内通过 `host.docker.internal:8765` 连接宿主机 Core。
-
-#### 方案 B：Bot 在宿主机上
-
-需要 Butler Agent 的完整系统能力（文件操作等）时使用此方案。
-
-```bash
-cd deploy
-docker compose up -d              # 仅启动 NapCat
-```
-
-然后在宿主机（项目根目录）手动运行：
-
-```bash
-# 从 .env.qq.local 导出环境变量，或直接逐项设置：
-export CORE_WS_URL=ws://127.0.0.1:8765/ws
-export ONEBOT_WS_URLS='["ws://localhost:3001"]'
-export SUPERUSERS='["123456789"]'
-export MASTER_ID=123456789
-export IPC_SECRET=xxx
-
-# 安装 nonebot 额外依赖
-pip install ".[nonebot]"
-
-# 启动
-python bot.py
-```
+Bot 在容器内通过 `host.docker.internal:8765` 连接宿主机 Core。
 
 ---
 
