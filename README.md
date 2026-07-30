@@ -152,6 +152,7 @@ Step 4: 同意用户许可协议后开始运行。
 | `FS_ALLOWED_PATHS`      | `List[str] = []`                          | 文件系统工具白名单目录。为空时禁用文件系统工具。             |
 | `ENABLE_FILE_WRITE`     | `bool = False`                            | 是否允许文件写入/删除，需同时配置 `FS_ALLOWED_PATHS`。       |
 | `ENABLE_CODE_EXECUTION` | `bool = False`                            | 是否允许 Python 子进程代码执行。                             |
+| `ENABLE_SHELL_EXECUTION`| `bool = False`                            | 是否允许 Shell 命令执行（PowerShell/Bash/Cmd）。             |
 | `LOAD_USER_SKILLS`      | `bool = False`                            | 是否额外扫描用户级技能目录（`~/.agents/skills`、`~/.claude/skills`）。内置目录 `configs/skills` 始终被扫描。技能引用的数据文件需通过 `read_file` 读取时，对应目录须加入 `FS_ALLOWED_PATHS`。 |
 
 **模型配置项(configs/models.yml)**

@@ -66,6 +66,9 @@ class MASConfig(BaseSettings):
     enable_code_execution: bool = False
     """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
 
+    enable_shell_execution: bool = False
+    """开启 Shell 命令执行（PowerShell/Bash/Cmd）。存在一定安全风险，请确认后再启用。"""
+
     load_user_skills: bool = False
     """是否额外扫描用户级技能目录（~/.agents/skills 与 ~/.claude/skills）。
     内置技能目录 configs/skills 始终会被扫描。"""
