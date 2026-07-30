@@ -6,11 +6,11 @@ import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import TYPE_CHECKING, AsyncGenerator
 
-from alembic import command as alembic_command
-from alembic.config import Config as AlembicConfig
-from alembic.script import ScriptDirectory
+if TYPE_CHECKING:
+    from alembic.config import Config as AlembicConfig
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from muika.config import mas_config
@@ -48,6 +48,9 @@ async def _run_migrations(db_path: Path) -> None:
        ——若是，则 stamp HEAD 保护用户数据。
     3. 执行 ``alembic upgrade head``。
     """
+    from alembic import command as alembic_command
+    from alembic.config import Config as AlembicConfig
+
     alembic_cfg_path = Path("alembic.ini")
     alembic_cfg_path = (
         alembic_cfg_path if alembic_cfg_path.exists() else Path(__file__).resolve().parent.parent.parent / "alembic.ini"
@@ -64,6 +67,9 @@ async def _run_migrations(db_path: Path) -> None:
 
     await asyncio.to_thread(_sync_run)
 
+    # 迁移完成后清理 alembic 模块，释放内存
+    _cleanup_alembic_modules()
+
 
 def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> None:
     """如果数据库文件存在且包含 ORM 表但缺少 ``alembic_version`` 表，
@@ -71,6 +77,8 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
     """
     if not db_path.exists():
         return  # 全新部署，无需标记
+
+    from alembic.script import ScriptDirectory
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -121,6 +129,18 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+def _cleanup_alembic_modules() -> None:
+    """移除 alembic 相关模块以释放内存。"""
+    import gc
+    import sys
+
+    alembic_keys = [k for k in sys.modules if k == "alembic" or k.startswith("alembic.")]
+    for key in alembic_keys:
+        del sys.modules[key]
+    gc.collect()
+    logger.debug(f"[DB] Released {len(alembic_keys)} alembic modules from memory")
 
 
 async def close_db() -> None:

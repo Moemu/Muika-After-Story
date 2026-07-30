@@ -41,7 +41,6 @@ from muika.plugin.func_call._context import (
     get_resources,
     set_butler_context,
 )
-from muika.plugin.mcp import get_mcp_list
 from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
 
@@ -225,6 +224,8 @@ class ButlerAgent:
                 system += f"\n\n{skills_section}"
 
             if ENABLE_MCP and not self._mcp_tools:
+                from muika.plugin.mcp import get_mcp_list
+
                 self._mcp_tools = await get_mcp_list()
                 self.tools += self._mcp_tools
 

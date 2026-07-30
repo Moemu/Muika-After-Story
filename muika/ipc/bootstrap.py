@@ -28,7 +28,6 @@ from muika.core.loop import Muika
 from muika.database.db import close_db, init_db
 from muika.models import Message
 from muika.plugin import CommandDispatcher, load_plugins
-from muika.plugin.mcp import initialize_servers
 from muika.utils.logger import init_logger, logger
 from muika.utils.utils import get_version
 
@@ -191,6 +190,8 @@ async def run_core(
 
     if MCP_CONFIG_PATH.exists():
         logger.info("Loading MCP Server config")
+        from muika.plugin.mcp import initialize_servers
+
         await initialize_servers()
 
     logger.info("Loading plugins...")

@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-import feedparser
-import trafilatura
 from aiohttp import ClientSession
 
 
@@ -20,6 +18,8 @@ def parse_rss_feed(rss_content: bytes | str) -> list[ParsedResult]:
     :param rss_content: RSS feed 的原始内容，可以是字节串或字符串。
     :return: 包含解析结果的列表，每个元素是一个 ParsedResult 对象
     """
+    import feedparser
+
     feed = feedparser.parse(rss_content)
     items = []
     for entry in feed.entries:
@@ -46,6 +46,8 @@ async def extract_web_content(url: str) -> str:
     """
     从指定 URL 获取网页内容，并使用 trafilatura 提取纯文本内容。
     """
+    import trafilatura
+
     html = await fetch_web_content(url)
     content = trafilatura.extract(html)
     return content if content else ""

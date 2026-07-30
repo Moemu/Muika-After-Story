@@ -2,8 +2,6 @@ import asyncio
 from datetime import datetime
 from typing import Optional
 
-import dateparser
-
 from muika.utils.logger import logger
 
 from .actions.intents import Persistence, PlanFutureEventIntent
@@ -16,6 +14,8 @@ class Scheduler:
         # self._tasks = []
 
     def parse_time(self, natural_time: str) -> Optional[datetime]:
+        import dateparser
+
         # settings={'PREFER_DATES_FROM': 'future'} 确保 '8am' 是明天的如果今天已经过了
         return dateparser.parse(natural_time, settings={"PREFER_DATES_FROM": "future"})
 
