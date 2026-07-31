@@ -177,23 +177,21 @@ class CoreBootstrap:
             await CommandDispatcher.get().dispatch(event.raw)
             return ActionResponse(action=event.type, status="ok")
 
-        if isinstance(event, IpcSessionBootstrapEvent) and not self.is_bootstraped:
-            self.is_bootstraped = True
-            # 标记适配器为已引导
-            self._ws_server.mark_bootstrapped(client_name)
-            self._muika.memory.new_session()
-            await self._muika.create_event(SessionBootstrapEvent())
-            return ActionResponse(action=event.type, status="queued")
-
-        if isinstance(event, IpcSessionBootstrapEvent) and self.is_bootstraped:
-            # 后续适配器加入已有的会话
-            self._ws_server.mark_bootstrapped(client_name)
+        if isinstance(event, IpcSessionBootstrapEvent):
             logger.info(f"[Core] Adapter {client_name!r} joined existing session")
+            self._ws_server.mark_bootstrapped(client_name)
             await self._muika.create_event(
                 AdapterOnlineEvent(
                     adapter=adapter,
                 )
             )
+
+            if not self.is_bootstraped:
+                self.is_bootstraped = True
+                self._muika.memory.new_session()
+                await self._muika.create_event(SessionBootstrapEvent())
+
+            # 标记适配器为已引导
             return ActionResponse(action=event.type, status="queued")
 
         if isinstance(event, IpcSessionEndEvent):

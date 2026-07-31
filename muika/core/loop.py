@@ -158,6 +158,8 @@ class Muika:
             if event.type == "adapter_online":
                 self.current_adapters.append(event.adapter)
                 logger.info(f"[Loop] Adapter online: {event.adapter!r} — status updated")
+                if len(self.current_adapters) < 2:
+                    continue
 
             if event.type == "adapter_offline" and event.adapter in self.current_adapters:
                 self.current_adapters.remove(event.adapter)
