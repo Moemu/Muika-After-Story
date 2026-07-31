@@ -227,6 +227,9 @@ class DigestAgent:
                             continue
 
                         # 缓存未命中：抓取全文 + LLM 评估
+                        # 提交以释放 SQLite 写锁，避免阻塞 @record_plugin_usage 的 usage 写入
+                        await db_session.commit()
+
                         content = await extract_web_content(entry.link)
                         if not content:
                             continue
