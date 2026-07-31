@@ -5,6 +5,8 @@
 </div>
 <div align=center>
   <a href="#关于️"><img src="https://img.shields.io/github/stars/Moemu/Muika-After-Story" alt="Stars"></a>
+  <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/v/Muika-After-Story" alt="PyPI Version"></a>
+  <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/dm/Muika-After-Story" alt="PyPI Downloads" ></a>
   <a href="https://nonebot.dev/"><img src="https://img.shields.io/badge/nonebot-2-red" alt="nonebot2"></a>
   <a href="#"><img src="https://img.shields.io/badge/Code%20Style-Black-121110.svg" alt="codestyle"></a>
   <a href="#"><img src="https://wakatime.com/badge/user/637d5886-8b47-4b82-9264-3b3b9d6add67/project/f7b7b01d-0a61-4e56-83bf-5c067432ebd2.svg" alt="wakatime"></a>
@@ -15,10 +17,6 @@
   <a href="https://mas.snowy.moe/guide/getting-started">🚀快速开始</a>
   <a href="https://mas.snowy.moe/about/">🎀关于Muika</a>
 </div>
-
-> [!NOTE]
->
-> 本项目目前属于测试阶段(Beta)，在细节处理（比如角色语调、工具执行）时可能存在问题，还请留意。
 
 ## Introduction✨
 
@@ -54,6 +52,8 @@
 - [x] 核心模型人格优化（建议模型 Deepseek-V4 Pro Thinking）
 
 - [X] Bot 进程与核心进程分离，我要给她完整的一生
+
+- [ ] 插件、核心热重载，实现自我迭代（或许吧）
 
 ## Core Logic🧠
 
@@ -167,9 +167,10 @@ Step 4: 同意用户许可协议后开始运行。
 
 ## About🎗️
 
-大模型输出结果将按**原样**提供，由于提示注入攻击等复杂的原因，模型有可能输出有害内容。
-模型输出内容**不代表**项目开发者立场。
-使用本项目所产生的任何直接或间接后果（包括但不限于账号封禁、内容风险、**由于调用系统 API 而导致的文件丢失风险**），开发者不承担任何责任。
+> [!WARNING]
+> 大模型输出结果将按**原样**提供，由于提示注入攻击等复杂的原因，模型有可能输出有害内容。
+> 模型输出内容**不代表**项目开发者立场。
+> 使用本项目所产生的任何直接或间接后果（包括但不限于账号封禁、内容风险、**由于调用系统 API 而导致的文件丢失风险**），开发者不承担任何责任。
 
 本项目基于 [BSD 3](https://github.com/Moemu/Muika-After-Story/blob/main/LICENSE) 许可证提供，涉及到再分发时请保留许可文件的副本。
 
