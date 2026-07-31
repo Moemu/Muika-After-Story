@@ -46,9 +46,15 @@ class IpcClient:
     维持连接并处理消息收发。
     """
 
-    def __init__(self, core_url: str = mas_config.core_ws_url, secret: str = mas_config.ipc_secret) -> None:
+    def __init__(
+        self,
+        core_url: str = mas_config.core_ws_url,
+        secret: str = mas_config.ipc_secret,
+        client_name: str = "nonebot-qq",
+    ) -> None:
         self._url = core_url
         self._secret = secret
+        self.client_name = client_name
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -66,6 +72,11 @@ class IpcClient:
         # 连接建立事件（供 startup 等待）
         self._connected_event = asyncio.Event()
 
+    def set_client_info(self, name: str) -> None:
+        """更新适配器身份信息（在 NoneBot 适配器就绪后调用）。"""
+        self.client_name = name
+        logger.info(f"[IpcClient] Client identity set: name={name!r}")
+
     @property
     def is_connected(self) -> bool:
         return self._connected
@@ -73,7 +84,9 @@ class IpcClient:
     async def _connect_once(self) -> None:
         """单次连接尝试。"""
         logger.info(f"[IpcClient] Connecting to Core at {self._url}...")
-        headers = {}
+        headers = {
+            "X-Client-Name": self.client_name,
+        }
         if self._secret:
             headers["X-Auth-Token"] = self._secret
         self._ws = await self._session.ws_connect(self._url, headers=headers)  # type: ignore[union-attr]

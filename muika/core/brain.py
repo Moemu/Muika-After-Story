@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Optional, TypeVar
 
 from muika.config import get_model_config_manager, mas_config
+from muika.ipc.server import AdapterInfo
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
@@ -42,11 +43,40 @@ class MuikaBrain:
                 f"(still using provider: {provider_old})."
             )
 
+    @staticmethod
+    def generate_adapters_info(adapters: Optional[List[AdapterInfo]] = None) -> Optional[str]:
+        """
+        格式化 adapters 信息
+
+        注意为了简化下游实现，当 len(adapters) < 2 时将返回空信息
+        """
+        if not adapters or len(adapters) < 2:
+            return None
+
+        adapters_infos: list[str] = []
+        now = datetime.now()
+
+        for adapter in adapters:
+            delta = (now - adapter.last_active_at).total_seconds()
+            if delta < 60:
+                ago = "just now"
+            elif delta < 3600:
+                ago = f"{int(delta / 60)} min ago"
+            elif delta < 86400:
+                ago = f"{int(delta / 3600)} hours ago"
+            else:
+                ago = f"{int(delta / 86400)} days ago"
+
+            adapters_infos.append(f"{adapter.client_name}(Last active at {ago})")
+
+        return "\n".join(adapters_infos)
+
     async def expand_topic(
         self,
         topic: BaseTopic,
         state: MuikaState,
         memory: MemoryManager,
+        adapters: Optional[List[AdapterInfo]] = None,
     ) -> str:
         """
         Lightweight topic expansion using an isolated, Butler-free prompt.
@@ -79,6 +109,7 @@ class MuikaBrain:
             is_expand_topic=True,
             memory_context=memory_context,
             time_tone_hint=time_tone_hint,
+            adapters_info=self.generate_adapters_info(adapters),
         )
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
@@ -150,10 +181,11 @@ class MuikaBrain:
         memory: MemoryManager,
         resources: Optional[List[Resource]] = None,
         injected_preferences: Optional[List[MemoryRecord]] = None,
+        adapters: Optional[List[AdapterInfo]] = None,
     ) -> str:
         """
         Pure roleplay response generation.
-        Returns a string that might contain `<Butler: command>` tags.
+        Returns a string that might contain ``<Butler: command>`` or ``<target: name>`` tags.
         """
         is_continuation = bool(memory.recent_turns)
         logger.debug(
@@ -169,6 +201,7 @@ class MuikaBrain:
             is_chat=True,
             memory_context=memory_context,
             injected_preferences=injected_preferences,
+            adapters_info=self.generate_adapters_info(adapters),
         )
 
         # 按需注入：Butler 预处理层匹配到的 PreferenceProfile 条目
@@ -204,6 +237,8 @@ class MuikaBrain:
             prompt = f"A scheduled reminder just went off: '{event.payload.what}'"
         elif event.type == "session_bootstrap":
             prompt = "A new session has just started. Greet the user."
+        elif event.type == "adapter_online":
+            prompt = f"The user just connected a new chat platform adapter for you: {event.adapter}, perhaps you can try chatting with the user on this platform"
         else:
             prompt = f"Event triggered: {event.type}"
 

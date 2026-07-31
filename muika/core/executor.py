@@ -8,8 +8,12 @@ from .scheduler import Scheduler
 COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 1.5
 
-SendFunc = Callable[[str, Optional[list[dict[str, Any]]]], Coroutine[None, None, None]]
-"""Async callback that delivers a text message with optional multimodal resources to the platform."""
+SendFunc = Callable[[str, Optional[list[dict[str, Any]]], Optional[str]], Coroutine[None, None, None]]
+"""Async callback that delivers a text message with optional multimodal resources to the platform.
+
+签名: ``(content, resources, target) -> None``
+*target* 为可选的路由目标适配器名称。
+"""
 
 
 class Executor:
@@ -69,10 +73,13 @@ class Executor:
 
         return final_messages
 
-    async def send_message(self, message: str, resources: Optional[list[dict[str, Any]]] = None) -> None:
+    async def send_message(
+        self, message: str, resources: Optional[list[dict[str, Any]]] = None, target: Optional[str] = None
+    ) -> None:
         """Clean up *message*, split it, and deliver each segment via ``send_func``.
 
         若提供 *resources*，它们将附加到最后一条消息段中。
+        若提供 *target*，消息将路由到指定的适配器。
         """
         message = message.strip().replace("\n\n\n\n", "\n\n")
         messages = self._split_message(message) if message else [""]
@@ -80,7 +87,7 @@ class Executor:
         for i, msg in enumerate(messages):
             # 仅最后一段携带 resources
             res = resources if i == last_idx else None
-            await self._send_func(msg, res)
+            await self._send_func(msg, res, target)
             await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
 
     async def _delayed_send(self, content: str, delay: int) -> None:

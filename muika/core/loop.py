@@ -9,6 +9,7 @@ from random import random
 from typing import Literal, Optional
 
 from muika.config import mas_config
+from muika.ipc.server import AdapterInfo
 from muika.utils.logger import logger
 
 from .brain import MuikaBrain
@@ -24,7 +25,11 @@ from .constants import (
     SESSION_IDLE_TIMEOUT,
 )
 from .digest_agent import DigestAgent
-from .events import Event, SessionEndEvent, TimeTickEvent
+from .events import (
+    Event,
+    SessionEndEvent,
+    TimeTickEvent,
+)
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
 from .state import ActiveTopicState, MuikaState
@@ -47,6 +52,7 @@ class Muika:
         self.state.memory = self.memory
         self.event_queue: asyncio.Queue[Event] = asyncio.Queue()
         self.executor = executor
+        self.current_adapters: list[AdapterInfo] = []
 
         self.brain = MuikaBrain()
         self.butler_agent = ButlerAgent()
@@ -150,6 +156,15 @@ class Muika:
             if event.type == "session_bootstrap" and self.memory.session.is_first_session:
                 await self._record_first_conversation()
 
+            if event.type == "adapter_online":
+                self.current_adapters.append(event.adapter)
+                logger.info(f"[Loop] Adapter online: {event.adapter!r} — status updated")
+
+            if event.type == "adapter_offline" and event.adapter in self.current_adapters:
+                self.current_adapters.remove(event.adapter)
+                logger.info(f"[Loop] Adapter offline: {event.adapter!r} — status updated")
+                continue
+
             if think_mode == "topic":
                 await self._run_topic_pipeline()
                 continue
@@ -218,10 +233,16 @@ class Muika:
         if not topic:
             logger.debug("[Topic] No available seed -- skipping topic pipeline this tick.")
             return
-        expanded = await self.brain.expand_topic(topic, self.state, self.memory)
+        expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
         if not expanded:
             return
-        await self.executor.send_message(expanded)
+        # 解析 <target: name> 路由标签
+        target_match = re.findall(r"<target:\s*(.+?)>", expanded, re.DOTALL)
+        target = target_match[-1].strip() if target_match else None
+        expanded = re.sub(r"<target:\s*(.+?)>", "", expanded, flags=re.DOTALL).strip()
+        if target:
+            logger.info(f"[Topic] Routing to target={target!r}")
+        await self.executor.send_message(expanded, target=target)
         logger.info(f"[Topic] Sent: {expanded!r}")
         self.memory.add_context("muika", expanded)
         self.state.active_topic = ActiveTopicState(
@@ -261,6 +282,7 @@ class Muika:
                 state=self.state,
                 memory=self.memory,
                 injected_preferences=injected_preferences or None,
+                adapters=self.current_adapters,
             )
 
             # 提取 <memory>...</memory> 标签 —— 先于 Butler 提取，
@@ -278,11 +300,18 @@ class Muika:
             butler_commands = re.findall(r"<Butler:\s*(.+?)>", reply, re.DOTALL)
             clean_reply = re.sub(r"<Butler:\s*(.+?)>", "", reply, flags=re.DOTALL).strip()
 
+            # 提取 <target: name> 路由标签
+            target_match = re.findall(r"<target:\s*(.+?)>", clean_reply, re.DOTALL)
+            target = target_match[-1].strip() if target_match else None
+            clean_reply = re.sub(r"<target:\s*(.+?)>", "", clean_reply, flags=re.DOTALL).strip()
+            if target:
+                logger.info(f"[Loop] Routing reply to target={target!r}")
+
             if butler_commands:
                 logger.info(f"[Brain] intercepted {len(butler_commands)} butler command(s)")
             if reply:
                 logger.info(f"[Muika -> User] {clean_reply!r}")
-                await self.executor.send_message(clean_reply)
+                await self.executor.send_message(clean_reply, target=target)
                 self.memory.add_context("muika", reply)
             if not butler_commands:
                 logger.debug("[Brain] no butler commands, turn complete.")

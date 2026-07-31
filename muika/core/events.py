@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Literal, Optional, TypeAlias
+from typing import TYPE_CHECKING, Literal, Optional, TypeAlias
 
 from muika.config import mas_config
 from muika.models import Message
+
+if TYPE_CHECKING:
+    from muika.ipc.server import AdapterInfo
 
 
 def _get_last_connection_time() -> Optional[datetime]:
@@ -100,4 +105,30 @@ class SessionEndEvent:
     type: Literal["session_end"] = "session_end"
 
 
-Event: TypeAlias = UserMessageEvent | TimeTickEvent | ScheduledTriggerEvent | SessionBootstrapEvent | SessionEndEvent
+@dataclass(frozen=True)
+class AdapterOnlineEvent:
+    """新适配器接入事件。"""
+
+    adapter: "AdapterInfo"
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["adapter_online"] = "adapter_online"
+
+
+@dataclass(frozen=True)
+class AdapterOfflineEvent:
+    """适配器断开事件。"""
+
+    adapter: "AdapterInfo"
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["adapter_offline"] = "adapter_offline"
+
+
+Event: TypeAlias = (
+    UserMessageEvent
+    | TimeTickEvent
+    | ScheduledTriggerEvent
+    | SessionBootstrapEvent
+    | SessionEndEvent
+    | AdapterOnlineEvent
+    | AdapterOfflineEvent
+)

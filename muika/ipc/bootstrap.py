@@ -18,6 +18,8 @@ from pydantic import TypeAdapter
 
 from muika.config import mas_config
 from muika.core.events import (
+    AdapterOfflineEvent,
+    AdapterOnlineEvent,
     SessionBootstrapEvent,
     SessionEndEvent,
     UserMessageEvent,
@@ -44,7 +46,7 @@ from .protocol import (
 from .protocol import SessionBootstrapEvent as IpcSessionBootstrapEvent
 from .protocol import SessionEndEvent as IpcSessionEndEvent
 from .protocol import UserMessageEvent as IpcUserMessageEvent
-from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
+from .server import DEFAULT_HOST, DEFAULT_PORT, AdapterInfo, CoreWsServer
 
 MCP_CONFIG_PATH = Path("./configs/mcp.json")
 BUILTIN_PLUGINS_PATH = Path("muika/builtin_plugins")
@@ -70,17 +72,19 @@ class CoreBootstrap:
 
         self._ws_server = CoreWsServer(host=host, port=port, secret=ipc_secret)
 
-        async def _send_llm_reply(content: str, resources: list[dict] | None = None) -> None:
-            """LLM 对话回复通过 SendMessage 发送。"""
+        async def _send_llm_reply(content: str, resources: list[dict] | None = None, target: str | None = None) -> None:
+            """LLM 对话回复通过 SendMessage 发送，可按 *target* 路由到指定适配器。"""
             msg = SendMessage(content=content, resources=resources or [])
-            ok = await self._ws_server.send_to_bot(msg)
+            ok = await self._ws_server.send_to_bot(msg, target=target)
             if not ok:
                 logger.warning("[Core] LLM reply dropped, no Bot connected")
 
-        async def _send_command_result(content: str, resources: list[dict] | None = None) -> None:
+        async def _send_command_result(
+            content: str, resources: list[dict] | None = None, target: str | None = None
+        ) -> None:
             """命令执行结果通过 CommandResult 发送。"""
             msg = CommandResult(content=content, resources=resources or [])
-            ok = await self._ws_server.send_to_bot(msg)
+            ok = await self._ws_server.send_to_bot(msg, target=target)
             if not ok:
                 logger.warning("[Core] Command result dropped, no Bot connected")
 
@@ -98,6 +102,7 @@ class CoreBootstrap:
         logger.info("Muika Core is booting...")
 
         self._register_handlers()
+        self._register_adapter_callbacks()
         await self._ws_server.start()
 
         self._muika.start()
@@ -125,30 +130,67 @@ class CoreBootstrap:
         for msg_type in ("user_message", "command", "session_bootstrap", "session_end"):
             self._ws_server.register_handler(msg_type, self._handle_event)
 
-    async def _handle_event(self, message: dict) -> ActionResponse | ErrorMessage:
-        """Forward a Bot event into the Muika event queue."""
+    def _register_adapter_callbacks(self) -> None:
+        """注册适配器连接 / 断开回调，将事件推入 Muika 事件队列。"""
+
+        async def _on_adapter_connected(adapter: AdapterInfo) -> None:
+            logger.info(f"[Core] Adapter online: {adapter!r}")
+            if self.is_bootstraped:
+                await self._muika.create_event(AdapterOnlineEvent(adapter=adapter))
+
+        async def _on_adapter_disconnected(adapter: AdapterInfo) -> None:
+            logger.info(f"[Core] Adapter offline: {adapter!r}")
+            if self.is_bootstraped:
+                await self._muika.create_event(AdapterOfflineEvent(adapter=adapter))
+
+        self._ws_server.on_adapter_connected(_on_adapter_connected)
+        self._ws_server.on_adapter_disconnected(_on_adapter_disconnected)
+
+    async def _handle_event(self, message: dict, adapter: AdapterInfo) -> ActionResponse | ErrorMessage:
+        """Forward a Bot event into the Muika event queue.
+
+        :param message: 解析后的 JSON dict
+        :param adapter: 来源适配器
+        """
         event: BotToCoreMessage  # type: ignore[valid-type]
+
+        client_name = adapter.client_name
         try:
             event = TypeAdapter(BotToCoreMessage).validate_python(message)
         except Exception as e:
             logger.error(f"[Core] Failed to parse IPC event: {e}")
             return ErrorMessage(message="invalid_event", detail=str(e))
 
-        logger.info(f"[Core] Received event: {event.type}")
+        logger.info(f"[Core] Received event: {event.type} from {client_name!r}")
 
         if isinstance(event, IpcUserMessageEvent):
+            self._ws_server.set_triggering_adapter(client_name)
             msg = Message(message=event.message)
             await self._muika.create_event(UserMessageEvent(UserMessagePayload(msg)))
             return ActionResponse(action=event.type, status="queued")
 
         if isinstance(event, IpcCommandEvent):
+            self._ws_server.set_triggering_adapter(client_name)
             await CommandDispatcher.get().dispatch(event.raw)
             return ActionResponse(action=event.type, status="ok")
 
         if isinstance(event, IpcSessionBootstrapEvent) and not self.is_bootstraped:
             self.is_bootstraped = True
+            # 标记适配器为已引导
+            self._ws_server.mark_bootstrapped(client_name)
             self._muika.memory.new_session()
             await self._muika.create_event(SessionBootstrapEvent())
+            return ActionResponse(action=event.type, status="queued")
+
+        if isinstance(event, IpcSessionBootstrapEvent) and self.is_bootstraped:
+            # 后续适配器加入已有的会话
+            self._ws_server.mark_bootstrapped(client_name)
+            logger.info(f"[Core] Adapter {client_name!r} joined existing session")
+            await self._muika.create_event(
+                AdapterOnlineEvent(
+                    adapter=adapter,
+                )
+            )
             return ActionResponse(action=event.type, status="queued")
 
         if isinstance(event, IpcSessionEndEvent):

@@ -82,6 +82,10 @@ class MASConfig(BaseSettings):
     plugins_dir: str = "plugins"
     """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
 
+    client_name: str = ""
+    """适配器唯一名称。用于多适配器场景下标识当前 Bot 实例的身份。
+    例如 ``"qq-desktop"``, ``"qq-phone"``。留空时自动分配。"""
+
     ipc_secret: str = ""
     """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
     留空时 Core 启动会自动生成并写入 .env 文件。"""

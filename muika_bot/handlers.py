@@ -239,10 +239,32 @@ async def startup() -> None:
     logger.success("MAS framework is ready")
 
 
+def _detect_adapter_type() -> str:
+    """
+    从 NoneBot adapter 元数据推断适配器名称和类型。
+    """
+    configured_name = mas_config.client_name
+    if configured_name:
+        return configured_name
+
+    try:
+        bot = get_bot()
+        adapter_name = bot.adapter.get_name()
+
+        return adapter_name or "nonebot2"
+    except Exception:
+        logger.warning("[Handler] Failed to detect adapter type — using defaults")
+        return "nonebot2"
+
+
 @driver.on_bot_connect
 async def bot_connected() -> None:
     """Handle Bot platform connection."""
     logger.success("Bot connected")
+
+    # 检测并设置适配器身份
+    client_name = _detect_adapter_type()
+    _ipc_client.set_client_info(client_name)
 
     if _ipc_client.is_connected:
         logger.info("[Bootstrap] bot_connected event sent via IPC.")

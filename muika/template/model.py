@@ -37,6 +37,8 @@ class PromptTemplatesData(BaseModel):
     absence_bucket: Optional[str] = None
     last_connection_time: Optional[str] = None
 
+    adapters_info: Optional[str] = None
+
     # MuikaState keeps a runtime reference to MemoryManager for action tools.
     # It is not prompt data, so Pydantic must treat it as an opaque object.
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True, defer_build=True)

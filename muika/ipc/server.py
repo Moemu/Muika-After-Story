@@ -1,20 +1,13 @@
-"""Core 进程的 WebSocket 服务端。
-
-在 Core 进程中运行，接受 Bot 进程的 WebSocket 连接，
-将收到的消息分发给已注册的处理器，并为 ``IpcBridge`` 提供
-``send_to_bot()`` 方法将消息推回 Bot。
-
-设计要点：
-- 同时只接受一个 Bot 连接（单用户场景）
-- 当 Bot 未连接时，``send_to_bot()`` 将消息暂存到队列
-- 使用 aiohttp（项目已有依赖），不引入新的 WebSocket 库
-"""
+"""Core 进程的 WebSocket 服务端。"""
 
 from __future__ import annotations
 
 import json
+import uuid
 from collections import deque
-from typing import Any, Callable, Coroutine, Dict, Optional
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from aiohttp import WSMsgType, web
 
@@ -31,8 +24,27 @@ DEFAULT_PORT = 8765
 _MAX_PENDING_MESSAGES = 256
 
 
-Handler = Callable[[dict], Coroutine[Any, Any, CoreToBotMessage]]
-"""消息处理器签名：接收解析后的 JSON dict，可选地返回响应数据"""
+EVENT_HANDLER = Callable[[dict, "AdapterInfo"], Coroutine[Any, Any, Optional[CoreToBotMessage]]]
+"""消息处理器签名：接收解析后的 JSON dict 和来源适配器名称，可选地返回响应数据"""
+ADAPTER_CALLBACK_FUNC = Callable[["AdapterInfo"], Coroutine[Any, Any, None]]
+"""适配器事件回调函数: 适配器名作为传入参数"""
+
+
+@dataclass
+class AdapterInfo:
+    """单个适配器连接的元数据。"""
+
+    ws: web.WebSocketResponse
+    client_name: str
+    connected_at: datetime = field(default_factory=datetime.now)
+    last_active_at: datetime = field(default_factory=datetime.now)
+    bootstrapped: bool = False
+
+    def __repr__(self) -> str:
+        return self.client_name
+
+    def __str__(self) -> str:
+        return self.client_name
 
 
 class CoreWsServer:
@@ -55,26 +67,41 @@ class CoreWsServer:
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
 
-        # 当前活跃的 Bot WebSocket 连接
-        self._ws: Optional[web.WebSocketResponse] = None
+        # 适配器连接注册表: client_name → AdapterInfo
+        self._connections: Dict[str, AdapterInfo] = {}
 
         # Bot 未连接时暂存的消息
         self._pending: deque[CoreToBotMessage] = deque(maxlen=_MAX_PENDING_MESSAGES)
 
         # 消息处理器注册表: type → handler
-        self._handlers: Dict[str, Handler] = {}
+        self._handlers: Dict[str, EVENT_HANDLER] = {}
+
+        # 最近一次触发消息（user_message / command）的来源适配器
+        self._last_triggering_adapter: Optional[str] = None
+
+        # 适配器连接 / 断开回调（由 CoreBootstrap 注册）
+        self._on_adapter_connected: Optional[ADAPTER_CALLBACK_FUNC] = None
+        self._on_adapter_disconnected: Optional[ADAPTER_CALLBACK_FUNC] = None
 
     # ── 公共 API ──────────────────────────────────────────────────────────
 
-    def register_handler(self, message_type: str, handler: Handler) -> None:
+    def register_handler(self, message_type: str, handler: EVENT_HANDLER) -> None:
         """
         注册一个消息类型处理器。
 
-        :param message_type: 消息 ``type`` 字段的值（如 ``"event"``, ``"query"``, ``"debug"``）
-        :param handler: async 处理函数，接收解析后的 JSON dict，可选地返回响应数据
+        :param message_type: 消息 ``type`` 字段的值（如 ``"user_message"``, ``"command"``）
+        :param handler: async 处理函数，接收解析后的 JSON dict 和来源 client_name
         """
         self._handlers[message_type] = handler
         logger.debug(f"[CoreWsServer] Registered handler for type={message_type!r}")
+
+    def on_adapter_connected(self, callback: ADAPTER_CALLBACK_FUNC) -> None:
+        """注册适配器连接回调。"""
+        self._on_adapter_connected = callback
+
+    def on_adapter_disconnected(self, callback: ADAPTER_CALLBACK_FUNC) -> None:
+        """注册适配器断开回调。"""
+        self._on_adapter_disconnected = callback
 
     async def start(self) -> None:
         """启动 WebSocket 服务器（非阻塞，在后台运行）。"""
@@ -92,10 +119,10 @@ class CoreWsServer:
 
     async def stop(self) -> None:
         """优雅关闭 WebSocket 服务器。"""
-        # 关闭当前 Bot 连接
-        if self._ws and not self._ws.closed:
-            await self._ws.close(code=1001, message=b"Server shutting down")
-            self._ws = None
+        for info in list(self._connections.values()):
+            if not info.ws.closed:
+                await info.ws.close(code=1001, message=b"Server shutting down")
+        self._connections.clear()
 
         # 清空待发送队列
         self._pending.clear()
@@ -109,24 +136,54 @@ class CoreWsServer:
 
     @property
     def has_connection(self) -> bool:
-        """Bot 是否已连接。"""
-        return self._ws is not None and not self._ws.closed
+        """是否有适配器已连接。"""
+        return len(self._connections) > 0
 
-    async def send_to_bot(self, message: CoreToBotMessage) -> bool:
+    async def send_to_bot(self, message: CoreToBotMessage, target: Optional[str] = None) -> bool:
         """
         向 Bot 发送一条消息。
+
+        :param message: 要发送的 IPC 消息
+        :param target: 目标适配器名称。
         """
         if not self.has_connection:
-            logger.warning(f"[CoreWsServer] Bot 未连接，将暂存消息: {message}")
+            logger.warning(f"[CoreWsServer] No adapter connected — queueing message: {message}")
+            return self._queue_or_drop(message)
+
+        ws = self._resolve_target(target)
+        if ws is None:
+            logger.warning("[CoreWsServer] Failed to resolve target adapter — falling back to queue")
             return self._queue_or_drop(message)
 
         try:
-            await self._ws.send_str(message.model_dump_json())  # type: ignore[union-attr]
+            await ws.send_str(message.model_dump_json())
             return True
         except Exception as e:
-            logger.warning(f"[CoreWsServer] Failed to send message to Bot: {e}")
-            # 发送失败时回退到暂存队列
+            logger.warning(f"[CoreWsServer] Failed to send message: {e}")
             return self._queue_or_drop(message)
+
+    def _resolve_target(self, target: Optional[str]) -> Optional[web.WebSocketResponse]:
+        """
+        解析目标适配器的 WebSocket 连接。
+
+        target 为 None 时按以下优先级：
+        - 最近触发消息的适配器（``_last_triggering_adapter``）
+        - 最近活跃的适配器
+        - 任一已连接的适配器
+        """
+        if target and target in self._connections:
+            return self._connections[target].ws
+
+        # target 不存在或为 None：fallback 到最近触发适配器
+        if self._last_triggering_adapter and self._last_triggering_adapter in self._connections:
+            return self._connections[self._last_triggering_adapter].ws
+
+        # 再 fallback 到最近活跃的适配器
+        if self._connections:
+            most_active = max(self._connections.values(), key=lambda i: i.last_active_at)
+            return most_active.ws
+
+        return None
 
     def _queue_or_drop(self, message: CoreToBotMessage) -> bool:
         if len(self._pending) >= _MAX_PENDING_MESSAGES:
@@ -137,21 +194,19 @@ class CoreWsServer:
         return True
 
     async def flush_pending(self) -> int:
-        """将暂存的消息全部发送给 Bot。
-
-        Returns
-        -------
-        int
-            成功发送的消息数
-        """
+        """将暂存的消息全部发送给最近活跃的 Bot。"""
         if not self.has_connection:
+            return 0
+
+        ws = self._resolve_target(None)
+        if ws is None:
             return 0
 
         sent = 0
         while self._pending:
             msg = self._pending.popleft()
             try:
-                await self._ws.send_str(msg.model_dump_json())  # type: ignore[union-attr]
+                await ws.send_str(msg.model_dump_json())
                 sent += 1
             except Exception as e:
                 logger.warning(f"[CoreWsServer] Failed to flush pending message: {e}")
@@ -161,7 +216,24 @@ class CoreWsServer:
             logger.info(f"[CoreWsServer] Flushed {sent} pending message(s)")
         return sent
 
+    def set_triggering_adapter(self, client_name: str) -> None:
+        """记录最近一次触发消息的来源适配器。"""
+        self._last_triggering_adapter = client_name
+        if client_name in self._connections:
+            self._connections[client_name].last_active_at = datetime.now()
+
+    def mark_bootstrapped(self, client_name: str):
+        """
+        将 client 标记为就绪（已发送 bootstrap 事件）
+        """
+        if client_name in self._connections:
+            self._connections[client_name].bootstrapped = True
+
     # ── HTTP 端点 ─────────────────────────────────────────────────────────
+
+    def get_adapter_names(self) -> List[str]:
+        """返回当前已连接的所有适配器名称。"""
+        return list(self._connections.keys())
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         """GET /health —— 健康检查端点。"""
@@ -169,6 +241,7 @@ class CoreWsServer:
             {
                 "status": "ok",
                 "bot_connected": self.has_connection,
+                "connected_adapters": self.get_adapter_names(),
                 "pending_messages": len(self._pending),
             }
         )
@@ -186,18 +259,39 @@ class CoreWsServer:
                 await ws.close(code=4003, message=b"Unauthorized")
                 return ws
 
-        # 拒绝重复连接
-        if self.has_connection:
-            logger.warning("[CoreWsServer] Rejecting duplicate Bot connection")
+        # 提取客户端声明
+        client_name = request.headers.get("X-Client-Name", "").strip()
+
+        # 未声明名称时自动分配
+        if not client_name:
+            client_name = f"unknown-{uuid.uuid4().hex[:6]}"
+            logger.warning(f"[CoreWsServer] No X-Client-Name header — assigned {client_name!r}")
+
+        # 拒绝同名重复连接
+        if client_name in self._connections:
+            logger.warning(f"[CoreWsServer] Duplicate client_name={client_name!r} — rejecting")
             ws = web.WebSocketResponse()
             await ws.prepare(request)
-            await ws.close(code=4000, message=b"Another Bot is already connected")
+            await ws.close(code=4000, message=f"Client name {client_name!r} is already connected".encode())
             return ws
 
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        self._ws = ws
-        logger.success("[CoreWsServer] Bot connected")
+
+        # 注册连接
+        adapter = AdapterInfo(
+            ws=ws,
+            client_name=client_name,
+        )
+        self._connections[client_name] = adapter
+        logger.success(f"[CoreWsServer] Adapter connected: {client_name!r}")
+
+        # 通知回调
+        if self._on_adapter_connected:
+            try:
+                await self._on_adapter_connected(adapter)
+            except Exception:
+                logger.exception("[CoreWsServer] on_adapter_connected callback raised")
 
         # 连接建立后立即发送暂存的消息
         await self.flush_pending()
@@ -206,30 +300,41 @@ class CoreWsServer:
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
-                    await self._dispatch(msg.data)
+                    await self._dispatch(msg.data, adapter)
                 elif msg.type == WSMsgType.ERROR:
-                    logger.error(f"[CoreWsServer] WebSocket error: {ws.exception()}")
+                    logger.error(f"[CoreWsServer] WebSocket error on {client_name!r}: {ws.exception()}")
                     break
                 elif msg.type == WSMsgType.CLOSE:
-                    logger.info(f"[CoreWsServer] Bot disconnected (code={ws.close_code})")
+                    logger.info(f"[CoreWsServer] Adapter {client_name!r} disconnected (code={ws.close_code})")
                     break
         except Exception as e:
-            logger.error(f"[CoreWsServer] Unexpected error in WS handler: {e}")
+            logger.error(f"[CoreWsServer] Unexpected error in WS handler for {client_name!r}: {e}")
         finally:
-            self._ws = None
-            logger.info("[CoreWsServer] Bot connection closed")
+            # 注销连接
+            self._connections.pop(client_name, None)
+            if self._last_triggering_adapter == client_name:
+                self._last_triggering_adapter = None
+            logger.info(f"[CoreWsServer] Adapter {client_name!r} connection closed")
+
+            # 通知回调
+            if self._on_adapter_disconnected:
+                try:
+                    await self._on_adapter_disconnected(adapter)
+                except Exception:
+                    logger.exception("[CoreWsServer] on_adapter_disconnected callback raised")
 
         return ws
 
     # ── 消息分发 ──────────────────────────────────────────────────────────
 
-    async def _dispatch(self, raw: str) -> None:
+    async def _dispatch(self, raw: str, adapter: AdapterInfo) -> None:
         """解析 JSON 并分发给注册的处理器。"""
+        client_name = adapter.client_name
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.warning(f"[CoreWsServer] Invalid JSON from Bot: {e}")
-            await self.send_to_bot(ErrorMessage(message=f"Invalid JSON: {e}"))
+            logger.warning(f"[CoreWsServer] Invalid JSON from {client_name!r}: {e}")
+            await self.send_to_bot(ErrorMessage(message=f"Invalid JSON: {e}"), target=client_name)
             return
 
         msg_type = data.get("type", "")
@@ -238,21 +343,21 @@ class CoreWsServer:
         if handler is None:
             logger.warning(f"[CoreWsServer] No handler for type={msg_type!r} — ignoring")
             await self.send_to_bot(
-                ErrorMessage(
-                    message=f"Unknown type: {msg_type!r}",
-                )
+                ErrorMessage(message=f"Unknown type: {msg_type!r}"),
+                target=client_name,
             )
             return
 
         try:
-            result = await handler(data)
+            result = await handler(data, adapter)
             if result is not None:
-                await self.send_to_bot(result)
+                await self.send_to_bot(result, target=client_name)
         except Exception:
             logger.exception(f"[CoreWsServer] Handler for type={msg_type!r} raised")
             await self.send_to_bot(
                 ErrorMessage(
                     message=f"Internal error handling {msg_type!r}",
                     detail=str(data),
-                )
+                ),
+                target=client_name,
             )
