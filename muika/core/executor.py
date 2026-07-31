@@ -1,14 +1,16 @@
 """Message executor -- splits and sends text via a pluggable callback."""
 
 import asyncio
-from typing import Any, Callable, Coroutine, Optional
+from typing import Callable, Coroutine, Optional
+
+from muika.models import Resource
 
 from .scheduler import Scheduler
 
 COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 1.5
 
-SendFunc = Callable[[str, Optional[list[dict[str, Any]]], Optional[str]], Coroutine[None, None, None]]
+SendFunc = Callable[[str, Optional[list[Resource]], Optional[str]], Coroutine[None, None, None]]
 """Async callback that delivers a text message with optional multimodal resources to the platform.
 
 签名: ``(content, resources, target) -> None``
@@ -74,7 +76,7 @@ class Executor:
         return final_messages
 
     async def send_message(
-        self, message: str, resources: Optional[list[dict[str, Any]]] = None, target: Optional[str] = None
+        self, message: str, resources: Optional[list[Resource]] = None, target: Optional[str] = None
     ) -> None:
         """Clean up *message*, split it, and deliver each segment via ``send_func``.
 

@@ -28,7 +28,7 @@ from muika.core.events import (
 from muika.core.executor import Executor
 from muika.core.loop import Muika
 from muika.database.db import close_db, init_db
-from muika.models import Message
+from muika.models import Message, Resource
 from muika.plugin import CommandDispatcher, load_plugins
 from muika.utils.logger import init_logger, logger
 from muika.utils.utils import get_version
@@ -72,9 +72,12 @@ class CoreBootstrap:
 
         self._ws_server = CoreWsServer(host=host, port=port, secret=ipc_secret)
 
-        async def _send_llm_reply(content: str, resources: list[dict] | None = None, target: str | None = None) -> None:
+        async def _send_llm_reply(
+            content: str, resources: list[Resource] | None = None, target: str | None = None
+        ) -> None:
             """LLM 对话回复通过 SendMessage 发送，可按 *target* 路由到指定适配器。"""
-            msg = SendMessage(content=content, resources=resources or [])
+            resources_dict = [r.to_dict() for r in resources] if resources else []
+            msg = SendMessage(content=content, resources=resources_dict)
             ok = await self._ws_server.send_to_bot(msg, target=target)
             if not ok:
                 logger.warning("[Core] LLM reply dropped, no Bot connected")
