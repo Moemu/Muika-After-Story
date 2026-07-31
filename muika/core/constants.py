@@ -18,6 +18,7 @@ MAX_BUTLER_LOOPS: int = 10  # 管家 Agent 单次命令最大内循环次数
 DIGEST_MIN_SCORE: int = 55  # 话题评估最低分，低于该值不进入主动话题队列
 DIGEST_INTERVAL_SECONDS: float = 60.0 * 60 * 2  # 后台 Digest 执行间隔（2 小时）
 DIGEST_STARTUP_DELAY: float = 60.0  # 启动后首次 Digest 执行延迟（秒）
+DIGEST_CACHE_TTL_DAYS: int = 7  # RSS 评估缓存有效期（天）
 
 # 主动发言（孤独驱动）行为参数
 PROACTIVE_COOLDOWN: float = 60.0 * 60 * 1  # 两次主动情绪发言之间的最小间隔（1 小时）。

@@ -4,7 +4,13 @@ from typing import Literal, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .orm_models import ArchiveRecordORM, MemoryRecordORM, TopicHistoryORM, Usage
+from .orm_models import (
+    ArchiveRecordORM,
+    MemoryRecordORM,
+    RssDigestCacheORM,
+    TopicHistoryORM,
+    Usage,
+)
 
 
 class UsageORM:
@@ -243,3 +249,93 @@ class TopicHistoryCRUD:
         )
         session.add(entry)
         return entry
+
+
+class RssDigestCacheCRUD:
+    """RSS 评估结果缓存——所有 LLM 评估结果（不论通过与否）均持久化。"""
+
+    @staticmethod
+    async def get_cached(
+        session: AsyncSession,
+        topic_id: str,
+        ttl_days: int,
+    ) -> Optional[RssDigestCacheORM]:
+        """查找未过期的缓存评估结果。
+
+        :param session: 数据库会话
+        :param topic_id: RSS 条目哈希 ID
+        :param ttl_days: 缓存有效期（天），超过此天数的条目视为过期
+        :return: 有效缓存条目，不存在或已过期返回 ``None``
+        """
+        result = await session.execute(select(RssDigestCacheORM).where(RssDigestCacheORM.topic_id == topic_id).limit(1))
+        entry = result.scalar_one_or_none()
+        if entry is None:
+            return None
+
+        cutoff = (datetime.now() - timedelta(days=ttl_days)).isoformat()
+        if entry.evaluated_at < cutoff:
+            return None
+
+        return entry
+
+    @staticmethod
+    async def upsert(
+        session: AsyncSession,
+        topic_id: str,
+        source_id: str,
+        title: str,
+        link: str,
+        published: Optional[str],
+        score: int,
+        keep: bool,
+        reason: str,
+        primary_theme: str,
+        summary: str,
+    ) -> RssDigestCacheORM:
+        """插入或更新缓存条目（upsert by topic_id）。"""
+        now = datetime.now().isoformat()
+        stmt = await session.execute(select(RssDigestCacheORM).where(RssDigestCacheORM.topic_id == topic_id).limit(1))
+        existing = stmt.scalar_one_or_none()
+
+        if existing:
+            existing.source_id = source_id
+            existing.title = title
+            existing.link = link
+            existing.published = published
+            existing.score = score
+            existing.keep = 1 if keep else 0
+            existing.reason = reason
+            existing.primary_theme = primary_theme
+            existing.summary = summary
+            existing.evaluated_at = now
+            return existing
+
+        entry = RssDigestCacheORM(
+            topic_id=topic_id,
+            source_id=source_id,
+            title=title,
+            link=link,
+            published=published,
+            score=score,
+            keep=1 if keep else 0,
+            reason=reason,
+            primary_theme=primary_theme,
+            summary=summary,
+            fetched_at=now,
+            evaluated_at=now,
+        )
+        session.add(entry)
+        return entry
+
+    @staticmethod
+    async def delete_expired(session: AsyncSession, ttl_days: int) -> int:
+        """删除超过 ``ttl_days`` 天的过期缓存条目。
+
+        :return: 删除的行数
+        """
+        cutoff = (datetime.now() - timedelta(days=ttl_days)).isoformat()
+        result = await session.execute(select(RssDigestCacheORM).where(RssDigestCacheORM.evaluated_at < cutoff))
+        expired = result.scalars().all()
+        for entry in expired:
+            await session.delete(entry)
+        return len(expired)

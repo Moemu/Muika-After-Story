@@ -64,7 +64,6 @@ class Muika:
         self._last_digest_time: float = 0.0
         self._last_summary_turn: Optional[SessionTurn] = None
         self._last_summary_time: float = datetime.now().timestamp()
-        self._digest_interval: float = DIGEST_INTERVAL_SECONDS
 
         asyncio.create_task(self.memory.load())
 
@@ -188,9 +187,9 @@ class Muika:
 
         current_time = time.time()
         if self._last_digest_time == 0.0:
-            self._last_digest_time = current_time - self._digest_interval + DIGEST_STARTUP_DELAY
+            self._last_digest_time = current_time - DIGEST_INTERVAL_SECONDS + DIGEST_STARTUP_DELAY
 
-        if (current_time - self._last_digest_time > self._digest_interval) and (self.state.active_topic is None):
+        if (current_time - self._last_digest_time > DIGEST_INTERVAL_SECONDS) and (self.state.active_topic is None):
             self._last_digest_time = current_time
             asyncio.create_task(self.digest_agent.fetch_and_digest())
 

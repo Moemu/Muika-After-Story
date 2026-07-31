@@ -65,3 +65,23 @@ class TopicHistoryORM(Base):
     last_used_at: Mapped[str] = mapped_column(String)
     use_count: Mapped[int] = mapped_column(Integer, default=1)
     engaged_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class RssDigestCacheORM(Base):
+    """RSS 评估结果缓存——持久化所有 LLM 评估结果，避免重启后重复抓取和评估。"""
+
+    __tablename__ = "rss_digest_cache"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    topic_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    source_id: Mapped[str] = mapped_column(String, index=True)
+    link: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
+    published: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    score: Mapped[int] = mapped_column(Integer)
+    keep: Mapped[int] = mapped_column(Integer)  # SQLite bool: 0/1
+    reason: Mapped[str] = mapped_column(String)
+    primary_theme: Mapped[str] = mapped_column(String)
+    summary: Mapped[str] = mapped_column(Text)
+    fetched_at: Mapped[str] = mapped_column(String)
+    evaluated_at: Mapped[str] = mapped_column(String)
