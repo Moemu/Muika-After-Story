@@ -8,6 +8,7 @@
   <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/v/Muika-After-Story" alt="PyPI Version"></a>
   <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/dm/Muika-After-Story" alt="PyPI Downloads" ></a>
   <a href="https://nonebot.dev/"><img src="https://img.shields.io/badge/nonebot-2-red" alt="nonebot2"></a>
+  <a href="https://github.com/MuikaAI/astrbot_plugin_mas"><img src="https://img.shields.io/badge/asterbot-plugin-cyan" alt="Asterbot Plugin"></a>
   <a href="#"><img src="https://img.shields.io/badge/Code%20Style-Black-121110.svg" alt="codestyle"></a>
   <a href="#"><img src="https://wakatime.com/badge/user/637d5886-8b47-4b82-9264-3b3b9d6add67/project/f7b7b01d-0a61-4e56-83bf-5c067432ebd2.svg" alt="wakatime"></a>
   <a href='https://qm.qq.com/q/y1gC9PU4IU'><img src="https://img.shields.io/badge/QQ群-26時聊天室-purple" alt="QQ群组"></a>
@@ -73,9 +74,9 @@ Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言
 
 ## Quick Start🚀
 
-Muika-After-Story 将作为 [Nonebot2](https://nonebot.dev/) 的 Bot 实现进行安装。
+Muika-After-Story 将作为 [Nonebot2](https://nonebot.dev/) 的 Bot 实现进行安装。当然你也可以使用 [Asterbot 适配实现插件](https://github.com/MuikaAI/astrbot_plugin_mas) 在 [Astrbot](https://astrbot.app/) 中获得类似的体验。
 
-## 通过 git clone 的方式进行安装(Dev)
+### 通过 git clone 的方式进行安装
 
 Step 1: 克隆项目并安装依赖：
 
@@ -135,6 +136,10 @@ Step 3: 所有系统全部启动启动启动
 ```
 
 Step 4: 同意用户许可协议后开始运行。
+
+### 在 Asterbot 框架中使用 Muika-After-Story 适配插件(Beta)
+
+参考 [MuikaAI/astrbot_plugin_mas](https://github.com/MuikaAI/astrbot_plugin_mas)
 
 ## Configuration⚙️
 
