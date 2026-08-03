@@ -74,9 +74,24 @@ Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言
 
 ## Quick Start🚀
 
-Muika-After-Story 将作为 [Nonebot2](https://nonebot.dev/) 的 Bot 实现进行安装。当然你也可以使用 [Asterbot 适配实现插件](https://github.com/MuikaAI/astrbot_plugin_mas) 在 [Astrbot](https://astrbot.app/) 中获得类似的体验。
+### 通过 mas-launcher 安装（推荐）
 
-### 通过 git clone 的方式进行安装
+[mas-launcher](https://github.com/MuikaAI/mas-launcher) 是一个跨平台单文件启动器，负责拉取项目、准备 Python 环境，并管理 Core / Bot 进程。
+
+从 [Releases](https://github.com/MuikaAI/mas-launcher/releases) 下载对应平台的二进制文件，然后：
+
+```bash
+mas-launcher init                     # 创建默认实例（克隆项目 + 准备 Python 环境）
+mas-launcher configure                # 配置 .env（Master ID、IPC 密钥）
+mas-launcher model                    # 配置 models.yml（选 provider → 拉模型列表 → 选模型）
+mas-launcher start                    # 首次启动签署许可协议，然后拉起 Core 与 Bot
+mas-launcher napcat                   # 配置 QQ 接入（Windows：自动下载 NapCat 并启动）
+```
+
+### 通过 git clone 的方式安装
+
+<details>
+<summary>手动安装步骤</summary>
 
 Step 1: 克隆项目并安装依赖：
 
@@ -137,6 +152,8 @@ Step 3: 所有系统全部启动启动启动
 
 Step 4: 同意用户许可协议后开始运行。
 
+</details>
+
 ### 在 Asterbot 框架中使用 Muika-After-Story 适配插件(Beta)
 
 参考 [MuikaAI/astrbot_plugin_mas](https://github.com/MuikaAI/astrbot_plugin_mas)
@@ -162,7 +179,7 @@ Step 4: 同意用户许可协议后开始运行。
 
 **模型配置项(configs/models.yml)**
 
-支持的模型和具体配置内容可参考 [Muicebot 的模型配置](https://bot.snowy.moe/guide/model)
+推荐使用 `mas-launcher model` 交互式配置（选 provider → 拉模型列表 → 选模型）。手动编辑参考 [Muicebot 的模型配置](https://bot.snowy.moe/guide/model)。
 
 不支持的字段: `template`, `template_mode`, `stream`, `function_call`
 
