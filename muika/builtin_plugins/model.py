@@ -57,7 +57,7 @@ async def _load(config_name: str | None = None) -> str:
     except Exception as e:
         return f"[System] 切换模型配置失败: {e}"
     cfg = manager.current_config
-    return f"[System] 已切换到配置 '{config_name}' ({cfg.model_name}, {cfg.provider})"  # type:ignore
+    return f"[System] 已切换到配置 '{config_name}' ({cfg.model_name}, {cfg.provider})"  # type: ignore
 
 
 @model_cmd.assign("list")
