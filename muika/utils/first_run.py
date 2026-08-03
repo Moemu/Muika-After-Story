@@ -1,6 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from time import sleep
 
 from muika.config import mas_config
@@ -8,11 +9,14 @@ from muika.utils.logger import logger
 
 DATA_FILE = mas_config.data_dir / "user_agreement.json"
 
-AGREEMENT_TITLE = (
+# 共享协议内容文件：launcher 与核心端读取同一份文案与版本号
+AGREEMENT_FILE = Path("configs/user_agreement.json")
+
+_FALLBACK_TITLE = (
     "感谢你选择 Muika-After-Story（以下简称 MAS）。请仔细阅读以下条款，在你开始使用 MAS 之前，你必须同意以下许可协议："
 )
 
-AGREEMENT_TEXT = """
+_FALLBACK_TEXT = """
 1. MAS 作为一款 AI 伴侣插件，可能会访问你计算机上的部分文件系统（如读取和存储用户输入、程序设置等）。所有操作将仅限于提供更加个性化的用户体验。
 2. MAS 可能会记录用户输入的对话内容和其他交互信息，但所有数据仅用于改善和优化 MAS 的行为与响应，不会用于第三方数据分享和上传到任何遥测服务器，所有数据仅在本地保存。
 3. MAS 会在后台运行，并可能访问互联网以获取更新，或者通过解析指定的信息源（如RSS）来提供实时内容更新。
@@ -20,7 +24,32 @@ AGREEMENT_TEXT = """
 5. 你可以随时终止 MAS 的使用，并在设置中选择清除历史记录和个人数据。
 """
 
-AGREEMENT_UPDATED = "2026-02-01"
+_FALLBACK_UPDATED = "2026-02-01"
+
+
+def _load_agreement_content() -> tuple[str, str, str]:
+    """从共享协议文件加载文案与版本号；文件缺失或损坏时回退到内置默认值"""
+    try:
+        data = json.loads(AGREEMENT_FILE.read_text(encoding="utf-8"))
+        title, text, updated = data["title"], data["text"], data["updated"]
+        if title and text and updated:
+            return title, text, updated
+    except Exception as e:
+        logger.warning(f"读取共享协议内容失败({AGREEMENT_FILE}): {e}，使用内置回退文本")
+    return _FALLBACK_TITLE, _FALLBACK_TEXT, _FALLBACK_UPDATED
+
+
+AGREEMENT_TITLE, AGREEMENT_TEXT, AGREEMENT_UPDATED = _load_agreement_content()
+
+
+def _version_requires_update(stored: str, current: str) -> bool:
+    """存储的协议版本是否落后于当前版本（空值或无法解析视为需要重新签署）"""
+    if not stored or not current:
+        return True
+    try:
+        return datetime.fromisoformat(stored) < datetime.fromisoformat(current)
+    except ValueError:
+        return True
 
 
 @dataclass
@@ -84,7 +113,7 @@ class UserAgreement:
         if not self.agreement_state.has_agreed:
             self.prompt_for_agreement()
 
-        elif datetime.fromisoformat(self.agreement_state.version) < datetime.fromisoformat(AGREEMENT_UPDATED):
+        elif _version_requires_update(self.agreement_state.version, AGREEMENT_UPDATED):
             logger.info("检测到协议更新")
             self.prompt_for_agreement()
 

@@ -147,6 +147,10 @@ dmypy.json
 logs
 configs/*
 !topics.yml
+!user_agreement.json
 plugins
 docs
 data
+
+# launcher is maintained in the nested MuikaAI/mas-launcher repository
+launcher/
