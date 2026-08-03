@@ -102,7 +102,7 @@ async def _extract_multi_resource(
                 path = await download_file(resource.url, file_name=_get_media_filename(resource, type))
             elif resource.origin is not None:
                 logger.warning("Cannot get file URL via generic method, falling back to adapter...")
-                path = await get_file_via_adapter(resource.origin, event)  # type:ignore
+                path = await get_file_via_adapter(resource.origin, event)  # type: ignore
             else:
                 continue
             if path:

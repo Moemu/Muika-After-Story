@@ -38,11 +38,7 @@ from .protocol import (
     BotToCoreMessage,
 )
 from .protocol import CommandEvent as IpcCommandEvent
-from .protocol import (
-    CommandResult,
-    ErrorMessage,
-    SendMessage,
-)
+from .protocol import CommandResult, ErrorMessage, SendMessage
 from .protocol import SessionBootstrapEvent as IpcSessionBootstrapEvent
 from .protocol import SessionEndEvent as IpcSessionEndEvent
 from .protocol import UserMessageEvent as IpcUserMessageEvent
