@@ -185,7 +185,7 @@ class MuikaBrain:
     ) -> str:
         """
         Pure roleplay response generation.
-        Returns a string that might contain ``<Butler: command>`` or ``<target: name>`` tags.
+        Returns a string that might contain ``<agent>...</agent>`` or ``<target: name>`` tags.
         """
         is_continuation = bool(memory.recent_turns)
         logger.debug(
@@ -230,7 +230,7 @@ class MuikaBrain:
             if state.mood == "lonely":
                 prompt = "A quiet moment passed, but the loneliness lingers. You need to use some means to attract users' attention."
             elif state.mood == "bored":
-                prompt = "A quiet moment passed, but the boredom persists. Perhaps they can actively explore the user's computer or request news from the butler"
+                prompt = "A quiet moment passed, but the boredom persists. Perhaps you can actively explore the user's computer or let your Agent alter-ego fetch some news"
             else:
                 prompt = "A quiet moment passed."
         elif event.type == "scheduled_trigger":
@@ -267,10 +267,10 @@ class MuikaBrain:
                 raise RuntimeError(f"Model call failed: {completions.text}")
 
             _, result = general_processor(completions.text)
-            has_butler = "<Butler:" in result
+            has_agent = "<agent>" in result.lower()
             logger.debug(
                 f"[Brain] reply generated | chars={len(result)} "
-                f"tokens={completions.usage.total_tokens} butler_cmd={has_butler}"
+                f"tokens={completions.usage.total_tokens} agent_cmd={has_agent}"
             )
             return result
         except Exception as e:

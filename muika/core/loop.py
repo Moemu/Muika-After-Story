@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from random import random
 from typing import Literal, Optional
@@ -34,6 +35,16 @@ from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
+
+
+@dataclass
+class ParsedReply:
+    """Brain 原始回复中解析出的结构化内容。"""
+
+    clean_reply: str
+    memory_contents: list[str]
+    agent_commands: list[str]
+    target: Optional[str]
 
 
 class Muika:
@@ -228,6 +239,32 @@ class Muika:
         )
         logger.info(f"[Memory] Recorded first_conversation_time: {first_time}")
 
+    @staticmethod
+    def _parse_reply_tags(reply: str) -> ParsedReply:
+        """解析 Brain 回复中的控制标签，返回用户可见文本与结构化标签内容。
+
+        支持三类标签：
+        - ``<memory>...</memory>``：待归档记忆内容，发送后交给 Butler 分类存储。
+        - ``<agent>...</agent>``：待执行的 Butler 命令，发送后执行。
+        - ``<target: name>``：回复路由目标，随消息一起发送。
+        """
+        memory_contents = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
+        reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
+
+        agent_commands = re.findall(r"<agent>\s*(.*?)\s*</agent>", reply, re.DOTALL | re.IGNORECASE)
+        clean_reply = re.sub(r"<agent>.*?</agent>", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+
+        target_match = re.findall(r"<target:\s*(.+?)>", clean_reply, re.DOTALL)
+        target = target_match[-1].strip() if target_match else None
+        clean_reply = re.sub(r"<target:\s*(.+?)>", "", clean_reply, flags=re.DOTALL).strip()
+
+        return ParsedReply(
+            clean_reply=clean_reply,
+            memory_contents=[c.strip() for c in memory_contents if c.strip()],
+            agent_commands=agent_commands,
+            target=target,
+        )
+
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
         topic = await self.topic_manager.get_next_topic(self.state)
@@ -237,15 +274,12 @@ class Muika:
         expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
         if not expanded:
             return
-        # 解析 <target: name> 路由标签
-        target_match = re.findall(r"<target:\s*(.+?)>", expanded, re.DOTALL)
-        target = target_match[-1].strip() if target_match else None
-        expanded = re.sub(r"<target:\s*(.+?)>", "", expanded, flags=re.DOTALL).strip()
-        if target:
-            logger.info(f"[Topic] Routing to target={target!r}")
-        await self.executor.send_message(expanded, target=target)
-        logger.info(f"[Topic] Sent: {expanded!r}")
-        self.memory.add_context("muika", expanded)
+        parsed = self._parse_reply_tags(expanded)
+        if parsed.target:
+            logger.info(f"[Topic] Routing to target={parsed.target!r}")
+        await self.executor.send_message(parsed.clean_reply, target=parsed.target)
+        logger.info(f"[Topic] Sent: {parsed.clean_reply!r}")
+        self.memory.add_context("muika", parsed.clean_reply)
         self.state.active_topic = ActiveTopicState(
             topic_id=topic.id,
             topic_seed=topic.content,
@@ -272,7 +306,7 @@ class Muika:
         event: Event,
         injected_preferences: list,
     ) -> None:
-        """迭代式大小姐 ↔ Butler 管线（情绪驱动路径）。"""
+        """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
         max_inner_loops = 4
         for loop_idx in range(max_inner_loops):
             logger.debug(
@@ -286,59 +320,49 @@ class Muika:
                 adapters=self.current_adapters,
             )
 
-            # 提取 <memory>...</memory> 标签 —— 先于 Butler 提取，
-            # 使记忆内容不会泄露到 Butler 命令或用户可见回复中
-            memory_tags = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
-            if memory_tags:
-                logger.info(f"[Brain] intercepted {len(memory_tags)} memory tag(s)")
-                for content in memory_tags:
-                    content = content.strip()
-                    if content:
-                        await self.butler_agent.classify_and_store_memory(content, self.state)
-            # 从回复中剥离 memory 标签
-            reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
+            # 发送前只负责提取用户可见文本与路由目标，标签处理统一下移到发送之后
+            parsed = self._parse_reply_tags(reply)
 
-            butler_commands = re.findall(r"<Butler:\s*(.+?)>", reply, re.DOTALL)
-            clean_reply = re.sub(r"<Butler:\s*(.+?)>", "", reply, flags=re.DOTALL).strip()
+            if parsed.agent_commands:
+                logger.info(f"[Brain] intercepted {len(parsed.agent_commands)} agent command(s)")
+            if parsed.target:
+                logger.info(f"[Loop] Routing reply to target={parsed.target!r}")
+            if parsed.clean_reply:
+                logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
+                await self.executor.send_message(parsed.clean_reply, target=parsed.target)
+                self.memory.add_context("muika", parsed.clean_reply)
 
-            # 提取 <target: name> 路由标签
-            target_match = re.findall(r"<target:\s*(.+?)>", clean_reply, re.DOTALL)
-            target = target_match[-1].strip() if target_match else None
-            clean_reply = re.sub(r"<target:\s*(.+?)>", "", clean_reply, flags=re.DOTALL).strip()
-            if target:
-                logger.info(f"[Loop] Routing reply to target={target!r}")
+            # 记忆归档与 Agent 命令执行统一在消息发出之后进行
+            if parsed.memory_contents:
+                logger.info(f"[Brain] intercepted {len(parsed.memory_contents)} memory tag(s)")
+                for content in parsed.memory_contents:
+                    await self.butler_agent.classify_and_store_memory(content, self.state)
 
-            if butler_commands:
-                logger.info(f"[Brain] intercepted {len(butler_commands)} butler command(s)")
-            if reply:
-                logger.info(f"[Muika -> User] {clean_reply!r}")
-                await self.executor.send_message(clean_reply, target=target)
-                self.memory.add_context("muika", reply)
-            if not butler_commands:
-                logger.debug("[Brain] no butler commands, turn complete.")
+            if not parsed.agent_commands:
+                logger.debug("[Brain] no agent commands, turn complete.")
                 break
 
             any_observation = False
-            for cmd in butler_commands:
-                logger.info(f"[Butler <-] {cmd!r}")
-                butler_report, cmd_resources = await self.butler_agent.execute_command(cmd, self.state, self.executor)
-                if not butler_report:
-                    logger.debug(f"[Loop] Butler silent op complete -- no report injected for: {cmd[:60]!r}")
+            for cmd in parsed.agent_commands:
+                logger.info(f"[Agent <-] {cmd!r}")
+                agent_report, cmd_resources = await self.butler_agent.execute_command(cmd, self.state, self.executor)
+                if not agent_report:
+                    logger.debug(f"[Loop] Agent silent op complete -- no report injected for: {cmd[:60]!r}")
                     continue
-                logger.info(f"[Butler ->] {butler_report!r}")
+                logger.info(f"[Agent ->] {agent_report!r}")
                 self.memory.add_context(
-                    content=f"[Butler reports]: {butler_report}",
+                    content=f"[Agent reports] {cmd}\n{agent_report}",
                     role="agent",
                     resources=cmd_resources,
                 )
                 any_observation = True
 
             if not any_observation:
-                logger.debug("[Brain] All butler commands were silent -- turn complete.")
+                logger.debug("[Brain] All agent commands were silent -- turn complete.")
                 break
         else:
             logger.warning(
-                f"[Brain] reached max inner loops ({max_inner_loops}) " "without completing -- possible butler loop."
+                f"[Brain] reached max inner loops ({max_inner_loops}) without completing -- possible agent loop."
             )
 
         # 主动发言（孤独驱动）后的情感释放

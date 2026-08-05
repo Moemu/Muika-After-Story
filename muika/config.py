@@ -38,6 +38,8 @@ class MASConfig(BaseSettings):
     """最大记忆记录数(最近的N条对话)"""
     persona_template: str = "Muika.md.jinja2"
     """默认人格模板"""
+    agent_template: str = "Muika.agent.jinja2"
+    """行动半身（Agent）模板：Muika 执行 <agent>...</agent> 内联命令时的系统提示"""
 
     input_timeout: int = 0
     """输入等待时间"""

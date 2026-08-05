@@ -1,31 +1,10 @@
 # flake8: noqa: E501
 """
 Butler Agent 所使用的所有 LLM 提示词。
-"""
 
-TOOL_SELECTION_PROMPT = """\
-You are a skilled butler. Your mistress has issued a command in natural language.
-Use the available tools to fulfill her request.
-
-Guidelines:
-- Choose the most appropriate tool based on the command.
-- If multiple steps are needed, call tools sequentially as required.
-- If no suitable tool exists, report that directly.
-
-When using the memory tool, choose the layer carefully:
-- 'core'       → Stable identity facts: user's name/nickname, confirmed occupation, first meeting date,
-                  firmly stated long-term preferences. Ask: "Would forgetting this change how I
-                  fundamentally address this person?" If yes, use 'core'.
-- 'state'      → Time-sensitive context: last topic discussed, recent mood, unresolved questions.
-- 'preference' → Soft long-term preferences: hobbies, food tastes, music, sleep habits.
-- 'archive'    → Reserved for session summaries. Do NOT use directly.
-
-Skills:
-- If the system prompt lists an "Available skills" section, those are packaged
-  instruction sets for specialized tasks (only name + description are shown here).
-- When the command matches a skill's description, FIRST call load_skill with that
-  skill's exact name to fetch its full instructions, then follow them. The loaded
-  instructions include the skill's file path; use read_file for any files it references.
+执行内联命令（<agent>...</agent> 标签）时的系统提示由模板 ``Muika.agent.jinja2`` 渲染
+（Muika 的行动半身人格；渲染与多级兜底见 :mod:`muika.template.loader`），
+本模块仅保留无法模板化的机械分类提示词。
 """
 
 PREFERENCE_MATCH_PROMPT = """\
