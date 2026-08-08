@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from muika.core.memory import MemoryRecord
 from muika.core.state import MuikaState
+from muika.utils.utils import get_version
 
 
 class PromptTemplatesData(BaseModel):
@@ -38,6 +39,7 @@ class PromptTemplatesData(BaseModel):
     last_connection_time: Optional[str] = None
 
     adapters_info: Optional[str] = None
+    version: str = get_version()
 
     # MuikaState keeps a runtime reference to MemoryManager for action tools.
     # It is not prompt data, so Pydantic must treat it as an opaque object.
