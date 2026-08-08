@@ -379,7 +379,8 @@ class Muika:
             if parsed.clean_reply:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
                 await self.executor.send_message(parsed.clean_reply, target=parsed.target)
-                self.memory.add_context("muika", parsed.clean_reply)
+
+            self.memory.add_context("muika", reply)
 
             # 记忆归档与 Agent 命令执行统一在消息发出之后进行
             if parsed.memory_contents:
