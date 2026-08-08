@@ -55,6 +55,11 @@ class Azure(BaseLLM):
         self.token = os.getenv("AZURE_API_KEY", self.config.api_key)
         self.endpoint = self.config.api_host if self.config.api_host else "https://models.inference.ai.azure.com"
 
+        logger.warning(
+            "对 Azure SDK 的支持将于 1.6 或更高的版本结束，考虑配置 OpenAI 兼容端口或其他模型服务提供商",
+            DeprecationWarning,
+        )
+
     def __build_multi_messages(self, request: ModelRequest) -> UserMessage:
         """
         构建多模态类型
