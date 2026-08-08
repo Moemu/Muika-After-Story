@@ -12,6 +12,7 @@ from typing import Literal, Optional
 from muika.config import mas_config
 from muika.ipc.server import AdapterInfo
 from muika.utils.logger import logger
+from muika.utils.utils import parse_duration
 
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
@@ -29,6 +30,7 @@ from .digest_agent import DigestAgent
 from .events import (
     Event,
     SessionEndEvent,
+    TimeoutEvent,
     TimeTickEvent,
 )
 from .executor import Executor
@@ -45,6 +47,8 @@ class ParsedReply:
     memory_contents: list[str]
     agent_commands: list[str]
     target: Optional[str]
+    timeout: Optional[float] = None
+    """用户回复等待超时（秒），来自 <timeout: 10min> 标签。"""
 
 
 class Muika:
@@ -75,6 +79,7 @@ class Muika:
         self._last_digest_time: float = 0.0
         self._last_summary_turn: Optional[SessionTurn] = None
         self._last_summary_time: float = datetime.now().timestamp()
+        self._timeout_task: Optional[asyncio.Task] = None
 
         asyncio.create_task(self.memory.load())
 
@@ -149,6 +154,8 @@ class Muika:
             self._log_event(event)
             if event.type == "user_message":
                 self.memory.add_context("user", event.payload.message.message)
+                # 用户已回复，取消挂起的等待超时
+                self._cancel_timeout()
 
             self.state.tick_state(event, dt)
             logger.debug(
@@ -243,10 +250,11 @@ class Muika:
     def _parse_reply_tags(reply: str) -> ParsedReply:
         """解析 Brain 回复中的控制标签，返回用户可见文本与结构化标签内容。
 
-        支持三类标签：
+        支持四类标签：
         - ``<memory>...</memory>``：待归档记忆内容，发送后交给 Butler 分类存储。
         - ``<agent>...</agent>``：待执行的 Butler 命令，发送后执行。
         - ``<target: name>``：回复路由目标，随消息一起发送。
+        - ``<timeout: 10min>``：用户回复等待超时，解析为秒后由 Loop 计时。
         """
         memory_contents = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
         reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
@@ -258,12 +266,48 @@ class Muika:
         target = target_match[-1].strip() if target_match else None
         clean_reply = re.sub(r"<target:\s*(.+?)>", "", clean_reply, flags=re.DOTALL).strip()
 
+        timeout_match = re.findall(r"<timeout:\s*(.+?)>", clean_reply, re.DOTALL)
+        timeout_text = timeout_match[-1].strip() if timeout_match else None
+        clean_reply = re.sub(r"<timeout:\s*(.+?)>", "", clean_reply, flags=re.DOTALL).strip()
+
+        timeout = None
+        if timeout_text:
+            timeout = parse_duration(timeout_text)
+            if timeout is None:
+                logger.warning(f"[Loop] Unrecognized timeout format: {timeout_text!r} -- ignoring tag.")
+
         return ParsedReply(
             clean_reply=clean_reply,
             memory_contents=[c.strip() for c in memory_contents if c.strip()],
             agent_commands=agent_commands,
             target=target,
+            timeout=timeout,
         )
+
+    def _arm_timeout(self, seconds: float) -> None:
+        """设置（或重设）用户回复等待超时；取消此前未触发的超时任务。"""
+        self._cancel_timeout()
+        if seconds <= 0:
+            logger.warning(f"[Timeout] non-positive duration {seconds:.1f}s -- ignored.")
+            return
+        self._timeout_task = asyncio.create_task(self._wait_timeout(seconds))
+
+    def _cancel_timeout(self) -> None:
+        """取消当前挂起的超时任务（用户已回复或会话结束时调用）。"""
+        if self._timeout_task is not None:
+            self._timeout_task.cancel()
+            self._timeout_task = None
+
+    async def _wait_timeout(self, seconds: float) -> None:
+        """等待 *seconds* 秒；期间用户若已回复则跳过，否则投递超时事件。"""
+        set_at = datetime.now()
+        try:
+            await asyncio.sleep(seconds)
+            # 设限后用户回过消息（last_interaction 已更新），则不再触发
+            if self.state.last_interaction <= set_at:
+                await self.create_event(TimeoutEvent(set_at=set_at, duration=seconds))
+        except asyncio.CancelledError:
+            return
 
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
@@ -277,6 +321,8 @@ class Muika:
         parsed = self._parse_reply_tags(expanded)
         if parsed.target:
             logger.info(f"[Topic] Routing to target={parsed.target!r}")
+        if parsed.timeout is not None:
+            self._arm_timeout(parsed.timeout)
         await self.executor.send_message(parsed.clean_reply, target=parsed.target)
         logger.info(f"[Topic] Sent: {parsed.clean_reply!r}")
         self.memory.add_context("muika", parsed.clean_reply)
@@ -327,6 +373,9 @@ class Muika:
                 logger.info(f"[Brain] intercepted {len(parsed.agent_commands)} agent command(s)")
             if parsed.target:
                 logger.info(f"[Loop] Routing reply to target={parsed.target!r}")
+            if parsed.timeout is not None:
+                logger.info(f"[Brain] arming reply timeout of {parsed.timeout:.0f}s")
+                self._arm_timeout(parsed.timeout)
             if parsed.clean_reply:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
                 await self.executor.send_message(parsed.clean_reply, target=parsed.target)
@@ -446,6 +495,7 @@ class Muika:
         # 真实对话已完整结束，孤独感归零
         self.state.loneliness = 0.0
         self.state.last_proactive_at = None
+        self._cancel_timeout()
 
         self.memory.new_session()
         self._last_summary_turn = None

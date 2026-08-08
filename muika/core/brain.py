@@ -9,6 +9,7 @@ from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
 from muika.template import PromptTemplatesData, generate_prompt_from_template
 from muika.utils.logger import logger
+from muika.utils.utils import format_duration
 
 from .events import Event
 from .memory import MemoryManager, MemoryRecord
@@ -235,6 +236,13 @@ class MuikaBrain:
                 prompt = "A quiet moment passed."
         elif event.type == "scheduled_trigger":
             prompt = f"A scheduled reminder just went off: '{event.payload.what}'"
+        elif event.type == "timeout":
+            wait = format_duration(event.duration)
+            elapsed = format_duration((datetime.now() - event.set_at).total_seconds())
+            prompt = (
+                f"The wait you set for the user's reply ({wait}) has passed — "
+                f"you have been waiting for about {elapsed} now. Consider reminding the user, or seeing what they are doing?"
+            )
         elif event.type == "session_bootstrap":
             prompt = "A new session has just started. Greet the user."
         elif event.type == "adapter_online":

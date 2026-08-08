@@ -123,6 +123,18 @@ class AdapterOfflineEvent:
     type: Literal["adapter_offline"] = "adapter_offline"
 
 
+@dataclass(frozen=True)
+class TimeoutEvent:
+    """用户回复超时事件——Muika 设定的等待时间已到且用户未回复。"""
+
+    set_at: datetime
+    """设定该超时时的时间戳，用于判断用户是否在设限后回过消息。"""
+    duration: float
+    """Muika 设定的最大等待时长（秒）。"""
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["timeout"] = "timeout"
+
+
 Event: TypeAlias = (
     UserMessageEvent
     | TimeTickEvent
@@ -131,4 +143,5 @@ Event: TypeAlias = (
     | SessionEndEvent
     | AdapterOnlineEvent
     | AdapterOfflineEvent
+    | TimeoutEvent
 )
