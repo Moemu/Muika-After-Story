@@ -2,7 +2,17 @@ import asyncio
 import json
 from dataclasses import dataclass
 from functools import partial
-from typing import AsyncGenerator, Generator, List, Literal, Optional, Union, overload
+from typing import (
+    Any,
+    AsyncGenerator,
+    Generator,
+    List,
+    Literal,
+    Optional,
+    Union,
+    cast,
+    overload,
+)
 
 import dashscope
 from dashscope.api_entities.dashscope_response import (
@@ -78,6 +88,15 @@ class ThoughtStream:
             return f"</think>{answer_content}"
 
         return answer_content
+
+
+# Dashscope 的同步 / 流式返回类型（非多模态与多模态接口的返回值联合）
+SyncResponse = Union[GenerationResponse, MultiModalConversationResponse]
+StreamResponse = Union[
+    Generator[GenerationResponse, None, None],
+    Generator[MultiModalConversationResponse, None, None],
+]
+CallResponse = Union[SyncResponse, StreamResponse]
 
 
 @register("dashscope")
@@ -337,51 +356,55 @@ class Dashscope(BaseLLM):
     async def _ask(
         self, messages: list, tools: List[dict], response_format: Optional[dict], total_usage: Usage = Usage()
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        loop = asyncio.get_event_loop()
-
         # 因为 Dashscope 对于多模态模型的接口不同，所以这里不能统一函数
         if not self.config.multimodal:
-            response = await loop.run_in_executor(
-                None,
-                partial(
-                    dashscope.Generation.call,
-                    api_key=self.api_key,
-                    model=self.model,
-                    messages=messages,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    repetition_penalty=self.repetition_penalty,
-                    stream=self.stream,
-                    tools=tools,
-                    parallel_tool_calls=True,
-                    enable_search=self.enable_search,
-                    incremental_output=self.incremental_output,
-                    headers=self.extra_headers,
-                    enable_thinking=self.enable_thinking,
-                    thinking_budget=self.thinking_budget,
-                    response_format=response_format,
-                ),
+            call_kwargs: dict[str, Any] = {
+                "api_key": self.api_key,
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "repetition_penalty": self.repetition_penalty,
+                "stream": self.stream,
+                "tools": tools,
+                "parallel_tool_calls": True,
+                "enable_search": self.enable_search,
+                "incremental_output": self.incremental_output,
+                "headers": self.extra_headers,
+                "enable_thinking": self.enable_thinking,
+                "thinking_budget": self.thinking_budget,
+                "response_format": response_format,
+            }
+        else:
+            call_kwargs = {
+                "api_key": self.api_key,
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "repetition_penalty": self.repetition_penalty,
+                "stream": self.stream,
+                "tools": tools,
+                "parallel_tool_calls": True,
+                "enable_search": self.enable_search,
+                "incremental_output": self.incremental_output,
+                "response_format": response_format,
+            }
+
+        # 过滤未配置的可选参数（Dashscope 部分参数声明为非可选类型但允许缺省）
+        call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+        if self.config.multimodal:
+            response = cast(
+                CallResponse,
+                await asyncio.to_thread(partial(dashscope.MultiModalConversation.call, **call_kwargs)),
             )
         else:
-            response = await loop.run_in_executor(
-                None,
-                partial(
-                    dashscope.MultiModalConversation.call,
-                    api_key=self.api_key,
-                    model=self.model,
-                    messages=messages,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    repetition_penalty=self.repetition_penalty,
-                    stream=self.stream,
-                    tools=tools,
-                    parallel_tool_calls=True,
-                    enable_search=self.enable_search,
-                    incremental_output=self.incremental_output,
-                    response_format=response_format,
-                ),
+            response = cast(
+                CallResponse,
+                await asyncio.to_thread(partial(dashscope.Generation.call, **call_kwargs)),
             )
 
         if isinstance(response, GenerationResponse) or isinstance(response, MultiModalConversationResponse):

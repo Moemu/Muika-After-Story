@@ -63,10 +63,10 @@ class SessionEndEvent(IPCMessage):
     type: Literal["session_end"] = "session_end"
 
 
-BotToCoreMessage = Annotated[
-    Union[UserMessageEvent, CommandEvent, SessionBootstrapEvent, SessionEndEvent],
-    Field(discriminator="type"),
-]
+BotToCoreEvent = Union[UserMessageEvent, CommandEvent, SessionBootstrapEvent, SessionEndEvent]
+"""Bot 上报事件的联合类型，用于类型标注。"""
+
+BotToCoreMessage = Annotated[BotToCoreEvent, Field(discriminator="type")]
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Core → Bot 消息

@@ -35,6 +35,7 @@ from muika.utils.utils import get_version
 
 from .protocol import (
     ActionResponse,
+    BotToCoreEvent,
     BotToCoreMessage,
 )
 from .protocol import CommandEvent as IpcCommandEvent
@@ -151,11 +152,11 @@ class CoreBootstrap:
         :param message: 解析后的 JSON dict
         :param adapter: 来源适配器
         """
-        event: BotToCoreMessage  # type: ignore[valid-type]
+        event: BotToCoreEvent
 
         client_name = adapter.client_name
         try:
-            event = TypeAdapter(BotToCoreMessage).validate_python(message)
+            event = TypeAdapter[BotToCoreEvent](BotToCoreMessage).validate_python(message)
         except Exception as e:
             logger.error(f"[Core] Failed to parse IPC event: {e}")
             return ErrorMessage(message="invalid_event", detail=str(e))
