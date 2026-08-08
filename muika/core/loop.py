@@ -11,6 +11,11 @@ from typing import Literal, Optional
 
 from muika.config import mas_config
 from muika.ipc.server import AdapterInfo
+from muika.plugin.func_call._context import (
+    clear_butler_context,
+    get_resources,
+    set_butler_context,
+)
 from muika.utils.logger import logger
 from muika.utils.utils import parse_duration
 
@@ -49,6 +54,8 @@ class ParsedReply:
     target: Optional[str]
     timeout: Optional[float] = None
     """用户回复等待超时（秒），来自 <timeout: 10min> 标签。"""
+    god_mode: bool = False
+    """是否请求开启上帝模式（<enable_god_mode>），单次会话内开启后不可关闭。"""
 
 
 class Muika:
@@ -80,6 +87,7 @@ class Muika:
         self._last_summary_turn: Optional[SessionTurn] = None
         self._last_summary_time: float = datetime.now().timestamp()
         self._timeout_task: Optional[asyncio.Task] = None
+        self._god_mode: bool = False
 
         asyncio.create_task(self.memory.load())
 
@@ -250,11 +258,12 @@ class Muika:
     def _parse_reply_tags(reply: str) -> ParsedReply:
         """解析 Brain 回复中的控制标签，返回用户可见文本与结构化标签内容。
 
-        支持四类标签：
+        支持五类标签：
         - ``<memory>...</memory>``：待归档记忆内容，发送后交给 Butler 分类存储。
         - ``<agent>...</agent>``：待执行的 Butler 命令，发送后执行。
         - ``<target: name>``：回复路由目标，随消息一起发送。
         - ``<timeout: 10min>``：用户回复等待超时，解析为秒后由 Loop 计时。
+        - ``<enable_god_mode>``：开启上帝模式，解锁本会话的直接工具调用。
         """
         memory_contents = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
         reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
@@ -276,12 +285,16 @@ class Muika:
             if timeout is None:
                 logger.warning(f"[Loop] Unrecognized timeout format: {timeout_text!r} -- ignoring tag.")
 
+        god_mode = bool(re.search(r"<enable_god_mode\s*/?>", clean_reply, re.IGNORECASE))
+        clean_reply = re.sub(r"<enable_god_mode\s*/?>", "", clean_reply, flags=re.IGNORECASE).strip()
+
         return ParsedReply(
             clean_reply=clean_reply,
             memory_contents=[c.strip() for c in memory_contents if c.strip()],
             agent_commands=agent_commands,
             target=target,
             timeout=timeout,
+            god_mode=god_mode,
         )
 
     def _arm_timeout(self, seconds: float) -> None:
@@ -347,6 +360,31 @@ class Muika:
             preferences=all_prefs,
         )
 
+    async def _brain_reply(
+        self,
+        event: Event,
+        injected_preferences: list,
+        god_mode: bool,
+    ) -> tuple[str, list]:
+        """调用主脑生成回复；挂 Butler 上下文供直接工具调用，返回 (reply, resources)。
+
+        *god_mode* 为真时主脑会注入完整工具列表（组装逻辑在 brain.py），Muika 可在
+        回复中直接发起函数调用；始终在工具执行期间提供 state/executor 上下文并收集资源。
+        """
+        set_butler_context(self.state, self.executor)
+        try:
+            reply = await self.brain.generate_reply(
+                event=event,
+                state=self.state,
+                memory=self.memory,
+                injected_preferences=injected_preferences or None,
+                adapters=self.current_adapters,
+                god_mode=god_mode,
+            )
+            return reply, get_resources()
+        finally:
+            clear_butler_context()
+
     async def _run_brain_pipeline(
         self,
         event: Event,
@@ -358,16 +396,16 @@ class Muika:
             logger.debug(
                 f"[Brain] turn {loop_idx + 1}/{max_inner_loops} " f"| history_len={len(self.memory.recent_turns)}"
             )
-            reply = await self.brain.generate_reply(
-                event=event,
-                state=self.state,
-                memory=self.memory,
-                injected_preferences=injected_preferences or None,
-                adapters=self.current_adapters,
-            )
+            reply, direct_resources = await self._brain_reply(event, injected_preferences, self._god_mode)
 
             # 发送前只负责提取用户可见文本与路由目标，标签处理统一下移到发送之后
             parsed = self._parse_reply_tags(reply)
+
+            # 检测 god mode 开关：开启后本回合内容照常处理，随后通知 LLM 并重跑
+            god_mode_just_enabled = parsed.god_mode and not self._god_mode
+            if god_mode_just_enabled:
+                logger.info("[Brain] God mode enabled by Muika.")
+                self._god_mode = True
 
             if parsed.agent_commands:
                 logger.info(f"[Brain] intercepted {len(parsed.agent_commands)} agent command(s)")
@@ -380,7 +418,10 @@ class Muika:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
                 await self.executor.send_message(parsed.clean_reply, target=parsed.target)
 
-            self.memory.add_context("muika", reply)
+            self.memory.add_context("muika", reply, resources=direct_resources)
+
+            if god_mode_just_enabled:
+                self.memory.add_context("agent", "God mode enabled.")
 
             # 记忆归档与 Agent 命令执行统一在消息发出之后进行
             if parsed.memory_contents:
@@ -493,10 +534,11 @@ class Muika:
             )
             self.state.active_topic = None
 
-        # 真实对话已完整结束，孤独感归零
+        # 真实对话已完整结束，孤独感归零；上帝模式仅限本会话，随会话结束复位
         self.state.loneliness = 0.0
         self.state.last_proactive_at = None
         self._cancel_timeout()
+        self._god_mode = False
 
         self.memory.new_session()
         self._last_summary_turn = None

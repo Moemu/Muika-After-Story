@@ -7,10 +7,15 @@ from muika.ipc.server import AdapterInfo
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
-from muika.template import PromptTemplatesData, generate_prompt_from_template
+from muika.plugin.func_call import get_function_list
+from muika.template import (
+    PromptTemplatesData,
+    generate_prompt_from_template,
+)
 from muika.utils.logger import logger
 from muika.utils.utils import format_duration
 
+from .butler.agent import ENABLE_MCP
 from .events import Event
 from .memory import MemoryManager, MemoryRecord
 from .state import MuikaState
@@ -22,7 +27,18 @@ T = TypeVar("T", bound=PromptTemplatesData)
 class MuikaBrain:
     def __init__(self) -> None:
         self.model = load_model()
+        self._mcp_tools: list[dict] = []
         self._setup_config_listener()
+
+    async def _get_tool_list(self) -> list[dict]:
+        """组装 Muika 直接调用的完整工具列表（内置注册工具 + MCP，若启用）。"""
+        tools = get_function_list()
+        if ENABLE_MCP and not self._mcp_tools:
+            from muika.plugin.mcp import get_mcp_list
+
+            self._mcp_tools = await get_mcp_list()
+            tools += self._mcp_tools
+        return tools
 
     def _setup_config_listener(self):
         config_manager = get_model_config_manager()
@@ -183,9 +199,11 @@ class MuikaBrain:
         resources: Optional[List[Resource]] = None,
         injected_preferences: Optional[List[MemoryRecord]] = None,
         adapters: Optional[List[AdapterInfo]] = None,
+        god_mode: bool = False,
     ) -> str:
         """
         Pure roleplay response generation.
+
         Returns a string that might contain ``<agent>...</agent>`` or ``<target: name>`` tags.
         """
         is_continuation = bool(memory.recent_turns)
@@ -261,12 +279,14 @@ class MuikaBrain:
 
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
+        tools = await self._get_tool_list() if god_mode else None
         request = ModelRequest(
             prompt=prompt,
             system=system_prompt,
             format="string",
             history=history,
             resources=resources or [],
+            tools=tools,
         )
 
         try:
