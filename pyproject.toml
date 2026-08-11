@@ -53,7 +53,11 @@ dev = [
     "pre-commit>=4.1.0",
     "mypy>=1.15.0",
     "black>=25.1.0",
-    "types-PyYAML"
+    "types-PyYAML",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-mock>=3.15.1",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.black]
@@ -61,6 +65,28 @@ line-length = 120
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --cov=muika --cov-report=term-missing"
+
+# 覆盖率只统计 core 的可测试逻辑；以下为明确不做单元测试的集成/框架层
+# （provider 适配器、IPC、迁移、插件框架、内置命令、OS/网络工具、引导/日志，
+# 以及 loop.py 的事件循环编排——整个文件跳过，避免逐函数维护 pragma）。
+[tool.coverage.run]
+omit = [
+    "muika/llm/providers/*",
+    "muika/ipc/*",
+    "muika/migrations/*",
+    "muika/plugin/*",
+    "muika/builtin_plugins/*",
+    "muika/core/actions/tools/*",
+    "muika/core/loop.py",
+    "muika/utils/first_run.py",
+    "muika/utils/logger.py",
+]
 
 [tool.pdm]
 distribution = true

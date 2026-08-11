@@ -19,7 +19,7 @@ class Scheduler:
         # settings={'PREFER_DATES_FROM': 'future'} 确保 '8am' 是明天的如果今天已经过了
         return dateparser.parse(natural_time, settings={"PREFER_DATES_FROM": "future"})
 
-    async def schedule(self, intent: PlanFutureEventIntent):
+    async def schedule(self, intent: PlanFutureEventIntent):  # pragma: no cover
         if intent.trigger_at and intent.trigger_in_seconds is not None:
             logger.error("trigger_at 与 trigger_in_seconds 不能同时设置")
             return
@@ -54,7 +54,7 @@ class Scheduler:
             )
         )
 
-    async def _wait_and_trigger(
+    async def _wait_and_trigger(  # pragma: no cover
         self,
         delay: float,
         payload: ScheduledTriggerPayload,

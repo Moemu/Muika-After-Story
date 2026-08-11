@@ -102,7 +102,7 @@ class MemoryManager:
 
         self.session: SessionState = SessionState()
 
-    async def load(self):
+    async def load(self):  # pragma: no cover
         """从数据库加载全量记忆，若有历史数据则进入 Resume 模式。"""
         from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
         from muika.database.db import get_session

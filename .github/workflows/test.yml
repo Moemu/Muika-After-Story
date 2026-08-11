@@ -1,0 +1,57 @@
+name: Tests
+
+# paths 过滤：徽标提交只改 badges/*.svg，不命中以下路径，因此不会再次触发工作流，
+# 与 GitHub App token（其提交会正常触发工作流）配合避免无限循环。
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  pull_request:
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Generate coverage badge
+        run: |
+          uv run coverage xml
+          uv run python scripts/generate_coverage_badge.py
+
+      # 用 MuikaAI 维护 bot（GitHub App）的 token 提交徽标，实现品牌化 commit。
+      # 需在仓库 Secrets 中配置 APP_ID 与 APP_PRIVATE_KEY，且 App 对本仓库有 contents:write。
+      - name: Generate App Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Commit coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          git config user.name "MuiceAI[bot]"
+          git config user.email "216272510+muiceai[bot]@users.noreply.github.com"
+          git add badges/coverage.svg
+          git diff --cached --quiet || git commit -m "🍱 更新姐姐项目的测试微标喵⭐" -m "姐姐我今天有好好工作吗"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push

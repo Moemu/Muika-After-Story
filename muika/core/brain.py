@@ -25,12 +25,12 @@ T = TypeVar("T", bound=PromptTemplatesData)
 
 
 class MuikaBrain:
-    def __init__(self) -> None:
+    def __init__(self) -> None:  # pragma: no cover
         self.model = load_model()
         self._mcp_tools: list[dict] = []
         self._setup_config_listener()
 
-    async def _get_tool_list(self) -> list[dict]:
+    async def _get_tool_list(self) -> list[dict]:  # pragma: no cover
         """组装 Muika 直接调用的完整工具列表（内置注册工具 + MCP，若启用）。"""
         tools = get_function_list()
         if ENABLE_MCP and not self._mcp_tools:
@@ -40,11 +40,11 @@ class MuikaBrain:
             tools += self._mcp_tools
         return tools
 
-    def _setup_config_listener(self):
+    def _setup_config_listener(self):  # pragma: no cover
         config_manager = get_model_config_manager()
         config_manager.register_listener(self.reload_model)
 
-    def reload_model(self, new_config: ModelConfig, old_config: Optional[ModelConfig]):
+    def reload_model(self, new_config: ModelConfig, old_config: Optional[ModelConfig]):  # pragma: no cover
         provider_old = old_config.provider if old_config else "None"
         provider_new = new_config.provider
         logger.info(f"Detected model config change: {provider_old} -> {provider_new}")

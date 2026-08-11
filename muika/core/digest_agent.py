@@ -93,7 +93,7 @@ class DigestAgent:
     定期抓取 RSS，将其转化为 Muika 的个人阅读笔记，然后作为 EventTopic 注入 TopicManager 的队列中。
     """
 
-    def __init__(self, topic_manager: TopicManager):
+    def __init__(self, topic_manager: TopicManager):  # pragma: no cover
         self.topic_manager = topic_manager
         self._rss_fingerprints: dict[str, str] = {}  # source.id → md5(raw_xml)
         butler_cfg = get_model_config(mas_config.butler_model) if mas_config.butler_model else None
@@ -153,7 +153,7 @@ class DigestAgent:
             logger.warning(f"[DigestAgent] Topic fit evaluation failed: {e}")
             return None
 
-    async def fetch_and_digest(self) -> None:
+    async def fetch_and_digest(self) -> None:  # pragma: no cover
         """尝试抓取并生成一篇未读新闻的摘要。"""
         sources = [source for source in RSS_SOURCES.values() if source.digest]
 
