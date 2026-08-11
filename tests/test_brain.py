@@ -81,7 +81,8 @@ async def test_generate_reply_user_message_prompt(fake_llm_factory):
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         result = await brain.generate_reply(_user_event(), MuikaState(), _memory())
     req = fake.requests[0]
-    assert req.prompt == "User said: 'hello'"
+    assert req.prompt.startswith("["), req.prompt
+    assert req.prompt.endswith("] User said: 'hello'"), req.prompt
     assert req.system == "SYSTEM"
     assert result == "Hi!"
 

@@ -20,6 +20,18 @@ if TYPE_CHECKING:
     from muika.core.memory import SessionTurn
 
 
+def _stamp_user_turn(turn: "SessionTurn") -> "SessionTurn":
+    """
+    为真实用户消息附加发送时间戳前缀，让 LLM 能从对话历史读取时间。
+
+    合成占位消息（如 ``[conversation resumed]`` 与开头的空 user 消息）不附加，
+    避免每次渲染产生新的 ``datetime.now()`` 而破坏前缀缓存。
+    """
+    if turn.role == "user" and turn.content:
+        turn.content = f"[{turn.timestamp:%Y-%m-%d %H:%M:%S}] {turn.content}"
+    return turn
+
+
 class BaseLLM(ABC):
     """
     模型基类，所有模型加载器都必须继承于该类
@@ -94,11 +106,11 @@ class BaseLLM(ABC):
 
             # 合并连续相同 role
             if normalized and normalized[-1].role == current.role:
-                normalized[-1].content += "\n" + current.content
+                normalized[-1].content += "\n" + _stamp_user_turn(current).content
                 normalized[-1].resources.extend(current.resources)
                 continue
 
-            normalized.append(current)
+            normalized.append(_stamp_user_turn(current))
 
         # 保证 user 开头
         if normalized and normalized[0].role != "user":

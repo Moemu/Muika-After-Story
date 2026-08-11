@@ -268,6 +268,10 @@ class MuikaBrain:
         else:
             prompt = f"Event triggered: {event.type}"
 
+        # 内化当前时间：每轮 prompt 统一带时间戳前缀，替代 system 中的 current_time，
+        # 使 system prompt 保持字节级稳定以利前缀缓存。
+        prompt = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {prompt}"
+
         # 历史记录去重
         history = memory.recent_turns.copy()
         if history:
