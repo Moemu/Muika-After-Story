@@ -77,6 +77,7 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
 
 _DURATION_UNITS = {
     "s": 1.0,
+    "ms": 0.001,
     "sec": 1.0,
     "second": 1.0,
     "m": 60.0,
@@ -98,9 +99,12 @@ def parse_duration(text: str) -> Optional[float]:
     if not match:
         return None
     unit = match.group(2)
-    if unit != "s" and unit.endswith("s"):
-        unit = unit[:-1]  # 支持 "mins"/"hours"/"days" 等复数写法
+    # 先按原样查表；查不到才尝试去掉复数后缀 "s"。
+    # 否则 "ms" 会被误当成 "m"（分钟）解析，如 "100ms" → 6000 秒。
     multiplier = _DURATION_UNITS.get(unit)
+    if multiplier is None and unit != "s" and unit.endswith("s"):
+        unit = unit[:-1]  # 支持 "mins"/"hours"/"days" 等复数写法
+        multiplier = _DURATION_UNITS.get(unit)
     if multiplier is None:
         return None
     return float(match.group(1)) * multiplier

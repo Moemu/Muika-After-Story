@@ -67,7 +67,6 @@ class Muika:
 
     def __init__(self, executor: Executor) -> None:
         self.is_alive: bool = False
-        self.curiosity_drive: float = 0.0
 
         self.state = MuikaState()
         self.memory = MemoryManager()
@@ -131,8 +130,9 @@ class Muika:
             logger.debug("TimeTick: boredom threshold breached -- topic pipeline.")
             return "topic"
 
-        if self.curiosity_drive > CURIOSITY_THRESHOLD and random() < 0.3:
-            self.curiosity_drive = 0.0
+        # 好奇心直接读取 state.curiosity（由工具提升、tick 衰减），命中后归零
+        if self.state.curiosity > CURIOSITY_THRESHOLD and random() < 0.3:
+            self.state.curiosity = 0.0
             logger.debug("TimeTick: curiosity drive fired -- topic pipeline.")
             return "topic"
 

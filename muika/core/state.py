@@ -26,8 +26,6 @@ class ActiveTopicState:
 
 @dataclass
 class MuikaState:
-    mood: str = "calm"
-    """情绪"""
     attention: float = 1.0
     """专注度"""
 
@@ -49,6 +47,19 @@ class MuikaState:
     memory: Optional[MemoryManager] = field(default=None, repr=False)
     """对 MemoryManager 的引用，由外部注入，供 Action 工具访问"""
 
+    @property
+    def mood(self) -> str:
+        """情绪（派生属性）：依据孤独感/无聊感阈值实时计算，不存储。
+
+        作为派生值，情绪始终与当前状态一致——用户消息重置孤独感后立即
+        反映为 calm，不存在残留。优先级：孤独感 > 无聊感 > calm。
+        """
+        if self.loneliness > 0.8:
+            return "lonely"
+        if self.boredom > 0.7:
+            return "bored"
+        return "calm"
+
     def tick_state(self, event: "Event", dt: float):
         # 1. 随着时间流逝，注意力下降
         self.attention = max(0.0, self.attention - 0.05)
@@ -57,24 +68,16 @@ class MuikaState:
         self.boredom = min(1.0, self.boredom + (BOREDOM_RATE * dt))
         self.curiosity *= 0.99  # 探索欲缓慢下降
 
-        if self.loneliness > 0.8:
-            self.mood = "lonely"
-        elif self.boredom > 0.7:
-            self.mood = "bored"
-        else:
-            self.mood = "calm"
-
-        # 2. 基于规则的状态机
+        # 2. 基于规则的状态机：用户发消息时重置注意力与孤独感，
+        #    情绪由 ``mood`` 属性按需派生，无需在此维护。
         now = datetime.now()
 
-        if not event.type == "user_message":
-            return
+        if event.type == "user_message":
+            # 用户发消息了，重置注意力，增加陪伴感，降低无聊感
+            self.loneliness = 0.0
+            self.attention = 1.0
+            self.last_interaction = now
 
-        # 用户发消息了，重置注意力，增加陪伴感，降低无聊感
-        self.loneliness = 0.0
-        self.attention = 1.0
-        self.last_interaction = now
-
-        # 如果有活跃话题，标记用户参与了互动
-        if self.active_topic is not None:
-            self.active_topic.user_engaged = True
+            # 如果有活跃话题，标记用户参与了互动
+            if self.active_topic is not None:
+                self.active_topic.user_engaged = True
