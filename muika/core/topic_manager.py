@@ -55,40 +55,55 @@ TOPIC_WEIGHTS: dict[str, float] = {
     "meta": 0.05,
 }
 
-_TOPICS_PATH = Path(__file__).parent.parent.parent / "configs" / "topics.yml"
+TOPICS_PATH = Path(__file__).parent.parent / "topics" / "topics.yml"
+"""话题种子库文件路径"""
+
 _RECENT_TYPE_PENALTY: float = 0.25
 _RECENT_TYPE_WINDOW: int = 3
 
 
 class TopicStore:
-    """从 YAML 文件加载并索引静态话题种子。"""
+    """从 YAML 文件加载并索引静态话题种子"""
 
-    def __init__(self, path: Path = _TOPICS_PATH) -> None:
+    def __init__(self, path: Path = TOPICS_PATH) -> None:
+        self._path = path
         self._by_category: dict[str, list[StaticTopic]] = {}
-        self._load(path)
+        self.reload()
 
-    def _load(self, path: Path) -> None:
+    def _load_from(self, path: Path) -> dict[str, list[StaticTopic]]:
+        new_map: dict[str, list[StaticTopic]] = {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            raise ValueError("topics.yml must be a mapping containing a 'topics' list")
+        for entry in data.get("topics", []):
+            # 兼容旧字段：如果存在 content 则作为 content
+            concept = entry.get("concept", entry.get("content", ""))
+            topic = StaticTopic(
+                id=entry["id"],
+                source=TopicSource.STATIC,
+                category=entry.get("category", entry.get("type", "misc")),
+                content=concept,
+                tags=entry.get("tags", []),
+                cooldown_days=entry.get("cooldown_days", 7),
+            )
+            new_map.setdefault(topic.category, []).append(topic)
+        return new_map
+
+    def reload(self) -> None:
+        """重新解析话题文件并原子替换索引；解析失败时保留旧话题。"""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            for entry in data.get("topics", []):
-                # 兼容旧字段：如果存在 content 则作为 content
-                concept = entry.get("concept", entry.get("content", ""))
-                topic = StaticTopic(
-                    id=entry["id"],
-                    source=TopicSource.STATIC,
-                    category=entry.get("category", entry.get("type", "misc")),
-                    content=concept,
-                    tags=entry.get("tags", []),
-                    cooldown_days=entry.get("cooldown_days", 7),
-                )
-                self._by_category.setdefault(topic.category, []).append(topic)
-            total = sum(len(v) for v in self._by_category.values())
-            logger.info(f"[TopicStore] Loaded {total} static topics across {len(self._by_category)} categories")
+            new_map = self._load_from(self._path)
         except FileNotFoundError:
-            logger.warning(f"[TopicStore] topics.yml not found at {path} — static topics disabled")
+            logger.warning(f"[TopicStore] topics.yml not found at {self._path} — static topics disabled")
+            return
         except Exception as e:
-            logger.error(f"[TopicStore] Failed to load topics.yml: {e}")
+            logger.error(f"[TopicStore] Failed to (re)load topics.yml, keeping previous topics: {e}")
+            return
+
+        self._by_category = new_map
+        total = sum(len(v) for v in new_map.values())
+        logger.info(f"[TopicStore] Loaded {total} static topics across {len(new_map)} categories")
 
     def get_by_category(self, category: str) -> list[StaticTopic]:
         return self._by_category.get(category, [])
@@ -104,9 +119,15 @@ class TopicManager:
     """话题选择与历史追踪的调度器。"""
 
     def __init__(self) -> None:
+        global _topic_manager
         self.store = TopicStore()
         self._recent_categories: deque[str] = deque(maxlen=_RECENT_TYPE_WINDOW)
         self._event_queue: deque[EventTopic] = deque()
+        _topic_manager = self
+
+    def reload_store(self) -> None:
+        """重新加载话题种子库（话题被 topic_* 工具修改后调用）。"""
+        self.store.reload()
 
     def enqueue_event(self, topic: EventTopic) -> None:
         """从外部（如 DigestAgent / 管家）注入动态新闻。"""
@@ -221,3 +242,12 @@ class TopicManager:
             logger.debug(f"[TopicManager] Recorded topic {topic_id!r} (engaged={user_engaged})")
         except Exception as e:
             logger.error(f"[TopicManager] Failed to record topic history for {topic_id!r}: {e}")
+
+
+_topic_manager: Optional[TopicManager] = None
+"""运行时唯一的 TopicManager（由 Muika 构造时写入）。"""
+
+
+def get_topic_manager() -> Optional[TopicManager]:
+    """获取运行时 TopicManager 实例（未构造时返回 None）。"""
+    return _topic_manager
