@@ -1,48 +1,42 @@
 import re
 from pathlib import Path
+from typing import Optional
 
-import yaml
 from jinja2 import Environment, FileSystemLoader
 from jinja2.exceptions import TemplateNotFound
 
-from muika.utils.logger import logger
-
 from .model import PromptTemplatesData
 
-SEARCH_PATH = ["./templates", Path(__file__).parent.parent / "builtin_templates"]
+_BUILTIN_TEMPLATES_DIR = Path(__file__).parent.parent / "builtin_templates"
+SEARCH_PATH = ["./templates", _BUILTIN_TEMPLATES_DIR]
 
-TEMPLATES_CONFIG_PATH = Path("./configs/templates.yml")
 
-
-def load_templates_config() -> dict:
+def generate_prompt_from_template(
+    template_name: str,
+    templates_data: Optional[PromptTemplatesData] = None,
+) -> str:
     """
-    获取模板配置
-    """
-    if not TEMPLATES_CONFIG_PATH.exists():
-        return {}
-    try:
-        with open(TEMPLATES_CONFIG_PATH, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except yaml.YAMLError:
-        logger.warning("无法加载模板数据，请检查模板配置内容")
-        return {}
+    从指定模板渲染提示词
 
+    覆盖层 ``./templates`` 优先于包内 ``muika/builtin_templates``。
 
-def generate_prompt_from_template(template_name: str, templates_data: PromptTemplatesData) -> str:
-    """
-    获取提示词
-    """
-    env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
+    :param template_name: 模板文件名
+    :param templates_data: 渲染数据
 
+    :raises TemplateNotFound: 模板不存在
+    :raises RuntimeError: 模板渲染失败
+    """
     if not template_name.endswith((".j2", ".jinja2")):
         template_name += ".jinja2"
+
+    env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
+
+    render_data = templates_data.model_dump() if templates_data else {}
+
     try:
-        template = env.get_template(template_name)
+        prompt = env.get_template(template_name).render(render_data)
     except TemplateNotFound:
-        logger.error(f"模板文件 {template_name} 未找到!")
-        return ""
-
-    prompt = template.render(templates_data.model_dump())
-    prompt = re.sub(r"\n{3,}", "\n\n", prompt).strip()  # 将连续的换行符压缩为两个换行符
-
-    return prompt
+        raise
+    except Exception as e:
+        raise RuntimeError(f"模板 {template_name} 渲染失败: {e}") from e
+    return re.sub(r"\n{3,}", "\n\n", prompt).strip()

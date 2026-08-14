@@ -42,7 +42,6 @@ from muika.plugin.func_call._context import (
 )
 from muika.plugin.skills import get_skill_manager
 from muika.template.loader import generate_prompt_from_template
-from muika.template.model import PromptTemplatesData
 from muika.utils.logger import logger
 
 ENABLE_MCP = Path("./configs/mcp.json").exists()
@@ -219,9 +218,8 @@ class ButlerAgent:
         set_butler_context(state, executor)
         try:
             # 组装系统提示（Muika 的行动半身模板），注入可用技能列表
-            system = generate_prompt_from_template(
-                mas_config.agent_template, PromptTemplatesData(event_type="agent_called", state=state)
-            )
+            system = generate_prompt_from_template(mas_config.agent_template)
+
             skills_section = self._skill_manager.render_prompt_section()
             if skills_section:
                 system += f"\n\n{skills_section}"
