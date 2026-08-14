@@ -12,7 +12,7 @@ from typing import Callable, List, Optional
 import yaml as yaml_
 from pydantic import ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import FileMovedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
@@ -22,16 +22,20 @@ from .llm import ModelConfig
 
 MODELS_CONFIG_PATH = Path("configs/models.yml").resolve()
 
-BUILTIN_SKILLS_PATH = Path("configs/skills").resolve()
-"""内置技能目录，始终会被扫描"""
+BUILTIN_SKILLS_PATH = Path(__file__).parent / "builtin_skills"
+"""内置技能目录"""
+
+SKILLS_PATH = Path("configs/skills").resolve()
+"""用户项目级技能目录"""
 
 USER_SKILL_PATHS = (Path.home() / ".agents" / "skills", Path.home() / ".claude" / "skills")
-"""用户级技能目录，仅在 load_user_skills 启用时扫描"""
+"""用户全局技能目录，仅在 load_user_skills 启用时扫描"""
 
 _model_config_manager: Optional["ModelConfigManager"] = None
 
 
 class MASConfig(BaseSettings):
+    # 主设置
     master_id: str = ""
     """对话目标ID。"""
     max_memory_records: int = 100
@@ -41,56 +45,69 @@ class MASConfig(BaseSettings):
     agent_template: str = "Muika.agent.jinja2"
     """行动半身（Agent）模板：Muika 执行 <agent>...</agent> 内联命令时的系统提示"""
 
-    input_timeout: int = 0
-    """输入等待时间"""
-    enable_embedding_cache: bool = True
-    """启用嵌入缓存"""
-
-    log_level: str = "INFO"
-    """日志等级"""
-    mas_log_only: bool = False
-    """仅输出 MAS 相关日志（不输出 NoneBot 核心日志）"""
-    telegram_proxy: Optional[str] = None
-    """telegram代理，这个配置项用于获取图片时使用"""
-
+    # Agent 模型设置
     butler_model: Optional[str] = None
     """管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
     session_summarize_model: Optional[str] = None
     """会话总结 Agent 所用模型的配置名，建议使用与核心模型相同型号或其量化版本。留空则使用管家模型"""
-
-    fs_allowed_paths: List[str] = []
-    """文件操作白名单目录列表。空列表时文件系统工具全部禁用。
-    示例: ["D:/Documents", "D:/Downloads"]"""
-
-    enable_file_write: bool = False
-    """开启文件写入/删除操作（Tier 2）。需同时在 fs_allowed_paths 中声明目标目录。"""
-
-    enable_code_execution: bool = False
-    """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
-
-    enable_shell_execution: bool = False
-    """开启 Shell 命令执行（PowerShell/Bash/Cmd）。存在一定安全风险，请确认后再启用。"""
-
     load_user_skills: bool = False
-    """是否额外扫描用户级技能目录（~/.agents/skills 与 ~/.claude/skills）。
-    内置技能目录 configs/skills 始终会被扫描。"""
+    """是否加载用户文件夹中的技能（~/.agents/skills 与 ~/.claude/skills）"""
 
+    # WebSocket 服务器设置
     core_ws_url: str = "ws://127.0.0.1:8765/ws"
     """Core 进程的 WebSocket 地址。Bot 通过此地址连接 Core。"""
+    ipc_secret: str = ""
+    """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
+    留空时 Core 启动会自动生成并写入 .env 文件。"""
 
-    data_dir: Path = Path("./data")
-    """数据目录路径，用于存储连接记录等运行时数据。默认为当前工作目录。"""
-
-    plugins_dir: str = "plugins"
-    """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
-
+    # Bot 适配器设置
+    input_timeout: int = 0
+    """输入等待时间"""
+    telegram_proxy: Optional[str] = None
+    """telegram代理，这个配置项用于获取图片时使用"""
     client_name: str = ""
     """适配器唯一名称。用于多适配器场景下标识当前 Bot 实例的身份。
     例如 ``"qq-desktop"``, ``"qq-phone"``。留空时自动分配。"""
 
-    ipc_secret: str = ""
-    """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
-    留空时 Core 启动会自动生成并写入 .env 文件。"""
+    # 日志设置
+    log_level: str = "INFO"
+    """日志等级"""
+    mas_log_only: bool = False
+    """仅输出 MAS 相关日志"""
+
+    # 操作系统能力
+    fs_allowed_paths: List[str] = []
+    """文件操作白名单目录列表。空列表时文件系统工具全部禁用。
+    示例: ["D:/Documents", "D:/Downloads"]"""
+    enable_file_write: bool = False
+    """开启文件写入/删除操作。需同时在 fs_allowed_paths 中声明目标目录。"""
+    enable_code_execution: bool = False
+    """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
+    enable_shell_execution: bool = False
+    """开启 Shell 命令执行（PowerShell/Bash/Cmd）。存在一定安全风险，请确认后再启用。"""
+
+    data_dir: Path = Path("./data")
+    """数据目录路径，用于存储连接记录等运行时数据。默认为当前工作目录。"""
+    plugins_dir: str = "plugins"
+    """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
+
+    # 自我迭代能力
+    enable_self_modification: bool = True
+    """开启 Muika 的自我迭代能力（L1 内容层）。关闭时 self_* 工具全部禁用。"""
+    enable_plugin_self_modification: bool = False
+    """开启后自我编辑沙箱追加 plugins/ 目录，允许 Muika 编写/修改自己的插件（L2 能力层）。"""
+    enable_plugin_hot_reload: bool = True
+    """（Phase 3 预留）开启 plugins/ 目录热重载监听：新增/修改的插件自动加载或重载。"""
+    plugin_import_blacklist: List[str] = ["subprocess", "socket", "ctypes", "multiprocessing", "shutil"]
+    """（Phase 4 预留）自写插件静态检查的顶层 import 黑名单模块名。"""
+    enable_core_proposals: bool = False
+    """（Phase 5 预留）开启 core 代码变更提案工具（L3 代码层）。"""
+    enable_auto_reflection: bool = True
+    """（Phase 2 预留）开启 session 结束时的自动自省（概率触发、带冷却）。"""
+    reflection_cooldown_hours: int = 24
+    """（Phase 2 预留）自动自省的最小间隔（小时）。"""
+    self_mod_backup_dir: str = "./data/self_modifications"
+    """自我修改备份目录。每次 self_write 前旧文件会被备份到此处。"""
 
     @field_validator("master_id")
     def validate_master_id(cls, v):
@@ -147,7 +164,12 @@ mas_config = MASConfig()
 
 
 class ConfigFileHandler(FileSystemEventHandler):
-    """配置文件变化处理器"""
+    """配置文件变化处理器。
+
+    同时响应 modified / created / moved 事件——原子替换（写临时文件后
+    ``os.replace``）在部分平台上表现为 created/moved 而非 modified。
+    冷却窗口内的事件不会被丢弃，而是安排一次延迟复查，保证最终状态不丢失。
+    """
 
     def __init__(self, path: Path, callback: Callable):
         self.path = path
@@ -155,15 +177,48 @@ class ConfigFileHandler(FileSystemEventHandler):
         self.last_modified = time.time()
         # 防止一次修改触发多次回调
         self.cooldown = 1  # 冷却时间（秒）
+        self._pending_timer: Optional[threading.Timer] = None
 
-    def on_modified(self, event):
-        if not os.path.samefile(event.src_path, self.path):
+    def _fire_if_match(self, event) -> None:
+        """当事件目标即被监听文件时，按冷却窗口触发一次回调。"""
+        target = event.dest_path if isinstance(event, FileMovedEvent) else event.src_path
+        try:
+            if not os.path.exists(target) or not os.path.samefile(target, self.path):
+                return
+        except OSError:
             return
 
         current_time = time.time()
         if current_time - self.last_modified > self.cooldown:
             self.last_modified = current_time
+            self._cancel_pending()
             self.callback()
+        elif self._pending_timer is None:
+            # 冷却期内的重复事件：延迟到窗口结束后复查一次，避免丢失最终状态
+            delay = self.cooldown - (current_time - self.last_modified) + 0.05
+            self._pending_timer = threading.Timer(delay, self._delayed_fire)
+            self._pending_timer.daemon = True
+            self._pending_timer.start()
+
+    def _delayed_fire(self) -> None:
+        """冷却窗口结束后的复查回调。"""
+        self._pending_timer = None
+        self.last_modified = time.time()
+        self.callback()
+
+    def _cancel_pending(self) -> None:
+        if self._pending_timer is not None:
+            self._pending_timer.cancel()
+            self._pending_timer = None
+
+    def on_modified(self, event):
+        self._fire_if_match(event)
+
+    def on_created(self, event):
+        self._fire_if_match(event)
+
+    def on_moved(self, event):
+        self._fire_if_match(event)
 
 
 class ModelConfigManager:

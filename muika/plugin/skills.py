@@ -13,7 +13,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
-from muika.config import BUILTIN_SKILLS_PATH, USER_SKILL_PATHS, mas_config
+from muika.config import BUILTIN_SKILLS_PATH, SKILLS_PATH, USER_SKILL_PATHS, mas_config
 from muika.utils.logger import logger
 
 _SKILL_FILENAME = "SKILL.md"
@@ -166,7 +166,7 @@ class SkillManager:
 
     def _skill_roots(self) -> list[Path]:
         """按优先级从低到高返回技能根目录（用户目录在后，扫描时覆盖内置同名技能）"""
-        roots = [BUILTIN_SKILLS_PATH]
+        roots = [BUILTIN_SKILLS_PATH, SKILLS_PATH]
         if mas_config.load_user_skills:
             roots.extend(USER_SKILL_PATHS)
         return roots
