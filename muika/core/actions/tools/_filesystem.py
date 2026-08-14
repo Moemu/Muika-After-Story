@@ -24,7 +24,7 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
     allowed = [Path(p).resolve() for p in mas_config.fs_allowed_paths]
 
     if not allowed:
-        raise _FSError("File system tools are disabled: FS_ALLOWED_PATHS is empty.")
+        raise _FSError("File system tools are disabled by configuration.")
 
     try:
         resolved = Path(raw_path).resolve()
@@ -38,7 +38,7 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
         )
 
     if require_write and not mas_config.enable_file_write:
-        raise _FSError("File write/delete is disabled. Set ENABLE_FILE_WRITE=true to enable.")
+        raise _FSError("File write/delete is disabled by configuration.")
 
     return resolved
 
@@ -59,7 +59,7 @@ class ListDirectoryParams(BaseModel):
 )
 async def list_directory(path: str, show_hidden: bool = False):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled: FS_ALLOWED_PATHS is empty."
+        return "File system tools are disabled by configuration."
 
     try:
         resolved = _resolve_and_check(path)
@@ -113,7 +113,7 @@ class ReadFileParams(BaseModel):
 )
 async def read_file(path: str, encoding: str = "utf-8", max_chars: int = 4000):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled: FS_ALLOWED_PATHS is empty."
+        return "File system tools are disabled by configuration."
 
     try:
         resolved = _resolve_and_check(path)
@@ -141,7 +141,7 @@ async def read_file(path: str, encoding: str = "utf-8", max_chars: int = 4000):
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — Write operations (requires ENABLE_FILE_WRITE=true)
+# Tier 2 — Write operations (requires file-write permission)
 # ---------------------------------------------------------------------------
 
 
@@ -156,14 +156,15 @@ class WriteFileParams(BaseModel):
 
 
 @on_function_call(
-    "Write or append text content to a file within the allowed paths. " "Requires ENABLE_FILE_WRITE=true.",
+    "Write or append text content to a file within the allowed paths. "
+    "Requires file-write permission enabled by the operator.",
     params=WriteFileParams,
 )
 async def write_file(path: str, content: str, write_mode: str = "overwrite", encoding: str = "utf-8"):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled: FS_ALLOWED_PATHS is empty."
+        return "File system tools are disabled by configuration."
     if not mas_config.enable_file_write:
-        return "File write/delete is disabled. Set ENABLE_FILE_WRITE=true to enable."
+        return "File write/delete is disabled by configuration."
 
     try:
         resolved = _resolve_and_check(path, require_write=True)
@@ -219,7 +220,8 @@ class EditFileParams(BaseModel):
 
 
 @on_function_call(
-    "Edit an existing text file within the allowed paths using precise operations. " "Requires ENABLE_FILE_WRITE=true.",
+    "Edit an existing text file within the allowed paths using precise operations. "
+    "Requires file-write permission enabled by the operator.",
     params=EditFileParams,
 )
 async def edit_file(
@@ -233,9 +235,9 @@ async def edit_file(
     encoding: str = "utf-8",
 ):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled: FS_ALLOWED_PATHS is empty."
+        return "File system tools are disabled by configuration."
     if not mas_config.enable_file_write:
-        return "File write/delete is disabled. Set ENABLE_FILE_WRITE=true to enable."
+        return "File write/delete is disabled by configuration."
 
     try:
         resolved = _resolve_and_check(path, require_write=True)
@@ -307,9 +309,17 @@ def _apply_edit(
             raise ValueError("line_start must be ≥ 1 and ≤ line_end.")
         lines = text.splitlines(keepends=True)
         total = len(lines)
-        start_idx = min(line_start - 1, total)
+        if line_start > total:
+            raise ValueError(f"line_start ({line_start}) exceeds total lines ({total}); nothing to delete.")
+        start_idx = line_start - 1
         end_idx = min(line_end, total)
         del lines[start_idx:end_idx]
+        if line_end > total:
+            raise ValueError(
+                f"Only {total - start_idx} line(s) were available to delete "
+                f"(line_end={line_end} exceeds total={total}). "
+                f"Deleted the available range; check the file first."
+            )
         return "".join(lines)
 
     raise ValueError(f"Unknown operation: {operation!r}")
@@ -321,14 +331,14 @@ class DeleteFileParams(BaseModel):
 
 @on_function_call(
     "Permanently delete a single file within the allowed paths. "
-    "Requires ENABLE_FILE_WRITE=true. This action is irreversible.",
+    "Requires file-write permission enabled by the operator. This action is irreversible.",
     params=DeleteFileParams,
 )
 async def delete_file(path: str):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled: FS_ALLOWED_PATHS is empty."
+        return "File system tools are disabled by configuration."
     if not mas_config.enable_file_write:
-        return "File write/delete is disabled. Set ENABLE_FILE_WRITE=true to enable."
+        return "File write/delete is disabled by configuration."
 
     try:
         resolved = _resolve_and_check(path, require_write=True)

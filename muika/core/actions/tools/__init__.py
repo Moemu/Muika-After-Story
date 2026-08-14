@@ -4,6 +4,8 @@ from . import (  # noqa: F401
     _filesystem,
     _info,
     _memory,
+    _self_edit,
     _skill,
     _system,
+    _topics,
 )
