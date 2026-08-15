@@ -17,9 +17,9 @@ class UsageORM:
     @staticmethod
     async def get_usage(
         session: AsyncSession,
-        plugin: Optional[str],
-        date: Optional[str],
-        model: Optional[str],
+        plugin: Optional[str] = None,
+        date: Optional[str] = None,
+        model: Optional[str] = None,
         type: Optional[Literal["chat", "embedding"]] = None,
     ) -> int:
         """
