@@ -82,7 +82,7 @@ async def test_generate_reply_user_message_prompt(fake_llm_factory):
         result = await brain.generate_reply(_user_event(), MuikaState(), _memory())
     req = fake.requests[0]
     assert req.prompt.startswith("["), req.prompt
-    assert req.prompt.endswith("] User said: 'hello'"), req.prompt
+    assert req.prompt.endswith("] [User] hello"), req.prompt
     assert req.system == "SYSTEM"
     assert result == "Hi!"
 
@@ -167,7 +167,9 @@ async def test_generate_reply_time_tick_lonely_prompt(fake_llm_factory):
     state = MuikaState(loneliness=0.9)  # mood 为派生属性，由孤独感驱动
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(TimeTickEvent(), state, _memory())
-    assert "loneliness lingers" in fake.requests[0].prompt
+    req = fake.requests[0]
+    assert "loneliness lingers" in req.prompt
+    assert "[System]" in req.prompt
 
 
 async def test_generate_reply_timeout_prompt(fake_llm_factory):

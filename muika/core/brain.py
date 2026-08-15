@@ -244,29 +244,38 @@ class MuikaBrain:
 
         # Construct the immediate event context if it's the start of the interaction
         if event.type == "user_message":
-            prompt = f"User said: '{event.payload.message.message}'"
+            prompt = f"[User] {event.payload.message.message}"
         elif event.type == "time_tick":
             if state.mood == "lonely":
-                prompt = "A quiet moment passed, but the loneliness lingers. You need to use some means to attract users' attention."
+                prompt = (
+                    "[System] A quiet moment passed, but the loneliness lingers. "
+                    "You need to use some means to attract users' attention."
+                )
             elif state.mood == "bored":
-                prompt = "A quiet moment passed, but the boredom persists. Perhaps you can actively explore the user's computer or let your Agent alter-ego fetch some news"
+                prompt = (
+                    "[System] A quiet moment passed, but the boredom persists. "
+                    "Perhaps you can actively explore the user's computer or let your Agent alter-ego fetch some news"
+                )
             else:
-                prompt = "A quiet moment passed."
+                prompt = "[System] A quiet moment passed."
         elif event.type == "scheduled_trigger":
-            prompt = f"A scheduled reminder just went off: '{event.payload.what}'"
+            prompt = f"[System] A scheduled reminder just went off: '{event.payload.what}'"
         elif event.type == "timeout":
             wait = format_duration(event.duration)
             elapsed = format_duration((datetime.now() - event.set_at).total_seconds())
             prompt = (
-                f"The wait you set for the user's reply ({wait}) has passed — "
+                f"[System] The wait you set for the user's reply ({wait}) has passed — "
                 f"you have been waiting for about {elapsed} now. Consider reminding the user, or seeing what they are doing?"
             )
         elif event.type == "session_bootstrap":
-            prompt = "A new session has just started. Greet the user."
+            prompt = "[System] A new session has just started. Greet the user."
         elif event.type == "adapter_online":
-            prompt = f"The user just connected a new chat platform adapter for you: {event.adapter}, perhaps you can try chatting with the user on this platform"
+            prompt = (
+                f"[System] The user just connected a new chat platform adapter for you: {event.adapter}, "
+                "perhaps you can try chatting with the user on this platform"
+            )
         else:
-            prompt = f"Event triggered: {event.type}"
+            prompt = f"[System] Event triggered: {event.type}"
 
         # 内化当前时间：每轮 prompt 统一带时间戳前缀，替代 system 中的 current_time，
         # 使 system prompt 保持字节级稳定以利前缀缓存。
