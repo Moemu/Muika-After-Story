@@ -352,8 +352,8 @@ class CoreWsServer:
             result = await handler(data, adapter)
             if result is not None:
                 await self.send_to_bot(result, target=client_name)
-        except Exception:
-            logger.exception(f"[CoreWsServer] Handler for type={msg_type!r} raised")
+        except Exception as exc:
+            logger.error(f"[CoreWsServer] Handler for type={msg_type!r} raised: {exc}")
             await self.send_to_bot(
                 ErrorMessage(
                     message=f"Internal error handling {msg_type!r}",

@@ -87,6 +87,8 @@ def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]
                 module_name = path_to_module_name(plugin_path.with_suffix(""), base_path)
             elif plugin_path.is_dir() and (plugin_path / Path("__init__.py")).exists():
                 module_name = path_to_module_name(plugin_path, base_path)
+            elif plugin_path.is_dir() and (plugin_path / plugin_path.name.lower().replace("-", "_")).exists():
+                module_name = path_to_module_name(plugin_path / plugin_path.name.lower().replace("-", "_"), base_path)
             if module_name and (loaded_plugin := load_plugin(module_name)):
                 plugins.add(loaded_plugin)
 
