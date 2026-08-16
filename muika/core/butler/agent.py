@@ -37,7 +37,7 @@ from muika.models import Resource
 from muika.plugin.func_call import get_function_list
 from muika.plugin.func_call._context import (
     clear_butler_context,
-    get_resources,
+    pop_resources,
     set_butler_context,
 )
 from muika.plugin.skills import get_skill_manager
@@ -246,7 +246,7 @@ class ButlerAgent:
                 return (f"I encountered an error while executing the command: {e}", [])
 
             # 收集工具执行过程中产生的资源（图片等）
-            resources = get_resources()
+            resources = pop_resources()
 
             if report:
                 logger.info(f"[Butler] Report ready ({len(report)} chars): {report[:120]!r}")

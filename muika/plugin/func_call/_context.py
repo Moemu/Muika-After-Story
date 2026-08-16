@@ -35,10 +35,10 @@ def add_resource(resource: Resource) -> None:
         ctx["resources"].append(resource)
 
 
-def get_resources() -> list[Resource]:
+def pop_resources() -> list[Resource]:
     """获取当前 Butler 上下文中收集的所有资源"""
     ctx = _butler_context.get()
-    return ctx["resources"] if ctx else []
+    return ctx.pop("resources", []) if ctx else []
 
 
 def set_butler_context(state: MuikaState, executor: Executor) -> None:

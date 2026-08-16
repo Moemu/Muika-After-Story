@@ -12,8 +12,7 @@ from typing import Literal, Optional
 from muika.config import mas_config
 from muika.ipc.server import AdapterInfo
 from muika.plugin.func_call._context import (
-    clear_butler_context,
-    get_resources,
+    pop_resources,
     set_butler_context,
 )
 from muika.utils.logger import logger
@@ -89,6 +88,7 @@ class Muika:
         self._god_mode: bool = False
 
         asyncio.create_task(self.memory.load())
+        set_butler_context(self.state, self.executor)
 
     async def collect_events(self) -> Event:
         """Wait for the next event from the queue, or emit a time_tick on timeout."""
@@ -226,7 +226,7 @@ class Muika:
             if self.state.active_topic is not None:
                 last_activity = max(last_activity, self.state.active_topic.started_at)
             idle_seconds = (datetime.now() - last_activity).total_seconds()
-            if idle_seconds >= SESSION_IDLE_TIMEOUT:
+            if idle_seconds >= SESSION_IDLE_TIMEOUT and not self._timeout_task:
                 logger.info(f"[Loop] Session idle for {idle_seconds / 60:.1f} min -- triggering session end.")
                 self._session_end_triggered = True
                 await self.create_event(SessionEndEvent())
@@ -360,31 +360,6 @@ class Muika:
             preferences=all_prefs,
         )
 
-    async def _brain_reply(
-        self,
-        event: Event,
-        injected_preferences: list,
-        god_mode: bool,
-    ) -> tuple[str, list]:
-        """调用主脑生成回复；挂 Butler 上下文供直接工具调用，返回 (reply, resources)。
-
-        *god_mode* 为真时主脑会注入完整工具列表（组装逻辑在 brain.py），Muika 可在
-        回复中直接发起函数调用；始终在工具执行期间提供 state/executor 上下文并收集资源。
-        """
-        set_butler_context(self.state, self.executor)
-        try:
-            reply = await self.brain.generate_reply(
-                event=event,
-                state=self.state,
-                memory=self.memory,
-                injected_preferences=injected_preferences or None,
-                adapters=self.current_adapters,
-                god_mode=god_mode,
-            )
-            return reply, get_resources()
-        finally:
-            clear_butler_context()
-
     async def _run_brain_pipeline(
         self,
         event: Event,
@@ -396,7 +371,14 @@ class Muika:
             logger.debug(
                 f"[Brain] turn {loop_idx + 1}/{max_inner_loops} " f"| history_len={len(self.memory.recent_turns)}"
             )
-            reply, direct_resources = await self._brain_reply(event, injected_preferences, self._god_mode)
+            reply = await self.brain.generate_reply(
+                event=event,
+                state=self.state,
+                memory=self.memory,
+                injected_preferences=injected_preferences or None,
+                adapters=self.current_adapters,
+            )
+            resources = pop_resources()
 
             # 发送前只负责提取用户可见文本与路由目标，标签处理统一下移到发送之后
             parsed = self._parse_reply_tags(reply)
@@ -418,7 +400,7 @@ class Muika:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
                 await self.executor.send_message(parsed.clean_reply, target=parsed.target)
 
-            self.memory.add_context("muika", reply, resources=direct_resources)
+            self.memory.add_context("muika", reply, resources=resources)
 
             if god_mode_just_enabled:
                 self.memory.add_context("agent", "God mode enabled.")
