@@ -40,6 +40,11 @@ _OUTCOME_RE = re.compile(r"\[REFLECTION_OUTCOME\]\s*(.+)")
 MAX_SUMMARIES = 8
 
 
+def _now() -> datetime:
+    """当前时间钩子；测试可 patch 此函数以控制时间。"""
+    return datetime.now()
+
+
 def _in_night_window(now: datetime) -> bool:
     """判断当前小时是否落在夜间窗口内（跨午夜）。"""
     h = now.hour
@@ -84,7 +89,7 @@ class ReflectionAgent:
             logger.debug("[Reflection] skipped: self-mod or auto-reflection disabled")
             return
 
-        now = datetime.now()
+        now = _now()
         if not _in_night_window(now):
             logger.debug(f"[Reflection] skipped: not in night window ({now:%H:%M})")
             return
@@ -184,7 +189,7 @@ class ReflectionAgent:
             after_id = after_record.id if after_record else 0
 
         changed = after_id > before_id
-        now = datetime.now()
+        now = _now()
 
         # 恒写冷却锚点（CORE:SELF 层，天然持久化）
         await self._memory.upsert_memory(
