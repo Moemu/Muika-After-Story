@@ -251,6 +251,15 @@ class TopicHistoryCRUD:
         session.add(entry)
         return entry
 
+    @staticmethod
+    async def list_all(
+        session: AsyncSession,
+        limit: int = 20,
+    ) -> list[TopicHistoryORM]:
+        """按 use_count 降序返回最近的话题历史，供自省统计。"""
+        result = await session.execute(select(TopicHistoryORM).order_by(TopicHistoryORM.use_count.desc()).limit(limit))
+        return list(result.scalars().all())
+
 
 class SelfModificationCRUD:
     """自我修改审计日志的持久化操作。"""

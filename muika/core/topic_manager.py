@@ -243,6 +243,34 @@ class TopicManager:
         except Exception as e:
             logger.error(f"[TopicManager] Failed to record topic history for {topic_id!r}: {e}")
 
+    async def get_engagement_stats(self, top_n: int = 10) -> str:
+        """返回 Top-N 话题的互动统计文本，供自省使用。
+
+        格式：每行 ``- topic_id (category): used Nx, engaged Mx (P%)``
+        空/异常时返回占位文本。
+        """
+        try:
+            async with get_session() as db_session:
+                records = await TopicHistoryCRUD.list_all(db_session, limit=top_n)
+        except Exception as e:
+            logger.error(f"[TopicManager] get_engagement_stats failed: {e}")
+            return "(no topic history available)"
+
+        if not records:
+            return "(no topic history available)"
+
+        topic_to_category: dict[str, str] = {}
+        for category in self.store.categories():
+            for topic in self.store.get_by_category(category):
+                topic_to_category[topic.id] = category
+
+        lines: list[str] = []
+        for r in records:
+            category = topic_to_category.get(r.topic_id, "unknown")
+            rate = (r.engaged_count / r.use_count * 100) if r.use_count > 0 else 0.0
+            lines.append(f"- {r.topic_id} ({category}): used {r.use_count}x, engaged {r.engaged_count}x ({rate:.0f}%)")
+        return "\n".join(lines)
+
 
 _topic_manager: Optional[TopicManager] = None
 """运行时唯一的 TopicManager（由 Muika 构造时写入）。"""
