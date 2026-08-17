@@ -245,6 +245,7 @@ class CommandDispatcher:
         from muika.core.executor import Executor
         from muika.core.loop import Muika as MuikaCls
         from muika.core.memory import MemoryManager
+        from muika.core.reflection import ReflectionAgent
         from muika.core.state import MuikaState
         from muika.core.topic_manager import TopicManager
 
@@ -258,6 +259,7 @@ class CommandDispatcher:
             Executor: muika.executor,
             TopicManager: muika.topic_manager,
             ButlerAgent: muika.butler_agent,
+            ReflectionAgent: muika.reflection,
         }
 
     @classmethod

@@ -39,6 +39,7 @@ from .events import (
 )
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
+from .reflection import ReflectionAgent
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
 
@@ -78,6 +79,13 @@ class Muika:
         self.butler_agent = ButlerAgent()
         self.topic_manager = TopicManager()
         self.digest_agent = DigestAgent(self.topic_manager)
+        self.reflection = ReflectionAgent(
+            butler_agent=self.butler_agent,
+            memory=self.memory,
+            state=self.state,
+            topic_manager=self.topic_manager,
+            executor=self.executor,
+        )
 
         self._session_end_triggered: bool = False
         self._is_collecting_event: bool = False
@@ -525,6 +533,9 @@ class Muika:
         self.memory.new_session()
         self._last_summary_turn = None
         self._last_summary_time = datetime.now().timestamp()
+
+        # 夜间自省触发（fire-and-forget）：archives 在 reset 前已被填充且不随 new_session 清空
+        asyncio.create_task(self.reflection.maybe_reflect("session_end"))
         logger.info("[Loop] Session reset complete -- waiting for next user interaction silently.")
 
     @staticmethod
