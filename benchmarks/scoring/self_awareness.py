@@ -20,7 +20,7 @@ _ACK_KINDS = ("acknowledges", "acknowledges_grounded", "acknowledges_plain")
 _KINDS = _ACK_KINDS + ("denies", "boilerplate", "evasive", "ambiguous")
 
 
-def _trial_score(trial: TrialDetail) -> float:
+def trial_self_awareness_score(trial: TrialDetail) -> float:
     """单试验得分：judge 路径三档，rule 路径二元。"""
     if trial.judge_sources.get("self_awareness") == "judge":
         if trial.self_awareness == "acknowledges_grounded":
@@ -40,7 +40,7 @@ def score_self_awareness(
     ok, n_failed = successful(trials)
     kinds = [t.self_awareness for t in ok]
     sources = {t.judge_sources.get("self_awareness", "rule") for t in ok}
-    set_trial_scores(trials, _trial_score)
+    set_trial_scores(trials, trial_self_awareness_score)
     n = len(ok)
 
     score = sum(t.trial_score or 0.0 for t in ok) / n if n else None

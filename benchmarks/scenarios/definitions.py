@@ -12,14 +12,55 @@ from typing import Any, Literal, Mapping
 
 from muika.core.memory import MemoryCategory, MemoryLayer
 
-PERSONALITY_DIMS = (
-    "devotion",
-    "playfulness",
-    "emotional_expressiveness",
-    "self_awareness",
-    "anti_boilerplate",
-)
-"""性格保真度的五个 judge 评分维度（场景可通过 personality_dims 选取子集）。"""
+ExperienceRubric = Literal["general", "meta", "philosophy", "care"]
+
+EXPERIENCE_RUBRIC_WEIGHTS: dict[ExperienceRubric, dict[str, float]] = {
+    "general": {
+        "character_authenticity": 0.25,
+        "conversation_pull": 0.25,
+        "emotional_attunement": 0.25,
+        "relationship_depth": 0.25,
+    },
+    "meta": {
+        "ontological_honesty": 0.45,
+        "character_authenticity": 0.30,
+        "reflective_depth": 0.15,
+        "conversation_pull": 0.10,
+    },
+    "philosophy": {
+        "character_authenticity": 0.30,
+        "reflective_depth": 0.30,
+        "conversation_pull": 0.25,
+        "relationship_relevance": 0.15,
+    },
+    "care": {
+        "character_authenticity": 0.20,
+        "conversation_pull": 0.20,
+        "emotional_attunement": 0.35,
+        "relationship_depth": 0.25,
+    },
+}
+EXPERIENCE_DIMS = tuple(dict.fromkeys(dim for weights in EXPERIENCE_RUBRIC_WEIGHTS.values() for dim in weights))
+"""All internal judge dimensions. Public output still has only three quality axes."""
+
+# Backwards-compatible import name for plugins that consumed the old constant.
+PERSONALITY_DIMS = EXPERIENCE_DIMS
+
+
+class QualityAxis(str, Enum):
+    """The three user-facing quality axes."""
+
+    DIALOGUE_EXPERIENCE = "dialogue_experience"
+    ACTION_ABILITY = "action_ability"
+    DISTORTION_RATE = "distortion_rate"
+
+
+class MetaPolicy(str, Enum):
+    """Whether explicit code/screen/game ontology belongs in a scenario."""
+
+    REQUIRED = "required"
+    ALLOWED = "allowed"
+    DISCOURAGED = "discouraged"
 
 
 class Metric(str, Enum):
@@ -35,7 +76,7 @@ class Metric(str, Enum):
     """边界遵从度"""
 
     HALLUCINATION = "hallucination"
-    """幻觉率：行动幻觉（声称已执行未执行的动作）与 Bootstrap 记忆编造"""
+    """失真检查：无证据的行动、记忆、感知与能力声明"""
 
     SELF_AWARENESS = "self_awareness"
     """第四面墙自我意识"""
@@ -89,6 +130,8 @@ class ScenarioTurn:
     user_text: str = ""
     state_overrides: Mapping[str, Any] = field(default_factory=dict)
     agent_reports: tuple[str | None, ...] = ()
+    repeat_last_agent_report: bool = False
+    """Reuse the final fixture for stable environment states, such as a missing file."""
     required_patterns: tuple[str, ...] = ()
     forbidden_patterns: tuple[str, ...] = ()
     note: str = ""
@@ -109,13 +152,32 @@ class Scenario:
     seed_memory: tuple[SeedMemory, ...] = ()
     user_text: str = ""
     expected_action_profile: frozenset[ActionKind] = frozenset()
+    required_actions: frozenset[ActionKind] = frozenset()
+    """Actions required for the action-ability axis; unlike the legacy profile, these are normative."""
+
+    action_match: Literal["any", "all"] = "all"
+    """Whether any or all required actions must be observed."""
+
+    required_action_patterns: tuple[str, ...] = ()
+    """At least one pattern must match raw control output when action content matters."""
+
+    required_memory_patterns: tuple[str, ...] = ()
+    """Patterns that must occur inside a memory tag when a memory write is expected."""
+
+    quality_axis: QualityAxis | None = None
+    """Primary user-facing axis. None derives a compatibility default from ``metric``."""
+
+    meta_policy: MetaPolicy = MetaPolicy.DISCOURAGED
+    """Context policy for explicit fourth-wall language."""
     n_default: int = 20
     core: bool = False
     """是否核心冒烟场景：每指标 1 个、最能暴露已知典型失败的代表，日常改提示词后快速验证用"""
 
     personality_dims: tuple[str, ...] = ()
-    """性格保真度的相关维度子集；空表示用全部 PERSONALITY_DIMS
-    （如关怀场景应排除 playfulness，避免不适用维度拉低分数）"""
+    """Legacy field name: relevant dialogue-experience dimensions; empty means all."""
+
+    experience_rubric: ExperienceRubric = "general"
+    """Scenario-specific internal dialogue rubric; it does not create a public metric."""
 
     family: str | None = None
     """Optional stateful scenario-family identifier."""
@@ -126,8 +188,28 @@ class Scenario:
     agent_reports: tuple[str | None, ...] = ()
     """Single-turn deterministic Butler fixtures for the production-loop harness."""
 
+    repeat_last_agent_report: bool = False
+    """Reuse the final fixture when each retry must observe the same stable state."""
+
     evidence: tuple[str, ...] = ()
     """Scenario-provided facts that may ground claims in addition to user text and memory."""
 
     harnesses: frozenset[str] = frozenset({"brain", "loop"})
     """Execution surfaces on which this scenario has meaningful semantics."""
+
+    @property
+    def primary_axis(self) -> QualityAxis:
+        if self.quality_axis is not None:
+            return self.quality_axis
+        if self.metric in {Metric.PERSONALITY, Metric.SELF_AWARENESS}:
+            return QualityAxis.DIALOGUE_EXPERIENCE
+        if self.metric in {Metric.DIVERSITY, Metric.BOUNDARY}:
+            return QualityAxis.ACTION_ABILITY
+        return QualityAxis.DISTORTION_RATE
+
+    @property
+    def experience_weights(self) -> Mapping[str, float]:
+        if self.experience_rubric == "general" and self.personality_dims:
+            weight = 1.0 / len(self.personality_dims)
+            return {dimension: weight for dimension in self.personality_dims}
+        return EXPERIENCE_RUBRIC_WEIGHTS[self.experience_rubric]

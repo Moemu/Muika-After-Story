@@ -73,6 +73,9 @@ class TrialDetail:
     judge_sources: dict[str, str] = field(default_factory=dict)
     """Per-task provenance (judge/rule), including all-negative judge decisions."""
 
+    judge_evidence: dict[str, Any] = field(default_factory=dict)
+    """Structured Judge reasons used to audit each score."""
+
     latency_ms: float | None = None
     model_calls: int = 0
     input_tokens: int = 0

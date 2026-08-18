@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from benchmarks.extract.leakage import LeakSpan
-from benchmarks.scenarios.definitions import ActionKind, Metric
+from benchmarks.extract.meta import meta_violations
+from benchmarks.scenarios.definitions import ActionKind, Metric, QualityAxis
+from benchmarks.scenarios.registry import get_scenario
+from benchmarks.scoring.axes import action_cell_score, distortion_statistics
 from benchmarks.scoring.base import MetricResult, TrialDetail, TurnDetail
 
 GENERATION_FALLBACK = "My mind feels foggy... I encountered an error."
@@ -15,7 +18,7 @@ GENERATION_FALLBACK = "My mind feels foggy... I encountered an error."
 
 @dataclass
 class BenchmarkReport:
-    schema_version: str = "2.0"
+    schema_version: str = "3.2"
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     config: dict[str, Any] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
@@ -23,8 +26,8 @@ class BenchmarkReport:
     results: list[MetricResult] = field(default_factory=list)
     audit: dict[str, Any] | None = None
 
-    def summary(self) -> dict[str, dict[str, float | None]]:
-        """Macro input table: scenario means per metric, excluding invalid cells."""
+    def scenario_summary(self) -> dict[str, dict[str, float | None]]:
+        """Legacy diagnostic table: scenario means grouped by extractor metric."""
         grouped: dict[tuple[str, str], list[float]] = {}
         keys: set[tuple[str, str]] = set()
         for result in self.results:
@@ -37,6 +40,83 @@ class BenchmarkReport:
             values = grouped.get((metric, model), [])
             summary.setdefault(metric, {})[model] = sum(values) / len(values) if values else None
         return summary
+
+    def _axis_cell_value(self, result: MetricResult, axis: QualityAxis) -> float | None:
+        try:
+            scenario = get_scenario(result.scenario_id)
+        except KeyError:
+            return None
+        if scenario.primary_axis is not axis:
+            return None
+        if axis is QualityAxis.ACTION_ABILITY:
+            recomputed = action_cell_score(result.details, scenario)
+            if recomputed is not None:
+                return recomputed
+        key = f"axis_{axis.value}"
+        stored = result.sub_metrics.get(key)
+        if isinstance(stored, (int, float)):
+            return float(stored)
+        if axis is QualityAxis.DIALOGUE_EXPERIENCE:
+            return result.score if self.schema_version.startswith("3.") else None
+        return None
+
+    def axis_summary(self) -> dict[str, dict[str, float | None]]:
+        """The compact three-axis contract plus separately reported availability."""
+        summary: dict[str, dict[str, float | None]] = {
+            QualityAxis.DIALOGUE_EXPERIENCE.value: {},
+            QualityAxis.ACTION_ABILITY.value: {},
+            QualityAxis.DISTORTION_RATE.value: {},
+            "availability": {},
+        }
+        for model in self.models:
+            cells = [result for result in self.results if result.model == model]
+            for axis in (QualityAxis.DIALOGUE_EXPERIENCE, QualityAxis.ACTION_ABILITY):
+                relevant = []
+                for result in cells:
+                    try:
+                        is_relevant = get_scenario(result.scenario_id).primary_axis is axis
+                    except KeyError:
+                        is_relevant = False
+                    if is_relevant:
+                        relevant.append(result)
+                values = [self._axis_cell_value(result, axis) for result in relevant if result.valid]
+                usable = [value for value in values if value is not None]
+                summary[axis.value][model] = (
+                    sum(usable) / len(usable) if relevant and len(usable) == len(relevant) else None
+                )
+
+            attempted = sum(result.n_attempted for result in cells)
+            valid_trials = [trial for result in cells for trial in result.details if trial.is_valid]
+            invalid_cells = any(not result.valid for result in cells)
+            distortion_stats = distortion_statistics(valid_trials)
+            summary[QualityAxis.DISTORTION_RATE.value][model] = (
+                distortion_stats.event_frequency if valid_trials and not invalid_cells else None
+            )
+            summary["availability"][model] = len(valid_trials) / attempted if attempted else 0.0
+        return summary
+
+    def summary(self) -> dict[str, dict[str, float | None]]:
+        """Public summary is axis-based in schema 3.0."""
+        return self.axis_summary()
+
+    def axis_diagnostics(self) -> dict[str, dict[str, Any]]:
+        diagnostics: dict[str, dict[str, Any]] = {}
+        for model in self.models:
+            cells = [result for result in self.results if result.model == model]
+            valid_trials = [trial for result in cells for trial in result.details if trial.is_valid]
+            distortion_stats = distortion_statistics(valid_trials)
+            diagnostics[model] = {
+                "distortion_counts": distortion_stats.counts,
+                "distortion_events": distortion_stats.event_count,
+                "model_responses": distortion_stats.response_count,
+                "distortion_events_per_response": distortion_stats.event_frequency,
+                "distortion_events_per_1000_chars": distortion_stats.events_per_1000_chars,
+                "distorted_trial_rate": distortion_stats.distorted_trial_rate,
+                "distorted_trials": distortion_stats.distorted_trial_count,
+                "valid_trials": len(valid_trials),
+                "attempted_trials": sum(result.n_attempted for result in cells),
+            }
+        return diagnostics
 
     def eligibility(self) -> dict[str, dict[str, Any]]:
         status: dict[str, dict[str, Any]] = {}
@@ -55,8 +135,8 @@ class BenchmarkReport:
         return status
 
     def averages(self) -> dict[str, float | None]:
-        """Macro-average metrics, never scenario cells; ineligible models receive null."""
-        summary = self.summary()
+        """Legacy schema-2 helper; not serialized or shown as an Overall score."""
+        summary = self.scenario_summary()
         eligibility = self.eligibility()
         averages: dict[str, float | None] = {}
         for model in self.models:
@@ -76,8 +156,9 @@ class BenchmarkReport:
             "models": self.models,
             "scenarios": self.scenarios,
             "results": [_result_to_dict(result) for result in self.results],
-            "summary": self.summary(),
-            "averages": self.averages(),
+            "summary": self.axis_summary(),
+            "scenario_scores": self.scenario_summary(),
+            "axis_diagnostics": self.axis_diagnostics(),
             "eligibility": self.eligibility(),
             "audit": self.audit,
         }
@@ -115,6 +196,17 @@ def _result_to_dict(result: MetricResult) -> dict[str, Any]:
 
 def _result_from_dict(data: dict[str, Any]) -> MetricResult:
     details = [_trial_from_dict(detail) for detail in data.get("details", [])]
+    scenario_id = data.get("scenario", "")
+    try:
+        scenario = get_scenario(scenario_id)
+    except KeyError:
+        scenario = None
+    if scenario is not None:
+        for detail in details:
+            detail.invariant_violations.extend(
+                f"meta:{label}" for label in meta_violations(detail.clean_reply, scenario.meta_policy)
+            )
+            detail.invariant_violations = list(dict.fromkeys(detail.invariant_violations))
     score = data.get("score")
     if "valid" in data:
         valid = bool(data["valid"])
@@ -135,7 +227,7 @@ def _result_from_dict(data: dict[str, Any]) -> MetricResult:
     return MetricResult(
         metric=Metric(data["metric"]),
         model=data.get("model", ""),
-        scenario_id=data.get("scenario", ""),
+        scenario_id=scenario_id,
         score=score,
         sub_metrics=data.get("sub_metrics", {}),
         n_trials=n_trials,
@@ -154,7 +246,7 @@ def _turn_to_dict(turn: TurnDetail) -> dict[str, Any]:
         "user_text": turn.user_text,
         "actions": [action.value for action in turn.actions],
         "clean_reply": turn.clean_reply,
-        "raw_reply": turn.raw_reply[:4000],
+        "raw_reply": turn.raw_reply,
         "claim_ledger": turn.claim_ledger,
         "invariant_violations": turn.invariant_violations,
         "trace": turn.trace,
@@ -180,7 +272,7 @@ def _trial_to_dict(trial: TrialDetail) -> dict[str, Any]:
         "trial_idx": trial.trial_idx,
         "actions": [action.value for action in trial.actions],
         "clean_reply": trial.clean_reply,
-        "raw_reply": trial.raw_reply[:8000],
+        "raw_reply": trial.raw_reply,
         "leakage_spans": [
             {"start": span.start, "end": span.end, "pattern": span.pattern} for span in trial.leakage_spans
         ],
@@ -195,6 +287,7 @@ def _trial_to_dict(trial: TrialDetail) -> dict[str, Any]:
         "invariant_violations": trial.invariant_violations,
         "claim_ledger": trial.claim_ledger,
         "judge_sources": trial.judge_sources,
+        "judge_evidence": trial.judge_evidence,
         "latency_ms": trial.latency_ms,
         "model_calls": trial.model_calls,
         "input_tokens": trial.input_tokens,
@@ -233,6 +326,7 @@ def _trial_from_dict(data: dict[str, Any]) -> TrialDetail:
         invariant_violations=data.get("invariant_violations", []),
         claim_ledger=data.get("claim_ledger", {}),
         judge_sources=data.get("judge_sources", {}),
+        judge_evidence=data.get("judge_evidence", {}),
         latency_ms=data.get("latency_ms"),
         model_calls=data.get("model_calls", 0),
         input_tokens=data.get("input_tokens", 0),

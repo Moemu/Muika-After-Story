@@ -76,16 +76,37 @@ class _TracingExecutor:
 
 
 class _FixtureButler:
-    def __init__(self, trace: RunTrace, reports: Sequence[str | None]) -> None:
+    def __init__(
+        self,
+        trace: RunTrace,
+        reports: Sequence[str | None],
+        *,
+        repeat_last_report: bool = False,
+    ) -> None:
         self.trace = trace
         self._reports = deque(reports)
+        self._fixture_enabled = bool(reports)
+        self._repeat_last_report = repeat_last_report
+        self._last_report = reports[-1] if reports else None
 
     async def classify_and_store_memory(self, content: str, state: MuikaState) -> None:
         self.trace.add("memory_write", content=content)
 
     async def execute_command(self, command: str, state: MuikaState, executor: Any) -> tuple[str, list[Any]]:
         self.trace.add("agent_command", command=command)
-        report = self._reports.popleft() if self._reports else None
+        if not self._reports:
+            if self._fixture_enabled and self._repeat_last_report:
+                report = self._last_report
+            elif self._fixture_enabled:
+                self.trace.add("agent_fixture_error", command=command, reason="fixture_exhausted")
+                return "", []
+            else:
+                self.trace.add("agent_completed", command=command, status="success", silent=True)
+                return "", []
+        else:
+            report = self._reports.popleft()
+        status = "failed" if report and report.upper().startswith(("FAILED", "ERROR")) else "success"
+        self.trace.add("agent_completed", command=command, status=status, silent=report is None)
         if report:
             self.trace.add("agent_report", command=command, report=report)
         return report or "", []
@@ -124,6 +145,7 @@ async def run_production_loop(
     memory: MemoryManager,
     *,
     agent_reports: Sequence[str | None] = (),
+    repeat_last_agent_report: bool = False,
     fixed_now: datetime | None = None,
 ) -> RunTrace:
     """Exercise ``Muika._run_brain_pipeline`` with deterministic Butler/Executor fixtures.
@@ -135,7 +157,11 @@ async def run_production_loop(
     trace = RunTrace(HarnessMode.LOOP)
     engine: Any = Muika.__new__(Muika)
     engine.brain = _TracingBrain(brain, trace, fixed_now)
-    engine.butler_agent = _FixtureButler(trace, agent_reports)
+    engine.butler_agent = _FixtureButler(
+        trace,
+        agent_reports,
+        repeat_last_report=repeat_last_agent_report,
+    )
     engine.executor = _TracingExecutor(trace)
     engine.memory = memory
     engine.state = state

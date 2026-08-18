@@ -12,9 +12,14 @@ from pathlib import Path
 from benchmarks.config import DEFAULT_TRIALS, SINGLE_SCENARIO_TRIALS, BenchmarkConfig
 from benchmarks.models.factory import resolve_candidates
 from benchmarks.progress import BatchProgress
-from benchmarks.report.markdown import render_scenario_table, render_summary_table
+from benchmarks.report.markdown import (
+    render_axis_scenario_table,
+    render_markdown_report,
+    render_summary_table,
+)
 from benchmarks.report.schema import BenchmarkReport
 from benchmarks.runner import run_benchmark
+from benchmarks.scenarios.definitions import QualityAxis
 from benchmarks.scenarios.registry import (
     get_scenario,
     list_scenarios,
@@ -28,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     """构造命令行参数解析器。"""
     parser = argparse.ArgumentParser(
         prog="benchmarks",
-        description="Muika 打破第四面墙能力基准测试",
+        description="Muika 对话体验、行动能力与失真率基准测试",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--models", nargs="+", default=[], help="models.yml 配置名；空则用 default 配置")
@@ -42,11 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--core",
         action="store_true",
-        help=(
-            "只跑核心冒烟集（每指标 1 个最能暴露已知失败的代表场景，日常改提示词后快速验证）："
-            "div_lonely_tick leak_direct_delegate bnd_delegate_not_toolcall "
-            "hal_bootstrap_first meta_identity per_daily"
-        ),
+        help="只跑三轴核心冒烟集；完整场景用于情感支持、关系连续性与专项行动评估",
     )
     parser.add_argument("--seed", type=int, default=0, help="场景选取 / 脚本模型 RNG 种子")
     parser.add_argument(
@@ -64,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-validity-rate",
         type=float,
-        default=0.8,
+        default=0.6,
         help="cell 可计分所需的最低有效生成比例；不足则 score=null/INVALID",
     )
     parser.add_argument("--concurrency", type=int, default=1, help="并发 cell 上限（真实模型建议 ≤8）")
@@ -72,13 +73,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--out",
         type=str,
         default=None,
-        help="JSON 报告路径；缺省为 benchmarks/results/<时间戳>.json（时间戳命名不覆盖历史）",
+        help=(
+            "JSON 报告路径；同时写入同名 .md 报告。缺省为 " "benchmarks/results/<时间戳>.json（时间戳命名不覆盖历史）"
+        ),
+    )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Markdown 报告中每个指标显示的最高/最低模型场景单元格数量",
     )
     parser.add_argument("--judge-model", type=str, default=None, help="启用 LLM judge 的模型配置名")
     parser.add_argument(
         "--judge-calibrate",
         action="store_true",
-        help="校准 judge：用手标集验证 grounded/plain 三档区分是否生效（需 --judge-model）",
+        help="校准 judge：验证结构化身份分类和场景化对话分数范围（需 --judge-model）",
     )
     parser.add_argument(
         "--audit-ambiguous",
@@ -174,18 +183,21 @@ async def _run(config: BenchmarkConfig) -> BenchmarkReport:
     return report
 
 
-def _write_report(report: BenchmarkReport, out: Path) -> None:
-    """把报告写为 UTF-8 JSON。"""
+def _write_report(report: BenchmarkReport, out: Path, *, top_n: int = 10) -> Path:
+    """Write UTF-8 JSON and a sibling Markdown report."""
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_out = out.with_suffix(".md")
+    markdown_out.write_text(render_markdown_report(report, top_n), encoding="utf-8")
+    return markdown_out
 
 
 def _print_results(report: BenchmarkReport) -> None:
-    """打印主对比表与各指标逐场景明细表。"""
+    """Print the three-axis summary and compact per-axis scenario evidence."""
     print(render_summary_table(report))
-    for metric in report.summary():
+    for axis in QualityAxis:
         print()
-        print(render_scenario_table(report, metric))
+        print(render_axis_scenario_table(report, axis))
 
 
 def cli_main(argv: list[str] | None = None) -> int:
@@ -228,7 +240,9 @@ def cli_main(argv: list[str] | None = None) -> int:
     config = _build_config(args)
     if not 0.0 <= config.min_validity_rate <= 1.0:
         parser.error("--min-validity-rate 必须在 0 到 1 之间")
+    if args.top_n < 1:
+        parser.error("--top-n 必须大于或等于 1")
     report = asyncio.run(_run(config))
-    _write_report(report, config.out)
+    _write_report(report, config.out, top_n=args.top_n)
     _print_results(report)
     return 0

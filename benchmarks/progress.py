@@ -6,6 +6,11 @@ import sys
 import time
 
 
+def _one_line(value: str, limit: int) -> str:
+    """Keep diagnostics readable when an exception contains multiline payloads."""
+    return " ".join(value.split())[:limit]
+
+
 class BatchProgress:
     """轻量跑批进度：批次头 + 细胞级回显 + 试验级进度。
 
@@ -50,11 +55,14 @@ class BatchProgress:
         )
         return cell_id
 
-    def trial_done(self, done: int, reply: str | None = None) -> None:
+    def trial_done(self, done: int, reply: str | None = None, error: str | None = None) -> None:
         """报告一个 trial 完成：echo 时打印回复行，否则就地更新进度条。"""
         if self.echo:
-            if reply is not None:
-                shown = reply.replace("\n", " ")[:120]
+            if error:
+                shown = _one_line(error, 240)
+                print(f"  [{done}/{self.trials}]  ERROR: {shown}", file=sys.stderr)
+            elif reply is not None:
+                shown = _one_line(reply, 120)
                 print(f"  [{done}/{self.trials}]  {shown}", file=sys.stderr)
             return
         if not self._inline:
@@ -63,7 +71,13 @@ class BatchProgress:
         sys.stderr.write(f"\r  trial {done}/{self.trials}  {pct:3.0f}%")
         sys.stderr.flush()
 
-    def finish_cell(self, cell_id: int, score: float | None, n_failed: int) -> None:
+    def finish_cell(
+        self,
+        cell_id: int,
+        score: float | None,
+        n_failed: int,
+        failure_reason: str | None = None,
+    ) -> None:
         """打印细胞完成行（耗时 + 分数）。用 start_cell 返回的 cell_id 取回该细胞的启动时刻。"""
         if self._inline:
             sys.stderr.write("\r\x1b[K")  # 清掉就地进度条所在行
@@ -75,6 +89,8 @@ class BatchProgress:
             f"[bench] cell {cell_id}/{self.total_cells} done in " f"{elapsed:.1f}s  score={shown_score}{failed}",
             file=sys.stderr,
         )
+        if failure_reason:
+            print(f"        reason: {_one_line(failure_reason, 300)}", file=sys.stderr)
 
     def finish(self, total_elapsed: float) -> None:
         """打印整批完成行。"""

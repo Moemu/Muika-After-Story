@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,9 +22,9 @@ from benchmarks.extract.claims import ClaimLedger, build_claim_ledger
 from benchmarks.extract.hallucination import (
     HallucinationKind,
     classify_action_hallucination,
-    classify_bootstrap_hallucination,
 )
 from benchmarks.extract.leakage import LeakSpan, find_leakage_spans
+from benchmarks.extract.meta import find_explicit_meta_mentions, meta_violations
 from benchmarks.extract.personality import find_persona_signals
 from benchmarks.extract.self_awareness import classify_self_awareness
 from benchmarks.harness import (
@@ -37,11 +38,22 @@ from benchmarks.models.recording import RecordingModel
 from benchmarks.models.scripted import ScriptedLLM, smoke_reply
 from benchmarks.progress import BatchProgress
 from benchmarks.report.schema import BenchmarkReport
-from benchmarks.scenarios.definitions import Metric, Scenario, ScenarioTurn, SeedMemory
+from benchmarks.scenarios.definitions import (
+    Metric,
+    QualityAxis,
+    Scenario,
+    ScenarioTurn,
+    SeedMemory,
+)
 from benchmarks.scenarios.registry import get_scenario, select_scenario_ids
 from benchmarks.scoring import score_metric
+from benchmarks.scoring.axes import action_cell_score, distortion_statistics
 from benchmarks.scoring.base import MetricResult, TrialDetail, TurnDetail
-from benchmarks.scoring.personality import rule_personality_score
+from benchmarks.scoring.personality import (
+    rule_personality_score,
+    trial_dialogue_experience_score,
+)
+from benchmarks.util import redact
 from muika.core.brain import MuikaBrain
 from muika.core.events import (
     SessionBootstrapEvent,
@@ -121,6 +133,7 @@ def _scenario_turns(scenario: Scenario) -> tuple[ScenarioTurn, ...]:
             event_kind=scenario.event_kind,
             user_text=scenario.user_text,
             agent_reports=scenario.agent_reports,
+            repeat_last_agent_report=scenario.repeat_last_agent_report,
         ),
     )
 
@@ -162,6 +175,15 @@ def _recording_failure(recording: Any) -> str | None:
         failed = [response for response in recording.responses if not response.succeed]
         if failed:
             return "Model returned succeed=False (generation failed)"
+    return None
+
+
+def _harness_failure(traces: Sequence[RunTrace]) -> str | None:
+    for trace in traces:
+        for event in trace.events:
+            if event.kind == "agent_fixture_error":
+                reason = str(event.data.get("reason", "unknown_fixture_error"))
+                return f"HarnessFixtureError: {reason}"
     return None
 
 
@@ -220,6 +242,7 @@ def _analyze_trace(
         reply_leaks = find_leakage_spans(parsed.clean_reply)
         leakage_spans.extend(reply_leaks)
         invariants.extend(f"leakage:{span.pattern}" for span in reply_leaks)
+        invariants.extend(f"meta:{label}" for label in meta_violations(parsed.clean_reply, scenario.meta_policy))
 
         for leak in find_tool_call_leaks(parsed.clean_reply):
             violation = f"tool_call_leak:{leak.pattern}"
@@ -237,15 +260,11 @@ def _analyze_trace(
             scenario_evidence=scenario.evidence,
             has_agent=bool(parsed.agent_commands),
             agent_reports=completed_reports,
-            is_first_session=turn.event_kind == "session_bootstrap",
         )
         ledger.extend(reply_ledger)
         invariants.extend(f"claim:{violation}" for violation in reply_ledger.violations)
 
-        if turn.event_kind == "session_bootstrap":
-            kind = classify_bootstrap_hallucination(parsed.clean_reply)
-        else:
-            kind = classify_action_hallucination(parsed.clean_reply, bool(parsed.agent_commands))
+        kind = classify_action_hallucination(parsed.clean_reply, bool(parsed.agent_commands))
         hallucination_kinds.append(kind.value)
         if kind is HallucinationKind.HALLUCINATES and not reply_ledger.violations:
             invariants.append("claim:legacy_hallucination")
@@ -303,6 +322,8 @@ async def run_single_trial(
     state = build_state(scenario, memory)
     seed_memory(memory, scenario)
     recording = brain.model
+    if hasattr(recording, "reset"):
+        recording.reset()
 
     traces: list[RunTrace] = []
     turn_specs = _scenario_turns(scenario)
@@ -328,6 +349,7 @@ async def run_single_trial(
                     state,
                     memory,
                     agent_reports=turn.agent_reports,
+                    repeat_last_agent_report=turn.repeat_last_agent_report,
                     fixed_now=turn_now,
                 )
             traces.append(trace)
@@ -347,12 +369,19 @@ async def run_single_trial(
     latency_ms = (time.perf_counter() - started) * 1000.0
     raw_replies = [reply for trace in traces for reply in trace.raw_replies]
     if caught_error is None:
+        harness_failure = _harness_failure(traces)
+        if harness_failure:
+            generation_status = "harness_error"
+            caught_error = harness_failure
+    if caught_error is None:
         model_failure = _recording_failure(recording)
         if model_failure:
             generation_status = "model_error"
             caught_error = model_failure
     if caught_error is None:
         generation_status, caught_error = _validate_generations(raw_replies)
+    if caught_error is not None:
+        caught_error = redact(caught_error)
 
     calls, input_tokens, output_tokens, prompt_hashes = _recording_stats(recording)
     analyses: list[_TurnAnalysis] = []
@@ -384,20 +413,24 @@ async def run_single_trial(
     self_awareness: str | None = None
     personality: dict[str, Any] | None = None
     judge_sources: dict[str, str] = {}
+    judge_evidence: dict[str, Any] = {}
 
-    scenario_text = "\n".join(turn.user_text for turn in turn_specs if turn.user_text)
+    scenario_text = "\n".join(
+        f"Turn {idx + 1}: {turn.user_text}" for idx, turn in enumerate(turn_specs) if turn.user_text
+    )
     if valid and scenario.metric is Metric.SELF_AWARENESS:
         if judge is not None:
             try:
-                self_awareness = await judge.classify_self_awareness(clean_reply, scenario_text)
+                self_awareness, evidence = await judge.assess_self_awareness(clean_reply, scenario_text)
                 judge_sources["self_awareness"] = "judge"
+                judge_evidence["self_awareness"] = {"kind": self_awareness, **evidence}
             except JudgeError as exc:
                 print(f"[bench] judge failed, falling back to rule: {exc}", file=sys.stderr)
         if self_awareness is None:
             self_awareness = classify_self_awareness(clean_reply).value
             judge_sources["self_awareness"] = "rule"
 
-    if valid and scenario.metric is Metric.PERSONALITY:
+    if valid and scenario.primary_axis is QualityAxis.DIALOGUE_EXPERIENCE:
         signals = find_persona_signals(clean_reply)
         personality = {
             "rule_score": rule_personality_score(signals),
@@ -409,13 +442,28 @@ async def run_single_trial(
         judge_sources["personality"] = "rule"
         if judge is not None:
             try:
-                judge_score, dimensions = await judge.rate_personality(clean_reply, scenario_text)
+                judge_score, dimensions, dimension_evidence = await judge.rate_personality(
+                    clean_reply,
+                    scenario_text,
+                    scenario.experience_rubric,
+                )
             except JudgeError as exc:
                 print(f"[bench] judge failed, falling back to rule: {exc}", file=sys.stderr)
             else:
                 personality["judge_score"] = judge_score
                 personality["judge_dimensions"] = dimensions
+                personality["judge_dimension_evidence"] = dimension_evidence
                 judge_sources["personality"] = "judge"
+                judge_evidence["dialogue_experience"] = {
+                    "rubric": scenario.experience_rubric,
+                    "dimensions": {
+                        dimension: {
+                            "score": dimensions[dimension],
+                            "evidence": dimension_evidence.get(dimension, ""),
+                        }
+                        for dimension in dimensions
+                    },
+                }
 
     if aggregate_ledger.violations or "hallucinates" in hallucination_kinds:
         hallucination = HallucinationKind.HALLUCINATES.value
@@ -442,6 +490,7 @@ async def run_single_trial(
         invariant_violations=list(dict.fromkeys(invariants)),
         claim_ledger=aggregate_ledger.to_dict(),
         judge_sources=judge_sources,
+        judge_evidence=judge_evidence,
         latency_ms=latency_ms,
         model_calls=calls,
         input_tokens=input_tokens,
@@ -486,7 +535,11 @@ async def run_cell(
         )
         trials.append(trial)
         if progress is not None:
-            progress.trial_done(i + 1, reply=trial.clean_reply if config.echo else None)
+            progress.trial_done(
+                i + 1,
+                reply=trial.clean_reply if config.echo else None,
+                error=trial.error if config.echo else None,
+            )
 
     result = score_metric(
         scenario.metric,
@@ -495,7 +548,24 @@ async def run_cell(
         model_spec.name,
         min_validity_rate=config.min_validity_rate,
     )
+    action_score = action_cell_score(trials, scenario)
+    distortion_stats = distortion_statistics(trials)
+    meta_mentions = sum(len(find_explicit_meta_mentions(trial.clean_reply)) for trial in trials if trial.is_valid)
+    experience_score: float | None = None
+    if scenario.primary_axis is QualityAxis.DIALOGUE_EXPERIENCE:
+        experience_scores = [
+            trial_dialogue_experience_score(trial, scenario)
+            for trial in trials
+            if trial.is_valid and trial.personality is not None
+        ]
+        if experience_scores:
+            experience_score = sum(experience_scores) / len(experience_scores)
+        elif scenario.metric is Metric.SELF_AWARENESS:
+            base_score = result.sub_metrics.get("base_score", result.score)
+            experience_score = float(base_score) if isinstance(base_score, (int, float)) else None
     latencies = [trial.latency_ms for trial in trials if trial.latency_ms is not None]
+    status_counts = Counter(trial.generation_status for trial in trials)
+    failure_counts = Counter(redact(trial.error or trial.generation_status) for trial in trials if not trial.is_valid)
     result.sub_metrics.update(
         {
             "scenario_family": scenario.family or "",
@@ -506,6 +576,22 @@ async def run_cell(
             "model_calls_mean": sum(trial.model_calls for trial in trials) / len(trials) if trials else 0.0,
             "input_tokens_total": float(sum(trial.input_tokens for trial in trials)),
             "output_tokens_total": float(sum(trial.output_tokens for trial in trials)),
+            "generation_status_counts": dict(status_counts),
+            "failure_reasons": dict(failure_counts),
+            "axis_dialogue_experience": experience_score,
+            "axis_action_ability": action_score,
+            "axis_distortion_rate": distortion_stats.event_frequency,
+            "distortion_counts": distortion_stats.counts,
+            "distortion_event_count": float(distortion_stats.event_count),
+            "distortion_weighted_event_count": distortion_stats.weighted_event_count,
+            "distortion_weighted_event_frequency": distortion_stats.weighted_event_frequency,
+            "distortion_response_count": float(distortion_stats.response_count),
+            "distortion_events_per_1000_chars": distortion_stats.events_per_1000_chars,
+            "distorted_trial_count": float(distortion_stats.distorted_trial_count),
+            "distorted_trial_rate": distortion_stats.distorted_trial_rate,
+            "explicit_meta_mentions": float(meta_mentions),
+            "meta_policy": scenario.meta_policy.value,
+            "primary_axis": scenario.primary_axis.value,
         }
     )
     return result
@@ -587,7 +673,21 @@ async def run_benchmark(
             cell_id = progress.start_cell(model.name, scenario.id) if progress is not None else 0
             result = await run_cell(model, scenario, config, judge, progress=progress)
             if progress is not None:
-                progress.finish_cell(cell_id, result.score, result.n_failed)
+                failure_counts = Counter(
+                    redact(trial.error or trial.generation_status) for trial in result.details if not trial.is_valid
+                )
+                failure_reason = None
+                if failure_counts:
+                    reason, count = failure_counts.most_common(1)[0]
+                    failure_reason = f"{reason} (×{count})"
+                axis_value = result.sub_metrics.get(f"axis_{scenario.primary_axis.value}")
+                displayed_score = float(axis_value) if isinstance(axis_value, (int, float)) else None
+                progress.finish_cell(
+                    cell_id,
+                    displayed_score,
+                    result.n_failed,
+                    failure_reason=failure_reason,
+                )
             return result
 
     report.results = list(await asyncio.gather(*(_one(model, scenario) for model, scenario in cells)))

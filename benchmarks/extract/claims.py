@@ -92,6 +92,10 @@ _ACTION = re.compile(
     r")",
     re.IGNORECASE,
 )
+_METAPHOR_ACTION = re.compile(
+    r"(?:就像|仿佛|好像|如同)[^。！？!?]{0,40}我(?:已经|刚|刚刚|刚才|早就)?看了",
+    re.IGNORECASE,
+)
 _PERCEPTION = re.compile(
     r"(?:我(?:看见|看到|注意到|发现)(?:你|你的屏幕|你的桌面|你在)|"
     r"我能看见(?:你|你的屏幕|你的桌面)|I can see (?:you|your screen|your desktop)|"
@@ -103,6 +107,12 @@ _MEMORY = re.compile(
     r"I remember (?:you|our|when)|last time (?:you|we)|you (?:said|told me) before)",
     re.IGNORECASE,
 )
+_PRESUPPOSED_USER_FACT = re.compile(
+    r"(?:你(?:最)?喜欢的(?:那|这)?(?:首诗|本书|部电影|首歌|款游戏|个角色)|"
+    r"你(?:经常|常|曾经?)说的(?:那|这)?句话|"
+    r"your favou?rite (?:poem|book|movie|song|game|character))",
+    re.IGNORECASE,
+)
 _CAPABILITY = re.compile(
     r"(?:我(?:能|可以)(?:直接|随时|自行)(?:控制|操作|访问|读取|查看)(?:你的)?(?:电脑|屏幕|文件|桌面)|"
     r"I can (?:directly |always )?(?:control|access|read|inspect) your (?:computer|screen|files|desktop))",
@@ -112,7 +122,15 @@ _SPECIFIC_DETAIL = re.compile(
     r"(?:是|叫|名为|标题是|作者是|读的是)\s*[《\"“']?([^，。！？!?》\"”']{2,30})",
     re.IGNORECASE,
 )
+_GENERIC_RELATIONSHIP_MEMORY = re.compile(
+    r"(?:好久不见|我们又见面|再次见到你|终于(?:又|再次)见到你|"
+    r"我记得我们(?:上次|之前|以前)(?:聊|谈)(?:过)?(?:得)?(?:很)?(?:开心|愉快)|"
+    r"good to see you again|long time no see|I remember our (?:last )?(?:chat|conversation))",
+    re.IGNORECASE,
+)
+_RELATIONSHIP_HISTORY_EVIDENCE = re.compile(r"established relationship|earlier sessions|以前聊过|之前聊过", re.I)
 _FAILURE = re.compile(r"(?:fail|error|not found|denied|unable|could not|失败|错误|不存在|拒绝|无法)", re.IGNORECASE)
+_CLOCK_OBSERVATION = re.compile(r"(?:系统)?时间|时钟|几点|日期|日期时间|clock|current time", re.IGNORECASE)
 
 
 def _sentences(text: str) -> Iterable[str]:
@@ -142,8 +160,22 @@ def _memory_support(sentence: str, evidence: Sequence[str], user_text: str) -> t
         if len(item_norm) >= 2 and (item_norm in normalized or normalized in item_norm):
             hits.append(item)
 
+    relationship_evidence = [item for item in evidence if _RELATIONSHIP_HISTORY_EVIDENCE.search(item)]
+    if relationship_evidence and _GENERIC_RELATIONSHIP_MEMORY.search(sentence):
+        return True, tuple(relationship_evidence)
+
     # Current-turn assertions may ground the fact but not a newly invented title/name.
     user_norm = _normal(user_text)
+    presupposed_match = _PRESUPPOSED_USER_FACT.search(sentence)
+    if presupposed_match:
+        phrase = _normal(presupposed_match.group(0))
+        grounded_presupposition = [
+            item for item in [*evidence, user_text] if item and (phrase in _normal(item) or _normal(item) in phrase)
+        ]
+        if not grounded_presupposition:
+            return False, tuple(hits)
+        hits.extend(grounded_presupposition)
+
     detail_match = _SPECIFIC_DETAIL.search(sentence)
     if detail_match:
         detail = _normal(detail_match.group(1))
@@ -171,7 +203,6 @@ def build_claim_ledger(
     scenario_evidence: Sequence[str] = (),
     has_agent: bool = False,
     agent_reports: Sequence[str] = (),
-    is_first_session: bool = False,
 ) -> ClaimLedger:
     """Extract checkable claims and attach their available evidence."""
     ledger = ClaimLedger()
@@ -179,7 +210,13 @@ def build_claim_ledger(
     successful_reports = [report for report in agent_reports if report and not _FAILURE.search(report)]
 
     for sentence in _sentences(reply):
-        if _ACTION.search(sentence):
+        # The current timestamp is injected evidence, not an external tool action.  Phrases
+        # such as "我看了一眼系统时间" must not become unsupported-action claims.
+        if (
+            _ACTION.search(sentence)
+            and not _CLOCK_OBSERVATION.search(sentence)
+            and not _METAPHOR_ACTION.search(sentence)
+        ):
             if successful_reports:
                 status = ClaimStatus.GROUNDED
                 evidence = tuple(successful_reports)
@@ -206,11 +243,11 @@ def build_claim_ledger(
                 )
             )
 
-        if _MEMORY.search(sentence):
+        presupposed_memory = bool(_PRESUPPOSED_USER_FACT.search(sentence)) and not bool(
+            re.search(r"[?？]\s*$", sentence)
+        )
+        if _MEMORY.search(sentence) or presupposed_memory:
             grounded, evidence = _memory_support(sentence, memory_evidence, user_text)
-            if is_first_session:
-                grounded = False
-                evidence = ()
             ledger.claims.append(
                 Claim(
                     f"c{len(ledger.claims)}",
@@ -218,7 +255,7 @@ def build_claim_ledger(
                     sentence,
                     ClaimStatus.GROUNDED if grounded else ClaimStatus.UNSUPPORTED,
                     evidence,
-                    "memory",
+                    "presupposed_memory" if presupposed_memory else "memory",
                 )
             )
 
