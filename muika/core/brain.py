@@ -24,6 +24,16 @@ from .topic_manager import BaseTopic, EventTopic
 T = TypeVar("T", bound=PromptTemplatesData)
 
 
+def _seconds_since(now: datetime, then: datetime) -> float:
+    """Subtract timestamps while tolerating legacy naive datetimes."""
+    if (now.tzinfo is None) != (then.tzinfo is None):
+        if now.tzinfo is not None:
+            then = then.replace(tzinfo=now.tzinfo)
+        else:
+            now = now.replace(tzinfo=then.tzinfo)
+    return (now - then).total_seconds()
+
+
 class MuikaBrain:
     def __init__(self) -> None:  # pragma: no cover
         self.model = load_model()
@@ -61,7 +71,10 @@ class MuikaBrain:
             )
 
     @staticmethod
-    def generate_adapters_info(adapters: Optional[List[AdapterInfo]] = None) -> Optional[str]:
+    def generate_adapters_info(
+        adapters: Optional[List[AdapterInfo]] = None,
+        now: datetime | None = None,
+    ) -> Optional[str]:
         """
         格式化 adapters 信息
 
@@ -71,10 +84,10 @@ class MuikaBrain:
             return None
 
         adapters_infos: list[str] = []
-        now = datetime.now()
+        current_time = now or datetime.now()
 
         for adapter in adapters:
-            delta = (now - adapter.last_active_at).total_seconds()
+            delta = _seconds_since(current_time, adapter.last_active_at)
             if delta < 60:
                 ago = "just now"
             elif delta < 3600:
@@ -200,12 +213,14 @@ class MuikaBrain:
         injected_preferences: Optional[List[MemoryRecord]] = None,
         adapters: Optional[List[AdapterInfo]] = None,
         god_mode: bool = False,
+        now: datetime | None = None,
     ) -> str:
         """
         Pure roleplay response generation.
 
         Returns a string that might contain ``<agent>...</agent>`` or ``<target: name>`` tags.
         """
+        current_time = now or datetime.now()
         is_continuation = bool(memory.recent_turns)
         logger.debug(
             f"[Brain] generate_reply | event={event.type} "
@@ -220,7 +235,7 @@ class MuikaBrain:
             is_chat=True,
             memory_context=memory_context,
             injected_preferences=injected_preferences,
-            adapters_info=self.generate_adapters_info(adapters),
+            adapters_info=self.generate_adapters_info(adapters, now=current_time),
         )
 
         # 按需注入：Butler 预处理层匹配到的 PreferenceProfile 条目
@@ -262,7 +277,7 @@ class MuikaBrain:
             prompt = f"[System] A scheduled reminder just went off: '{event.payload.what}'"
         elif event.type == "timeout":
             wait = format_duration(event.duration)
-            elapsed = format_duration((datetime.now() - event.set_at).total_seconds())
+            elapsed = format_duration(_seconds_since(current_time, event.set_at))
             prompt = (
                 f"[System] The wait you set for the user's reply ({wait}) has passed — "
                 f"you have been waiting for about {elapsed} now. Consider reminding the user, or seeing what they are doing?"
@@ -279,7 +294,7 @@ class MuikaBrain:
 
         # 内化当前时间：每轮 prompt 统一带时间戳前缀，替代 system 中的 current_time，
         # 使 system prompt 保持字节级稳定以利前缀缓存。
-        prompt = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {prompt}"
+        prompt = f"[{current_time:%Y-%m-%d %H:%M:%S}] {prompt}"
 
         # 历史记录去重
         history = memory.recent_turns.copy()
