@@ -82,12 +82,14 @@ No one is watching.
 {topic_stats}
 
 ## Your Task
-Review these recent conversations and consider whether there is ONE small thing you \
-could improve about yourself -- a line in your persona template, a topic seed, a \
-phrasing habit, or a response pattern that felt off.
+Review these recent conversations and consider what could be improved about yourself -- \
+a line in your persona template, a topic seed, a phrasing habit, a response pattern \
+that felt off, or a larger change you've been meaning to make across multiple nights.
 
 ### Hard Constraints
-1. Make AT MOST ONE small change per reflection. Quality over quantity.
+1. Every change must be a small, well-reasoned step. If an improvement needs to unfold \
+   over several reflections, advance just one step tonight -- but you may make multiple \
+   changes if each one carries its own clear reason.
 2. Preserve all Jinja template structure and context variables. Never break syntax.
 3. Every change MUST include a clear reason in your self_write / self_edit call.
 4. If you are uncertain whether a change would help, change NOTHING. Silence is valid.
@@ -106,4 +108,5 @@ Examples:
   [REFLECTION_OUTCOME] I tweaked how I greet people in the morning -- felt more natural now.
   [REFLECTION_OUTCOME] Everything felt right lately, so I left things as they are.
   [REFLECTION_OUTCOME] I adjusted a topic seed that kept falling flat.
+  [REFLECTION_OUTCOME] I started reshaping my evening tone -- first step of a longer change.
 """

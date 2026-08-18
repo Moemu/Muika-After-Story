@@ -535,7 +535,8 @@ class Muika:
         self._last_summary_time = datetime.now().timestamp()
 
         # 夜间自省触发（fire-and-forget）：archives 在 reset 前已被填充且不随 new_session 清空
-        asyncio.create_task(self.reflection.maybe_reflect("session_end"))
+        logger.info("[Reflection] Triggering auto-reflection (session_end)")
+        asyncio.create_task(self.reflection.maybe_reflect())
         logger.info("[Loop] Session reset complete -- waiting for next user interaction silently.")
 
     @staticmethod

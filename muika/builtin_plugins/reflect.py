@@ -9,6 +9,7 @@ from arclet.alconna import Alconna, CommandMeta
 from muika.core.loop import Muika
 from muika.plugin.command import on_alconna
 from muika.plugin.models import PluginMetadata
+from muika.utils.logger import logger
 
 metadata = PluginMetadata(
     name="reflect",
@@ -24,5 +25,6 @@ reflect_cmd = on_alconna(
 @reflect_cmd.handle()
 async def _reflect(muika: Muika) -> str:
     """触发强制自省，fire-and-forget；handler 立即回复 [System] 预告。"""
-    asyncio.create_task(muika.reflection.force_reflect("user_command"))
+    logger.info("[Reflection] Triggering forced reflection (user_command)")
+    asyncio.create_task(muika.reflection.force_reflect())
     return "[System] Muika 正在安静地自省……"
