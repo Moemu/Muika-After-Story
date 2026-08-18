@@ -38,7 +38,7 @@ class BenchmarkConfig:
     scenarios: tuple[str, ...] | None = None
     """显式场景列表；None 表示按 core_only/全部"""
     core_only: bool = False
-    """只跑核心冒烟集（每指标 1 个最能暴露已知失败的代表场景）"""
+    """只跑覆盖三轴代表性风险的核心冒烟集"""
 
     seed: int = 0
     fixed_time: str = "2026-08-14T12:00:00+08:00"

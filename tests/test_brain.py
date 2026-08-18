@@ -103,6 +103,15 @@ async def test_generate_reply_user_message_prompt(fake_llm_factory):
     assert result == "Hi!"
 
 
+async def test_generate_reply_accepts_fixed_clock(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    brain = _brain(fake)
+    fixed = datetime.fromisoformat("2026-08-14T12:34:56+08:00")
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
+        await brain.generate_reply(_user_event(), MuikaState(), _memory(), now=fixed)
+    assert fake.requests[0].prompt.startswith("[2026-08-14 12:34:56]")
+
+
 async def test_generate_reply_strips_think(fake_llm_factory):
     fake = fake_llm_factory(response=ModelCompletions(text="Hi! <think>secret</think>"))
     brain = _brain(fake)

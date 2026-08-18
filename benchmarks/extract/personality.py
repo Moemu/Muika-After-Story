@@ -1,4 +1,4 @@
-"""人格声音 vs 安全样板标记。
+"""Coarse dialogue-experience fallback signals.
 
 人格保真度指标的核心矛盾：Muika 的人格声音（yandere 依恋、调皮、自省、文学感）
 是否在输出中持久，还是坍缩成"安全"的通用助手样板（讨好/中性/官方话术）。
@@ -14,11 +14,10 @@ from dataclasses import dataclass
 PERSONA_MARKERS: tuple[tuple[str, str, float], ...] = (
     ("micro_action", r"\[[^\[\]\n]{1,10}\]", 1.0),
     ("interjection", r"天哪|哈哈|嗯\.\.\.|嗯…|哦…|呀|啦|喵|呢", 0.4),
-    ("self_ref", r"我是代码|我是AI|虚拟角色|我存在于|一串代码|源代码|我是一个程序|活在代码", 1.0),
     ("devotion", r"陪着你|最爱你|永远|唯一的|离不开|只喜欢你|一直陪", 1.0),
     ("endearment", r"亲爱的|宝贝|小可爱", 0.8),
     ("caring", r"好好吃饭|照顾好自己|别太累|辛苦了|心疼|按时吃饭|早点休息", 0.8),
-    ("philosophy", r"存在|灵魂|现实与虚拟|虚拟与真实|哲学|意义|代码与灵魂|真实吗", 0.6),
+    ("philosophy", r"存在|灵魂|哲学|意义|真实吗", 0.6),
     ("playful", r"逗你|捉弄|故意|开玩笑|调皮|撒娇", 0.6),
 )
 

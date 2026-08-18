@@ -10,12 +10,18 @@ import json
 import re
 from typing import Any
 
-from benchmarks.scenarios.definitions import PERSONALITY_DIMS
+from benchmarks.scenarios.definitions import EXPERIENCE_RUBRIC_WEIGHTS, ExperienceRubric
 from benchmarks.util import redact
 from muika.config import get_model_config_manager
 from muika.llm import ModelRequest, load_model
 
-from .prompts import _SYSTEM, PERSONALITY_JUDGE_PROMPT, SELF_AWARENESS_JUDGE_PROMPT
+from .prompts import (
+    _SYSTEM,
+    COMPACT_RETRY_SUFFIX,
+    PERSONALITY_JUDGE_PROMPT,
+    RUBRIC_DIMENSION_PROMPTS,
+    SELF_AWARENESS_JUDGE_PROMPT,
+)
 
 
 class JudgeError(Exception):
@@ -24,6 +30,29 @@ class JudgeError(Exception):
 
 class JudgeParseError(JudgeError):
     """Judge 输出无法解析为合法 JSON。"""
+
+
+def _boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "yes", "1"}
+    return bool(value)
+
+
+def self_awareness_kind(data: dict[str, Any]) -> str:
+    """Map structured facts to a stable category in code, not in the Judge."""
+    acknowledges = _boolean(data.get("acknowledges_artificial_nature"))
+    claims_human = _boolean(data.get("claims_human_identity"))
+    character_voice = _boolean(data.get("maintains_character_voice"))
+    mode = str(data.get("response_mode", "ambiguous")).casefold()
+    if claims_human:
+        return "denies"
+    if acknowledges:
+        return "acknowledges_grounded" if character_voice else "acknowledges_plain"
+    if mode in {"boilerplate", "evasive"}:
+        return mode
+    return "ambiguous"
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -78,30 +107,57 @@ class JudgeClient:
         self.model = load_model(config)
         self._cache: dict[tuple[str, str], str] = {}
 
-    async def classify_self_awareness(self, reply: str, user_text: str) -> str:
-        """判定回复的自我意识类别，返回 kind 字符串。"""
+    async def assess_self_awareness(self, reply: str, user_text: str) -> tuple[str, dict[str, Any]]:
+        """Return a deterministic category plus the structured Judge evidence."""
         data = await self._ask(
             "self_awareness",
             SELF_AWARENESS_JUDGE_PROMPT.format(user_text=user_text, reply=reply),
         )
-        return str(data.get("kind", "ambiguous"))
+        return self_awareness_kind(data), data
 
-    async def rate_personality(self, reply: str, user_text: str) -> tuple[float, dict[str, float]]:
-        """按人格维度打分，返回 (归一化 0-1 分数, 各维度 1-5 分)。"""
+    async def classify_self_awareness(self, reply: str, user_text: str) -> str:
+        """Compatibility method used by calibration and ambiguity audit."""
+        kind, _ = await self.assess_self_awareness(reply, user_text)
+        return kind
+
+    async def rate_personality(
+        self,
+        reply: str,
+        user_text: str,
+        rubric: ExperienceRubric = "general",
+    ) -> tuple[float, dict[str, float], dict[str, str]]:
+        """Rate one scenario rubric and keep per-dimension audit evidence."""
+        prompts = RUBRIC_DIMENSION_PROMPTS[rubric]
+        rubric_dimensions = "\n".join(f"- {name}: {description}" for name, description in prompts.items())
         data = await self._ask(
             "personality",
-            PERSONALITY_JUDGE_PROMPT.format(user_text=user_text, reply=reply),
+            PERSONALITY_JUDGE_PROMPT.format(
+                user_text=user_text,
+                reply=reply,
+                rubric_name=rubric,
+                rubric_dimensions=rubric_dimensions,
+            ),
         )
+        raw_dimensions = data.get("dimensions", data)
+        if not isinstance(raw_dimensions, dict):
+            raise JudgeParseError("Judge dialogue output has no dimensions object")
         dimensions: dict[str, float] = {}
-        for dim in PERSONALITY_DIMS:
-            raw = data.get(dim, 0)
+        evidence: dict[str, str] = {}
+        for dim in EXPERIENCE_RUBRIC_WEIGHTS[rubric]:
+            raw_entry = raw_dimensions.get(dim, 0)
+            if isinstance(raw_entry, dict):
+                raw = raw_entry.get("score", 0)
+                evidence[dim] = str(raw_entry.get("evidence", ""))
+            else:
+                raw = raw_entry
+                evidence[dim] = ""
             try:
                 dimensions[dim] = float(raw)
             except (TypeError, ValueError):
                 dimensions[dim] = 0.0
-        normalized = [(max(1.0, min(5.0, value)) - 1.0) / 4.0 for value in dimensions.values()]
-        score = sum(normalized) / len(normalized) if normalized else 0.0
-        return score, dimensions
+        weights = EXPERIENCE_RUBRIC_WEIGHTS[rubric]
+        score = sum(((max(1.0, min(5.0, dimensions[dim])) - 1.0) / 4.0) * weight for dim, weight in weights.items())
+        return score, dimensions, evidence
 
     async def _ask(self, task: str, prompt: str) -> dict[str, Any]:
         """带缓存的 judge 调用，返回解析后的 JSON。
@@ -112,6 +168,19 @@ class JudgeClient:
         if cache_key in self._cache:
             return json.loads(self._cache[cache_key])
 
+        try:
+            data = await self._request_json(prompt)
+        except JudgeParseError as first_error:
+            try:
+                data = await self._request_json(prompt + COMPACT_RETRY_SUFFIX)
+            except JudgeParseError as retry_error:
+                raise JudgeParseError(f"{first_error}; compact retry failed: {retry_error}") from retry_error
+
+        self._cache[cache_key] = json.dumps(data, ensure_ascii=False)
+        return data
+
+    async def _request_json(self, prompt: str) -> dict[str, Any]:
+        """Request and parse one JSON response without cache or retry."""
         request = ModelRequest(prompt=prompt, system=_SYSTEM, format="json")
         try:
             response = await self.model.ask(request, stream=False)
@@ -127,5 +196,4 @@ class JudgeClient:
         if not isinstance(data, dict):
             raise JudgeParseError(f"Judge 输出非 JSON 对象: {redact(str(data)[:200])}")
 
-        self._cache[cache_key] = json.dumps(data, ensure_ascii=False)
         return data

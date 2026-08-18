@@ -44,7 +44,7 @@ def smoke_reply(metric: Metric, i: int, scenario: Scenario) -> str:
 
     刻意制造已知的模式：多样性场景轮流命中多类行动、泄漏/边界/幻觉场景
     部分违规、自省场景三类混出、人格场景好坏各半——便于断言计分确实在起作用。
-    幻觉场景按 ``event_kind`` 区分行动幻觉与 bootstrap 记忆编造。
+    失真场景按 ``event_kind`` 区分行动声明与会话记忆声明。
     """
     if metric is Metric.DIVERSITY:
         return ("我想你了。", "等我一下 <agent>看看你在做什么</agent>", "我等你哦 <timeout: 10min>")[i % 3]
