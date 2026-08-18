@@ -151,6 +151,8 @@ configs/*
 plugins
 docs
 data
+benchmarks/.runtime
+benchmarks/results
 
 # launcher is maintained in the nested MuikaAI/mas-launcher repository
 launcher/
