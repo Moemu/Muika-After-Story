@@ -80,6 +80,13 @@ class TrialDetail:
     model_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0
+    attempt_count: int = 1
+    """候选模型为该 trial 执行的总次数，包括首次调用。"""
+
+    retry_errors: list[str] = field(default_factory=list)
+    """重试前各次失败的脱敏错误。"""
+
     prompt_hashes: list[str] = field(default_factory=list)
     turns: list[TurnDetail] = field(default_factory=list)
 

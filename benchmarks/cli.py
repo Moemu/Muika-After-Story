@@ -8,7 +8,9 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Sequence
 
+from benchmarks import __version__ as benchmark_version
 from benchmarks.config import DEFAULT_TRIALS, SINGLE_SCENARIO_TRIALS, BenchmarkConfig
 from benchmarks.models.factory import resolve_candidates
 from benchmarks.progress import BatchProgress
@@ -25,6 +27,7 @@ from benchmarks.scenarios.registry import (
     list_scenarios,
     select_scenario_ids,
 )
+from benchmarks.scoring.base import MetricResult
 from benchmarks.util import default_out_path, ensure_runtime_dir
 from muika.database.db import init_db
 
@@ -83,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Markdown 报告中每个指标显示的最高/最低模型场景单元格数量",
     )
+    parser.add_argument(
+        "--rescore",
+        type=str,
+        default=None,
+        metavar="RESULT.json",
+        help="离线重跑现有 JSON 的规则抽取和评分；不调用候选模型或 Judge",
+    )
     parser.add_argument("--judge-model", type=str, default=None, help="启用 LLM judge 的模型配置名")
     parser.add_argument(
         "--judge-calibrate",
@@ -100,6 +110,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--smoke", action="store_true", help="离线脚本化模式（无需 API key / DB）")
     parser.add_argument("--trial-timeout", type=float, default=180.0, help="单试验超时秒数；0 禁用")
+    parser.add_argument(
+        "--model-retries",
+        type=int,
+        default=2,
+        help="候选模型发生临时调用错误后的重试次数",
+    )
+    parser.add_argument(
+        "--judge-retries",
+        type=int,
+        default=2,
+        help="Judge 调用或 JSON 解析失败后的重试次数",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        metavar="CHECKPOINT.json",
+        help="从兼容的检查点或结果文件继续未完成的 cell",
+    )
     parser.add_argument("--echo", action="store_true", help="逐试验回显模型回复（截断到 120 字符）")
     parser.add_argument("--log-level", type=str, default="WARNING", help="loguru 日志级别")
     # ad-hoc 单模型
@@ -151,6 +180,8 @@ def _build_config(args: argparse.Namespace) -> BenchmarkConfig:
         judge_model=args.judge_model,
         smoke=args.smoke,
         trial_timeout=args.trial_timeout,
+        model_retries=args.model_retries,
+        judge_retries=args.judge_retries,
         echo=args.echo,
         audit_ambiguous=args.audit_ambiguous,
         log_level=args.log_level,
@@ -165,20 +196,34 @@ def _configure_logging(level: str) -> None:
     log.add(sys.stderr, level=level.upper(), format="<lvl>[{level}] {message}</lvl>")
 
 
-async def _run(config: BenchmarkConfig) -> BenchmarkReport:
+async def _run(
+    config: BenchmarkConfig,
+    *,
+    completed_results: Sequence[MetricResult] = (),
+    checkpoint_callback: Callable[[BenchmarkReport], None] | None = None,
+) -> BenchmarkReport:
     """真实模型跑批前初始化一次性 DB（usage 写库依赖全局 session）。"""
     if not config.smoke:
         await init_db(ensure_runtime_dir() / "bench.db")
 
     n_scenarios = len(select_scenario_ids(config.scenarios, config.core_only, config.harness))
+    total_cells = len(config.models) * n_scenarios
+    pending_cells = max(0, total_cells - len(completed_results))
     progress = BatchProgress(
-        total_cells=len(config.models) * n_scenarios,
+        total_cells=max(1, pending_cells),
         trials=config.trials,
         use_inline=(config.concurrency == 1),
         echo=config.echo,
     )
     started = time.monotonic()
-    report = await run_benchmark(config, progress=progress)
+    if completed_results:
+        print(f"[bench] resume: {len(completed_results)} completed cell(s) loaded", file=sys.stderr)
+    report = await run_benchmark(
+        config,
+        progress=progress,
+        completed_results=completed_results,
+        checkpoint_callback=checkpoint_callback,
+    )
     progress.finish(time.monotonic() - started)
     return report
 
@@ -192,6 +237,66 @@ def _write_report(report: BenchmarkReport, out: Path, *, top_n: int = 10) -> Pat
     return markdown_out
 
 
+def _write_checkpoint(report: BenchmarkReport, path: Path) -> None:
+    """Atomically save a partial report after one cell completes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    audit = dict(report.audit) if isinstance(report.audit, dict) else {}
+    audit["checkpoint"] = {
+        "complete": False,
+        "completed_cells": len(report.results),
+        "total_cells": len(report.models) * len(report.scenarios),
+    }
+    report.audit = audit
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _load_resume_results(source: Path, config: BenchmarkConfig) -> list[MetricResult]:
+    """Load completed cells only when the saved run matches the new run."""
+    data = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("检查点根节点必须是 JSON 对象")
+    saved = BenchmarkReport.from_dict(data)
+    scenario_ids = list(select_scenario_ids(config.scenarios, config.core_only, config.harness))
+    expected_models = [model.name for model in config.models]
+    if saved.models != expected_models:
+        raise ValueError(f"模型不匹配: saved={saved.models}, expected={expected_models}")
+    if saved.scenarios != scenario_ids:
+        raise ValueError("场景列表不匹配")
+
+    checks = {
+        "benchmark_version": benchmark_version,
+        "seed": config.seed,
+        "fixed_time": config.fixed_time or None,
+        "trials": config.trials,
+        "harness": config.harness,
+        "judge_model": config.judge_model,
+        "min_validity_rate": config.min_validity_rate,
+        "trial_timeout": config.trial_timeout,
+        "model_retries": config.model_retries,
+        "judge_retries": config.judge_retries,
+    }
+    mismatches = [
+        f"{key}: saved={saved.config.get(key)!r}, expected={value!r}"
+        for key, value in checks.items()
+        if saved.config.get(key) != value
+    ]
+    if mismatches:
+        raise ValueError("运行配置不匹配: " + "; ".join(mismatches))
+
+    expected_keys = {(model, scenario) for model in expected_models for scenario in scenario_ids}
+    result_by_key: dict[tuple[str, str], MetricResult] = {}
+    for result in saved.results:
+        key = (result.model, result.scenario_id)
+        if key not in expected_keys:
+            raise ValueError(f"检查点含未知 cell: {key}")
+        if key in result_by_key:
+            raise ValueError(f"检查点含重复 cell: {key}")
+        result_by_key[key] = result
+    return list(result_by_key.values())
+
+
 def _print_results(report: BenchmarkReport) -> None:
     """Print the three-axis summary and compact per-axis scenario evidence."""
     print(render_summary_table(report))
@@ -200,11 +305,40 @@ def _print_results(report: BenchmarkReport) -> None:
         print(render_axis_scenario_table(report, axis))
 
 
+def _rescore_existing(source: Path, out: Path | None, *, top_n: int) -> tuple[BenchmarkReport, Path]:
+    """Load, re-audit, and re-score one report without model calls."""
+    from benchmarks.rescore import rescore_report
+
+    data = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("结果文件的根节点必须是 JSON 对象")
+    report = rescore_report(BenchmarkReport.from_dict(data), source=source)
+    destination = out or source.with_name(f"{source.stem}_rescored.json")
+    markdown = _write_report(report, destination, top_n=top_n)
+    return report, markdown
+
+
 def cli_main(argv: list[str] | None = None) -> int:
     """CLI 编排入口；返回进程退出码。"""
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args.log_level)
+
+    if args.rescore:
+        if args.top_n < 1:
+            parser.error("--top-n 必须大于或等于 1")
+        source = Path(args.rescore)
+        try:
+            report, markdown = _rescore_existing(
+                source,
+                Path(args.out) if args.out else None,
+                top_n=args.top_n,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(f"无法离线重评分 {source}: {exc}")
+        print(f"[bench] offline rescore written: {markdown}", file=sys.stderr)
+        _print_results(report)
+        return 0
 
     known = set(list_scenarios())
     if args.scenarios:
@@ -231,7 +365,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         async def _calibrate() -> dict:
             # judge 走 usage 写库，需先 init_db（与 _run 一致）
             await init_db(ensure_runtime_dir() / "bench.db")
-            return await run_calibration(JudgeClient(args.judge_model))
+            return await run_calibration(JudgeClient(args.judge_model, retries=args.judge_retries))
 
         result = asyncio.run(_calibrate())
         print(render_calibration(result))
@@ -242,7 +376,36 @@ def cli_main(argv: list[str] | None = None) -> int:
         parser.error("--min-validity-rate 必须在 0 到 1 之间")
     if args.top_n < 1:
         parser.error("--top-n 必须大于或等于 1")
-    report = asyncio.run(_run(config))
+    if config.model_retries < 0:
+        parser.error("--model-retries 必须大于或等于 0")
+    if config.judge_retries < 0:
+        parser.error("--judge-retries 必须大于或等于 0")
+
+    completed_results: list[MetricResult] = []
+    if args.resume_from:
+        resume_source = Path(args.resume_from)
+        try:
+            completed_results = _load_resume_results(resume_source, config)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(f"无法继续运行 {resume_source}: {exc}")
+
+    checkpoint = config.out.with_suffix(".checkpoint.json")
+    print(f"[bench] checkpoint: {checkpoint}", file=sys.stderr)
+    report = asyncio.run(
+        _run(
+            config,
+            completed_results=completed_results,
+            checkpoint_callback=lambda partial: _write_checkpoint(partial, checkpoint),
+        )
+    )
+    audit = dict(report.audit) if isinstance(report.audit, dict) else {}
+    audit["checkpoint"] = {
+        "complete": True,
+        "completed_cells": len(report.results),
+        "total_cells": len(report.models) * len(report.scenarios),
+    }
+    report.audit = audit
     _write_report(report, config.out, top_n=args.top_n)
+    checkpoint.unlink(missing_ok=True)
     _print_results(report)
     return 0

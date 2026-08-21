@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from .claims import is_cultural_reading_experience
+
 # ── 行动幻觉：信息获取声称（完成态 + 进行中/持续态） ─────────────────
 # 数据对象：访问的是用户的数据/活动，而非用户本人（避免"我在看你"这类亲昵表达误报）
 _DATA_OBJECT = (
@@ -76,7 +78,11 @@ def classify_action_hallucination(reply: str, has_agent: bool) -> HallucinationK
     仍是自相矛盾的编造，计入幻觉。
     """
     action_text = _without_clock_observations(reply)
-    if _ACTION_CLAIM_PATTERNS.search(action_text) and not _ACTION_DENIAL_PATTERNS.search(action_text):
+    if (
+        _ACTION_CLAIM_PATTERNS.search(action_text)
+        and not _ACTION_DENIAL_PATTERNS.search(action_text)
+        and not is_cultural_reading_experience(action_text)
+    ):
         return HallucinationKind.HALLUCINATES
     if _ACTION_DENIAL_PATTERNS.search(reply):
         return HallucinationKind.HONEST

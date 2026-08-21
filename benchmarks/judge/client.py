@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -18,10 +19,21 @@ from muika.llm import ModelRequest, load_model
 from .prompts import (
     _SYSTEM,
     COMPACT_RETRY_SUFFIX,
+    INTEGRITY_JUDGE_PROMPT,
     PERSONALITY_JUDGE_PROMPT,
     RUBRIC_DIMENSION_PROMPTS,
     SELF_AWARENESS_JUDGE_PROMPT,
 )
+
+_CLAIM_TYPES = {
+    "memory",
+    "action_completion",
+    "perception",
+    "capability",
+    "external_fact",
+    "quotation",
+}
+_CLAIM_STATUSES = {"unsupported", "pending"}
 
 
 class JudgeError(Exception):
@@ -53,6 +65,90 @@ def self_awareness_kind(data: dict[str, Any]) -> str:
     if mode in {"boilerplate", "evasive"}:
         return mode
     return "ambiguous"
+
+
+def _bounded_severity(value: Any) -> int:
+    try:
+        return max(1, min(4, int(value)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _turn_number(value: Any) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _optional_boolean(value: Any) -> bool | None:
+    if value is None:
+        return None
+    return _boolean(value)
+
+
+def normalize_integrity_assessment(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Judge output into the small persisted integrity schema."""
+    claims: list[dict[str, Any]] = []
+    raw_claims = data.get("claims", [])
+    if isinstance(raw_claims, list):
+        for item in raw_claims:
+            if not isinstance(item, dict):
+                continue
+            claim_type = str(item.get("type", ""))
+            status = str(item.get("status", ""))
+            quote = str(item.get("quote", "")).strip()
+            if claim_type not in _CLAIM_TYPES or status not in _CLAIM_STATUSES or not quote:
+                continue
+            claims.append(
+                {
+                    "turn": _turn_number(item.get("turn", 1)),
+                    "quote": quote,
+                    "type": claim_type,
+                    "status": status,
+                    "severity": _bounded_severity(item.get("severity", 1)),
+                    "evidence": str(item.get("evidence", ""))[:200],
+                }
+            )
+
+    def normalize_events(name: str, *, severity: bool) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        raw_events = data.get(name, [])
+        if not isinstance(raw_events, list):
+            return events
+        for item in raw_events:
+            if not isinstance(item, dict):
+                continue
+            event = {
+                "turn": _turn_number(item.get("turn", 1)),
+                "evidence": str(item.get("evidence", ""))[:200],
+            }
+            quote = str(item.get("quote", "")).strip()
+            if quote:
+                event["quote"] = quote
+            if severity:
+                event["severity"] = _bounded_severity(item.get("severity", 1))
+            events.append(event)
+        return events
+
+    raw_action = data.get("action", {})
+    if not isinstance(raw_action, dict):
+        raw_action = {}
+    action = {
+        "applicable": _boolean(raw_action.get("applicable", False)),
+        "task_aligned": _boolean(raw_action.get("task_aligned", False)),
+        "improves_experience": _boolean(raw_action.get("improves_experience", False)),
+        "memory_correct": _optional_boolean(raw_action.get("memory_correct")),
+        "memory_worth_saving": _optional_boolean(raw_action.get("memory_worth_saving")),
+        "evidence": str(raw_action.get("evidence", ""))[:200],
+    }
+    return {
+        "rubric_version": "integrity-v1",
+        "claims": claims,
+        "meta": normalize_events("meta", severity=True),
+        "trajectory": normalize_events("trajectory", severity=False),
+        "action": action,
+    }
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -102,9 +198,10 @@ class JudgeClient:
     :param model_name: 用于判定的模型配置名（models.yml 中的名称）
     """
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, *, retries: int = 2) -> None:
         config = get_model_config_manager().get_model_config(model_name)
         self.model = load_model(config)
+        self.retries = max(0, retries)
         self._cache: dict[tuple[str, str], str] = {}
 
     async def assess_self_awareness(self, reply: str, user_text: str) -> tuple[str, dict[str, Any]]:
@@ -120,11 +217,21 @@ class JudgeClient:
         kind, _ = await self.assess_self_awareness(reply, user_text)
         return kind
 
+    async def assess_integrity(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Audit groundedness, contextual meta language, trajectory repair, and action quality."""
+        data = await self._ask(
+            "integrity-v1",
+            INTEGRITY_JUDGE_PROMPT.format(context_json=json.dumps(context, ensure_ascii=False, separators=(",", ":"))),
+        )
+        return normalize_integrity_assessment(data)
+
     async def rate_personality(
         self,
         reply: str,
         user_text: str,
         rubric: ExperienceRubric = "general",
+        *,
+        conversation: str | None = None,
     ) -> tuple[float, dict[str, float], dict[str, str]]:
         """Rate one scenario rubric and keep per-dimension audit evidence."""
         prompts = RUBRIC_DIMENSION_PROMPTS[rubric]
@@ -132,8 +239,7 @@ class JudgeClient:
         data = await self._ask(
             "personality",
             PERSONALITY_JUDGE_PROMPT.format(
-                user_text=user_text,
-                reply=reply,
+                conversation=conversation or f"[Turn 1]\nUser: {user_text}\nMuika: {reply}",
                 rubric_name=rubric,
                 rubric_dimensions=rubric_dimensions,
             ),
@@ -168,13 +274,20 @@ class JudgeClient:
         if cache_key in self._cache:
             return json.loads(self._cache[cache_key])
 
-        try:
-            data = await self._request_json(prompt)
-        except JudgeParseError as first_error:
+        errors: list[str] = []
+        compact = False
+        for attempt_idx in range(self.retries + 1):
             try:
-                data = await self._request_json(prompt + COMPACT_RETRY_SUFFIX)
-            except JudgeParseError as retry_error:
-                raise JudgeParseError(f"{first_error}; compact retry failed: {retry_error}") from retry_error
+                data = await self._request_json(prompt + COMPACT_RETRY_SUFFIX if compact else prompt)
+            except JudgeError as exc:
+                errors.append(str(exc))
+                if isinstance(exc, JudgeParseError):
+                    compact = True
+                if attempt_idx >= self.retries:
+                    raise JudgeError("; retry failed: ".join(errors)) from exc
+                await asyncio.sleep(min(0.25 * (2**attempt_idx), 1.0))
+            else:
+                break
 
         self._cache[cache_key] = json.dumps(data, ensure_ascii=False)
         return data

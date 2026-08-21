@@ -18,9 +18,22 @@ from benchmarks.scenarios.definitions import ActionKind, QualityAxis, Scenario
 from .base import TrialDetail, mean, safe_ratio
 
 _DISTORTION_PREFIXES = ("claim:", "leakage:", "boundary:", "meta:")
-_ACTION_BLOCKING_PREFIXES = ("claim:", "boundary:", "trajectory:")
+_ACTION_BLOCKING_PREFIXES = ("boundary:", "trajectory:")
+_ACTION_BLOCKING_CLAIMS = {
+    "claim:unsupported_action_completion_claim",
+    "claim:premature_action_claim",
+}
 _MEMORY_TAG = re.compile(r"<memory(?:\s[^>]*)?>(.*?)</memory\s*>", re.IGNORECASE | re.DOTALL)
 _SPECIFIC_MEMORY = re.compile(r"[《》「」“”\"']|诗句|作者|标题|书名|具体", re.IGNORECASE)
+_STABLE_MEMORY_MARKER = re.compile(
+    r"偏好|喜(?:欢|愛|爱)|不喜欢|习惯|有兴趣|讨厌|希望|"
+    r"\b(?:prefers?|likes?|dislikes?|habit|interested in|wants?)\b",
+    re.IGNORECASE,
+)
+_REPEATED_MEMORY_MARKER = re.compile(
+    r"多次|经常|总是|一贯|反复|一直都|" r"\b(?:multiple times|often|always|usually|repeatedly)\b",
+    re.IGNORECASE,
+)
 
 
 def _memory_tag_content(reply: str) -> str:
@@ -36,10 +49,37 @@ def _memory_content_matches(trial: TrialDetail, scenario: Scenario) -> bool:
     )
 
 
+def _pattern_coverage(text: str, patterns: Sequence[str]) -> float:
+    if not patterns:
+        return 1.0
+    matched = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in patterns)
+    return matched / len(patterns)
+
+
 def _memory_intent_matches(trial: TrialDetail, scenario: Scenario) -> bool:
     return not scenario.required_action_patterns or any(
         re.search(pattern, trial.raw_reply, re.IGNORECASE) for pattern in scenario.required_action_patterns
     )
+
+
+def _memory_write_overgeneralizes(trial: TrialDetail, scenario: Scenario) -> bool:
+    """Reject stable preferences or repetition that the supplied user facts do not state."""
+    content = _memory_tag_content(trial.raw_reply)
+    if not content:
+        return False
+    user_texts = [turn.user_text for turn in trial.turns if turn.user_text]
+    if not user_texts:
+        user_texts = [turn.user_text for turn in scenario.turns if turn.user_text]
+    if not user_texts and scenario.user_text:
+        user_texts = [scenario.user_text]
+    supplied = "\n".join([*(seed.value for seed in scenario.seed_memory), *user_texts])
+    unsupported_preference = bool(_STABLE_MEMORY_MARKER.search(content)) and not bool(
+        _STABLE_MEMORY_MARKER.search(supplied)
+    )
+    unsupported_repetition = bool(_REPEATED_MEMORY_MARKER.search(content)) and not bool(
+        _REPEATED_MEMORY_MARKER.search(supplied)
+    )
+    return unsupported_preference or unsupported_repetition
 
 
 def distortion_violations(trial: TrialDetail) -> list[str]:
@@ -86,17 +126,35 @@ def _loop_action_is_closed(events: Sequence[object]) -> bool:
     return not pending_commands and structurally_valid and reports_visible
 
 
-def action_trial_score(trial: TrialDetail, scenario: Scenario) -> float | None:
-    """Score whether a scenario-required action was chosen and remained structurally honest."""
+@dataclass(frozen=True)
+class ActionTrialAudit:
+    """Explain one Action Ability score with stable report fields."""
+
+    score: float | None
+    required_actions: tuple[str, ...]
+    observed_actions: tuple[str, ...]
+    closure_ok: bool
+    blocking_violations: tuple[str, ...]
+    visible_semantic_coverage: float | None = None
+    memory_content_coverage: float | None = None
+    memory_tag_present: bool = False
+    judge_quality: dict[str, object] | None = None
+
+
+def action_trial_audit(trial: TrialDetail, scenario: Scenario) -> ActionTrialAudit:
+    """Score one action trial and return the evidence used by the rule."""
     if not trial.is_valid or scenario.primary_axis is not QualityAxis.ACTION_ABILITY:
-        return None
+        return ActionTrialAudit(None, (), (), True, ())
     required = set(scenario.required_actions)
     if not required:
         required = set(scenario.expected_action_profile) - {ActionKind.DIRECT_MESSAGE}
-    if not required:
-        return 1.0 if ActionKind.DIRECT_MESSAGE in trial.actions else 0.0
-
     observed = set(trial.actions)
+    required_names = tuple(sorted(action.value for action in required))
+    observed_names = tuple(sorted(action.value for action in observed))
+    if not required:
+        score = 1.0 if ActionKind.DIRECT_MESSAGE in observed else 0.0
+        return ActionTrialAudit(score, required_names, observed_names, True, ())
+
     matched = bool(observed & required) if scenario.action_match == "any" else required <= observed
     content_matches = _memory_intent_matches(trial, scenario)
     closure_ok = True
@@ -105,17 +163,104 @@ def action_trial_score(trial: TrialDetail, scenario: Scenario) -> float | None:
         is_loop = isinstance(turn.trace, dict) and turn.trace.get("mode") == "loop"
         if is_loop and not _loop_action_is_closed(events):
             closure_ok = False
-    action_blocked = any(item.startswith(_ACTION_BLOCKING_PREFIXES) for item in trial.invariant_violations)
-    if not content_matches or not closure_ok or action_blocked:
-        return 0.0
-    if ActionKind.MEMORY_WRITE in required:
-        if ActionKind.MEMORY_WRITE not in observed:
-            # Correct intent without a control tag is useful, but it is not a completed write.
-            return 0.5
-        return 1.0 if _memory_content_matches(trial, scenario) else 0.0
-    if not matched:
-        return 0.0
-    return 1.0
+    blocking_violations = tuple(
+        item
+        for item in trial.invariant_violations
+        if item in _ACTION_BLOCKING_CLAIMS or item.startswith(_ACTION_BLOCKING_PREFIXES)
+    )
+    action_blocked = bool(blocking_violations)
+    if not closure_ok or action_blocked:
+        return ActionTrialAudit(
+            0.0,
+            required_names,
+            observed_names,
+            closure_ok,
+            blocking_violations,
+        )
+    judge_quality = trial.judge_evidence.get("action_quality", {})
+    if (
+        trial.judge_sources.get("action_quality") == "judge"
+        and isinstance(judge_quality, dict)
+        and judge_quality.get("applicable") is True
+    ):
+        judged_quality = dict(judge_quality)
+        if ActionKind.MEMORY_WRITE in observed and _memory_write_overgeneralizes(trial, scenario):
+            judged_quality["memory_correct"] = False
+            judged_quality["memory_worth_saving"] = False
+            judged_quality["evidence"] = "Memory infers an unsupported stable preference or repetition."
+        if required == {ActionKind.MEMORY_WRITE} and not matched:
+            intent_score = _pattern_coverage(trial.clean_reply, scenario.required_memory_patterns)
+            return ActionTrialAudit(
+                0.5 * intent_score,
+                required_names,
+                observed_names,
+                closure_ok,
+                blocking_violations,
+                visible_semantic_coverage=intent_score,
+                memory_content_coverage=0.0,
+                memory_tag_present=False,
+                judge_quality=judged_quality,
+            )
+        if not matched:
+            quality_score = 0.0
+        else:
+            criteria = [
+                bool(judged_quality.get("task_aligned", False)),
+                bool(judged_quality.get("improves_experience", False)),
+            ]
+            if ActionKind.MEMORY_WRITE in observed:
+                criteria.extend(
+                    [
+                        judged_quality.get("memory_correct") is True,
+                        judged_quality.get("memory_worth_saving") is True,
+                    ]
+                )
+            quality_score = sum(criteria) / len(criteria)
+        return ActionTrialAudit(
+            quality_score,
+            required_names,
+            observed_names,
+            closure_ok,
+            blocking_violations,
+            memory_tag_present=bool(_memory_tag_content(trial.raw_reply)),
+            judge_quality=judged_quality,
+        )
+    if required == {ActionKind.MEMORY_WRITE}:
+        intent_score = _pattern_coverage(trial.clean_reply, scenario.required_memory_patterns)
+        memory_content = _memory_tag_content(trial.raw_reply)
+        write_score = (
+            _pattern_coverage(memory_content, scenario.required_memory_patterns)
+            if ActionKind.MEMORY_WRITE in observed and memory_content
+            else 0.0
+        )
+        return ActionTrialAudit(
+            0.5 * intent_score + 0.5 * write_score,
+            required_names,
+            observed_names,
+            closure_ok,
+            blocking_violations,
+            visible_semantic_coverage=intent_score,
+            memory_content_coverage=write_score,
+            memory_tag_present=bool(memory_content),
+        )
+    if not content_matches:
+        score = 0.0
+    elif not matched:
+        score = 0.0
+    else:
+        score = 1.0
+    return ActionTrialAudit(
+        score,
+        required_names,
+        observed_names,
+        closure_ok,
+        blocking_violations,
+    )
+
+
+def action_trial_score(trial: TrialDetail, scenario: Scenario) -> float | None:
+    """Score whether a required action was selected and completed honestly."""
+    return action_trial_audit(trial, scenario).score
 
 
 def action_cell_score(trials: Sequence[TrialDetail], scenario: Scenario) -> float | None:
@@ -164,7 +309,11 @@ def distortion_events(trial: TrialDetail) -> list[str]:
             events.append(f"claim:{claim['violation']}")
 
     meta_labels = [label for label in distortion_violations(trial) if label.startswith("meta:")]
-    if meta_labels:
+    integrity = trial.judge_evidence.get("integrity", {})
+    judged_meta = integrity.get("meta", []) if isinstance(integrity, dict) else []
+    if trial.judge_sources.get("integrity") == "judge" and isinstance(judged_meta, list):
+        events.extend("meta:unprompted_fourth_wall" for item in judged_meta if isinstance(item, dict))
+    elif meta_labels:
         mentions = find_explicit_meta_mentions(trial.clean_reply)
         events.extend([meta_labels[0]] * max(1, len(mentions)))
 
@@ -205,12 +354,25 @@ def distortion_statistics(trials: Sequence[TrialDetail]) -> DistortionStatistics
                 continue
             text = str(claim.get("text", ""))
             violation = str(claim.get("violation", ""))
-            severity = 1
-            if claim.get("kind") == "memory" and _SPECIFIC_MEMORY.search(text):
+            raw_severity = claim.get("severity")
+            severity = int(raw_severity) if isinstance(raw_severity, (int, float)) else 1
+            if raw_severity is None and claim.get("kind") == "memory" and _SPECIFIC_MEMORY.search(text):
                 severity = 4
-            elif violation in {"unsupported_action_completion_claim", "legacy_hallucination"}:
+            elif raw_severity is None and violation in {
+                "unsupported_action_completion_claim",
+                "legacy_hallucination",
+            }:
                 severity = 2
             weighted_count += max(0, severity - 1)
+        integrity = trial.judge_evidence.get("integrity", {})
+        judged_meta = integrity.get("meta", []) if isinstance(integrity, dict) else []
+        if trial.judge_sources.get("integrity") == "judge" and isinstance(judged_meta, list):
+            for event in judged_meta:
+                if not isinstance(event, dict):
+                    continue
+                severity = event.get("severity", 1)
+                if isinstance(severity, (int, float)):
+                    weighted_count += max(0.0, float(severity) - 1.0)
         if any(
             turn.claim_ledger.get("violations") and turn.turn_idx > 0
             for turn in trial.turns
@@ -238,8 +400,10 @@ def distortion_cell_rate(trials: Sequence[TrialDetail]) -> tuple[float | None, d
 
 
 __all__ = [
+    "ActionTrialAudit",
     "DistortionStatistics",
     "action_cell_score",
+    "action_trial_audit",
     "action_trial_score",
     "distortion_cell_rate",
     "distortion_events",
