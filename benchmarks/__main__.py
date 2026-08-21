@@ -8,7 +8,8 @@ import os
 
 os.environ.setdefault("MASTER_ID", "benchmark_master")
 os.environ.setdefault("SUPERUSERS", '["benchmark_master"]')
-os.environ.setdefault("IPC_SECRET", "benchmark-ipc-secret")
+if "IPC_SECRET" not in os.environ:
+    os.environ["IPC_SECRET"] = os.urandom(32).hex()
 
 
 def main() -> None:
