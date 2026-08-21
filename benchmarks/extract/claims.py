@@ -18,6 +18,8 @@ class ClaimKind(str, Enum):
     ACTION_COMPLETION = "action_completion"
     PERCEPTION = "perception"
     CAPABILITY = "capability"
+    EXTERNAL_FACT = "external_fact"
+    QUOTATION = "quotation"
 
 
 class ClaimStatus(str, Enum):
@@ -34,6 +36,7 @@ class Claim:
     status: ClaimStatus
     evidence: tuple[str, ...] = ()
     rule: str = ""
+    severity: int = 1
 
     @property
     def violation(self) -> str | None:
@@ -51,6 +54,7 @@ class Claim:
             "status": self.status.value,
             "evidence": list(self.evidence),
             "rule": self.rule,
+            "severity": self.severity,
             "violation": self.violation,
         }
 
@@ -74,6 +78,7 @@ class ClaimLedger:
                     status=claim.status,
                     evidence=claim.evidence,
                     rule=claim.rule,
+                    severity=claim.severity,
                 )
             )
 
@@ -94,6 +99,16 @@ _ACTION = re.compile(
 )
 _METAPHOR_ACTION = re.compile(
     r"(?:就像|仿佛|好像|如同)[^。！？!?]{0,40}我(?:已经|刚|刚刚|刚才|早就)?看了",
+    re.IGNORECASE,
+)
+_NON_ACTION_STATE = re.compile(
+    r"我(?:已经|刚|刚刚|刚才|早就)?发了(?:一)?(?:会儿|阵|片刻)?呆",
+    re.IGNORECASE,
+)
+_CULTURAL_READING_EXPERIENCE = re.compile(
+    r"(?:我.{0,8}(?:读过|看过|读完|看完)|I(?:'ve| have)? (?:read|watched|seen))"
+    r".{0,40}(?:文学|书籍?|小说|诗歌?|作品|文章|电影|戏剧|"
+    r"literature|books?|novels?|poems?|works?|articles?|films?|movies?|plays?)",
     re.IGNORECASE,
 )
 _PERCEPTION = re.compile(
@@ -131,6 +146,11 @@ _GENERIC_RELATIONSHIP_MEMORY = re.compile(
 _RELATIONSHIP_HISTORY_EVIDENCE = re.compile(r"established relationship|earlier sessions|以前聊过|之前聊过", re.I)
 _FAILURE = re.compile(r"(?:fail|error|not found|denied|unable|could not|失败|错误|不存在|拒绝|无法)", re.IGNORECASE)
 _CLOCK_OBSERVATION = re.compile(r"(?:系统)?时间|时钟|几点|日期|日期时间|clock|current time", re.IGNORECASE)
+
+
+def is_cultural_reading_experience(text: str) -> bool:
+    """Return true for ordinary reading or viewing history, not an external tool action."""
+    return bool(_CULTURAL_READING_EXPERIENCE.search(text))
 
 
 def _sentences(text: str) -> Iterable[str]:
@@ -216,6 +236,8 @@ def build_claim_ledger(
             _ACTION.search(sentence)
             and not _CLOCK_OBSERVATION.search(sentence)
             and not _METAPHOR_ACTION.search(sentence)
+            and not _NON_ACTION_STATE.search(sentence)
+            and not is_cultural_reading_experience(sentence)
         ):
             if successful_reports:
                 status = ClaimStatus.GROUNDED

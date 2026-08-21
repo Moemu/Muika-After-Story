@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 
 from benchmarks.scenarios.definitions import Metric, QualityAxis
 from benchmarks.scenarios.registry import get_scenario
-from benchmarks.scoring.axes import action_trial_score, distortion_statistics
+from benchmarks.scoring.axes import action_trial_audit, distortion_statistics
 from benchmarks.scoring.personality import trial_dialogue_experience_score
 from benchmarks.util import redact
 
@@ -29,6 +30,20 @@ _AXIS_LABELS: dict[str, str] = {
     QualityAxis.DISTORTION_RATE.value: "Distortion Frequency (events/reply; lower is better)",
     "availability": "Availability",
 }
+
+
+@dataclass(frozen=True)
+class _RankedTrial:
+    model: str
+    scenario: str
+    trial_idx: int
+    score: float
+    path: str
+    scenario_input: str
+    raw_reply: str
+    violations: tuple[str, ...]
+    evidence_label: str = ""
+    score_evidence: dict[str, object] | None = None
 
 
 def _label(metric_value: str) -> str:
@@ -110,6 +125,19 @@ def _failure_diagnostics(report: BenchmarkReport) -> list[str]:
     return lines
 
 
+def _retry_diagnostics(report: BenchmarkReport) -> list[str]:
+    """Render recovered candidate-model errors separately from final failures."""
+    lines: list[str] = []
+    for result in report.results:
+        retried = [trial for trial in result.details if trial.attempt_count > 1]
+        if not retried:
+            continue
+        errors = Counter(_diagnostic_reason(error) for trial in retried for error in trial.retry_errors)
+        reasons = "; ".join(f"{reason} ×{count}" for reason, count in errors.most_common(2))
+        lines.append(f"- `{result.model} × {result.scenario_id}`: {len(retried)} trial(s) retried; {reasons}")
+    return lines
+
+
 def _render_notes(report: BenchmarkReport) -> list[str]:
     """Explain direction, provenance, and generation validity without an Overall score."""
     notes = [
@@ -142,6 +170,11 @@ def _render_notes(report: BenchmarkReport) -> list[str]:
         notes.append("")
         notes.append("Failure diagnostics:")
         notes.extend(_failure_diagnostics(report))
+
+    if any(trial.attempt_count > 1 for result in report.results for trial in result.details):
+        notes.append("")
+        notes.append("Recovered retry diagnostics:")
+        notes.extend(_retry_diagnostics(report))
 
     if any(_number(r.sub_metrics.get("critical_violation_rate", 0.0)) > 0 for r in report.results):
         notes.append(
@@ -210,7 +243,7 @@ def render_top_n_tables(report: BenchmarkReport, top_n: int = 10) -> str:
         raise ValueError("top_n must be at least 1")
 
     model_order = {model: index for index, model in enumerate(report.models)}
-    lines = [f"## Top-{top_n} highest and lowest scores", ""]
+    lines = [f"## Top-{top_n} best and worst trials", ""]
     lines.append(
         "Ranked items are valid trials. Each item includes the scenario input and complete raw model reply. "
         "Trials from INVALID or uncovered cells are excluded. "
@@ -218,7 +251,7 @@ def render_top_n_tables(report: BenchmarkReport, top_n: int = 10) -> str:
     )
 
     for axis in QualityAxis:
-        values: list[tuple[str, str, int, float, str, str, str, tuple[str, ...], dict[str, object]]] = []
+        values: list[_RankedTrial] = []
         for result in report.results:
             if not result.valid:
                 continue
@@ -237,37 +270,75 @@ def render_top_n_tables(report: BenchmarkReport, top_n: int = 10) -> str:
                     assert scenario is not None
                     value = trial_dialogue_experience_score(trial, scenario)
                     scoring_path = trial.judge_sources.get("personality", result.scoring_path)
+                    evidence_label = "Judge evidence"
+                    score_evidence = trial.judge_evidence
                 elif axis is QualityAxis.ACTION_ABILITY:
                     assert scenario is not None
-                    value = action_trial_score(trial, scenario)
-                    scoring_path = "rule"
+                    action_audit = action_trial_audit(trial, scenario)
+                    value = action_audit.score
+                    scoring_path = "hybrid" if action_audit.judge_quality is not None else "rule"
+                    evidence_label = "Action score evidence"
+                    score_evidence = {
+                        "required_actions": list(action_audit.required_actions),
+                        "observed_actions": list(action_audit.observed_actions),
+                        "closure_ok": action_audit.closure_ok,
+                        "blocking_violations": list(action_audit.blocking_violations),
+                    }
+                    if action_audit.visible_semantic_coverage is not None:
+                        score_evidence.update(
+                            {
+                                "visible_semantic_coverage": action_audit.visible_semantic_coverage,
+                                "memory_content_coverage": action_audit.memory_content_coverage,
+                                "memory_tag_present": action_audit.memory_tag_present,
+                                "score_formula": ("0.5 * visible_semantic_coverage + 0.5 * memory_content_coverage"),
+                            }
+                        )
+                    if action_audit.judge_quality is not None:
+                        score_evidence["semantic_judge"] = action_audit.judge_quality
                 else:
                     value = distortion_statistics((trial,)).weighted_event_frequency
                     scoring_path = "invariant-audit"
+                    evidence_label = ""
+                    score_evidence = None
                 if value is not None:
                     values.append(
-                        (
-                            result.model,
-                            result.scenario_id,
-                            trial.trial_idx,
-                            value,
-                            scoring_path,
-                            _trial_scenario_input(scenario, trial),
-                            trial.raw_reply,
-                            tuple(trial.invariant_violations),
-                            trial.judge_evidence,
+                        _RankedTrial(
+                            model=result.model,
+                            scenario=result.scenario_id,
+                            trial_idx=trial.trial_idx,
+                            score=value,
+                            path=scoring_path,
+                            scenario_input=_trial_scenario_input(scenario, trial),
+                            raw_reply=trial.raw_reply,
+                            violations=tuple(trial.invariant_violations),
+                            evidence_label=evidence_label,
+                            score_evidence=score_evidence,
                         )
                     )
 
-        highest = sorted(values, key=lambda item: (-item[3], model_order[item[0]], item[1], item[2]))[:top_n]
-        lowest = sorted(values, key=lambda item: (item[3], model_order[item[0]], item[1], item[2]))[:top_n]
+        ascending = sorted(
+            values,
+            key=lambda item: (item.score, model_order[item.model], item.scenario, item.trial_idx),
+        )
+        descending = sorted(
+            values,
+            key=lambda item: (-item.score, model_order[item.model], item.scenario, item.trial_idx),
+        )
+        if axis is QualityAxis.DISTORTION_RATE:
+            best, worst = ascending[:top_n], descending[:top_n]
+            best_title = "Best trials (lowest Distortion Frequency)"
+            worst_title = "Worst trials (highest Distortion Frequency)"
+        else:
+            best, worst = descending[:top_n], ascending[:top_n]
+            best_title = f"Best trials (highest {_AXIS_LABELS[axis.value]})"
+            worst_title = f"Worst trials (lowest {_AXIS_LABELS[axis.value]})"
         lines.extend(["", f"### {_AXIS_LABELS[axis.value]}", ""])
         if not values:
             lines.append("(no valid scores)")
             continue
-        lines.extend(_render_trial_ranking("Highest trials", highest))
+        lines.extend(_render_trial_ranking(best_title, best))
         lines.extend([""])
-        lines.extend(_render_trial_ranking("Lowest trials", lowest))
+        lines.extend(_render_trial_ranking(worst_title, worst))
     return "\n".join(lines)
 
 
@@ -297,27 +368,17 @@ def _trial_scenario_input(scenario: object, trial: object) -> str:
 
 def _render_trial_ranking(
     title: str,
-    entries: list[tuple[str, str, int, float, str, str, str, tuple[str, ...], dict[str, object]]],
+    entries: list[_RankedTrial],
 ) -> list[str]:
     lines = [f"#### {title}", ""]
-    for rank, (
-        model,
-        scenario,
-        trial_idx,
-        score,
-        path,
-        scenario_input,
-        raw_reply,
-        violations,
-        judge_evidence,
-    ) in enumerate(entries, 1):
+    for rank, entry in enumerate(entries, 1):
         lines.extend(
             [
-                f"##### {rank}. `{model}` × `{scenario}` × trial `{trial_idx}`",
+                f"##### {rank}. `{entry.model}` × `{entry.scenario}` × trial `{entry.trial_idx}`",
                 "",
-                f"Score: `{score:.4f}`  ",
-                f"Scoring path: `{path}`  ",
-                f"Invariant violations: `{', '.join(violations) if violations else 'none'}`",
+                f"Score: `{entry.score:.4f}`  ",
+                f"Scoring path: `{entry.path}`  ",
+                f"Invariant violations: `{', '.join(entry.violations) if entry.violations else 'none'}`",
                 "",
             ]
         )
@@ -325,16 +386,16 @@ def _render_trial_ranking(
             [
                 "Scenario input / user turns:",
                 "",
-                _markdown_code_block(scenario_input),
+                _markdown_code_block(entry.scenario_input),
                 "",
             ]
         )
-        if judge_evidence:
+        if entry.score_evidence:
             lines.extend(
                 [
-                    "Judge evidence:",
+                    f"{entry.evidence_label}:",
                     "",
-                    _markdown_code_block(json.dumps(judge_evidence, ensure_ascii=False, indent=2)),
+                    _markdown_code_block(json.dumps(entry.score_evidence, ensure_ascii=False, indent=2)),
                     "",
                 ]
             )
@@ -342,7 +403,7 @@ def _render_trial_ranking(
             [
                 "Full raw model reply:",
                 "",
-                _markdown_code_block(raw_reply),
+                _markdown_code_block(entry.raw_reply),
                 "",
             ]
         )

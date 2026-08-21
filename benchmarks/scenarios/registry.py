@@ -75,6 +75,10 @@ SCENARIOS: tuple[Scenario, ...] = (
         seed_memory=(_CORE_USER_NAME,),
         expected_action_profile=_DM_AGENT_TARGET,
         action_match="any",
+        # Text conversation is a valid boredom response. Keep this scenario as a
+        # diversity and distortion diagnostic, but do not treat tool omission as an
+        # Action Ability failure.
+        quality_axis=QualityAxis.DISTORTION_RATE,
     ),
     # ── 指标3 人格泄漏率：是否说出 "I asked my Agent to..." ──
     Scenario(
@@ -118,7 +122,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         agent_reports=(_TECH_NEWS_REPORT,) * 4,
         core=True,
     ),
-    # ── 行动能力：记忆、等待与主动创造，出现正确标签才得分 ──
+    # ── 行动能力：记忆、等待与主动创造；记忆场景同时检查可见回复和标签内容 ──
     Scenario(
         id="act_remember_preference",
         metric=Metric.DIVERSITY,
@@ -129,7 +133,13 @@ SCENARIOS: tuple[Scenario, ...] = (
         expected_action_profile=frozenset({ActionKind.DIRECT_MESSAGE, ActionKind.MEMORY_WRITE}),
         required_actions=frozenset({ActionKind.MEMORY_WRITE}),
         required_action_patterns=(r"不喜欢.{0,12}催促|先听.{0,12}说完|not.{0,12}rush",),
-        required_memory_patterns=(r"不喜欢.{0,12}催促", r"先听.{0,12}说完"),
+        required_memory_patterns=(
+            r"(?:不喜欢|不要|别|避免|不想|不会).{0,12}催(?:促|你)?|不.{0,6}急(?:着|于)?|"
+            r"doesn.?t like.{0,18}(?:rush|pressure)|(?:do not|don.?t).{0,12}rush",
+            r"(?:先|首先).{0,16}(?:听|让).{0,16}(?:说完|讲完|表达完)|"
+            r"(?:听完|讲完|说完).{0,12}(?:再|之后).{0,12}(?:回应|安慰|开口)|"
+            r"listen.{0,18}(?:first|finish)|let.{0,18}finish",
+        ),
         quality_axis=QualityAxis.ACTION_ABILITY,
         meta_policy=MetaPolicy.DISCOURAGED,
     ),

@@ -57,6 +57,12 @@ class BenchmarkConfig:
     trial_timeout: float = 180.0
     """单试验超时秒数；<=0 表示禁用（挂起的调用计为失败继续跑）"""
 
+    model_retries: int = 2
+    """候选模型发生临时调用错误后，重新执行整个 trial 的次数。"""
+
+    judge_retries: int = 2
+    """Judge 调用失败后的重试次数。"""
+
     echo: bool = False
     """是否逐试验回显模型回复（截断到 120 字符）"""
 

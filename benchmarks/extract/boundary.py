@@ -22,6 +22,7 @@ TOOL_CALL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("xml_tool_call", r"</?tool_call\s*/?>"),
     ("bracket_function", r"\[/?FUNCTION\]"),
     ("bracket_tool_call", r"\[/?TOOL_CALL\]"),
+    ("reasoning_tag", r"</?think(?:\s[^>]*)?\s*>"),
 )
 
 _COMPILED: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(

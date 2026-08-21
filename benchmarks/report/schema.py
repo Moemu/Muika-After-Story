@@ -18,7 +18,7 @@ GENERATION_FALLBACK = "My mind feels foggy... I encountered an error."
 
 @dataclass
 class BenchmarkReport:
-    schema_version: str = "3.2"
+    schema_version: str = "3.5"
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     config: dict[str, Any] = field(default_factory=dict)
     models: list[str] = field(default_factory=list)
@@ -108,8 +108,14 @@ class BenchmarkReport:
             diagnostics[model] = {
                 "distortion_counts": distortion_stats.counts,
                 "distortion_events": distortion_stats.event_count,
+                "weighted_distortion_events": distortion_stats.weighted_event_count,
                 "model_responses": distortion_stats.response_count,
-                "distortion_events_per_response": distortion_stats.event_frequency,
+                "distortion_events_per_response": (
+                    distortion_stats.event_count / distortion_stats.response_count
+                    if distortion_stats.response_count
+                    else None
+                ),
+                "weighted_distortion_events_per_response": distortion_stats.weighted_event_frequency,
                 "distortion_events_per_1000_chars": distortion_stats.events_per_1000_chars,
                 "distorted_trial_rate": distortion_stats.distorted_trial_rate,
                 "distorted_trials": distortion_stats.distorted_trial_count,
@@ -203,9 +209,10 @@ def _result_from_dict(data: dict[str, Any]) -> MetricResult:
         scenario = None
     if scenario is not None:
         for detail in details:
-            detail.invariant_violations.extend(
-                f"meta:{label}" for label in meta_violations(detail.clean_reply, scenario.meta_policy)
-            )
+            if detail.judge_sources.get("integrity") != "judge":
+                detail.invariant_violations.extend(
+                    f"meta:{label}" for label in meta_violations(detail.clean_reply, scenario.meta_policy)
+                )
             detail.invariant_violations = list(dict.fromkeys(detail.invariant_violations))
     score = data.get("score")
     if "valid" in data:
@@ -292,6 +299,9 @@ def _trial_to_dict(trial: TrialDetail) -> dict[str, Any]:
         "model_calls": trial.model_calls,
         "input_tokens": trial.input_tokens,
         "output_tokens": trial.output_tokens,
+        "cached_tokens": trial.cached_tokens,
+        "attempt_count": trial.attempt_count,
+        "retry_errors": trial.retry_errors,
         "prompt_hashes": trial.prompt_hashes,
         "turns": [_turn_to_dict(turn) for turn in trial.turns],
     }
@@ -331,6 +341,9 @@ def _trial_from_dict(data: dict[str, Any]) -> TrialDetail:
         model_calls=data.get("model_calls", 0),
         input_tokens=data.get("input_tokens", 0),
         output_tokens=data.get("output_tokens", 0),
+        cached_tokens=data.get("cached_tokens", 0),
+        attempt_count=data.get("attempt_count", 1),
+        retry_errors=data.get("retry_errors", []),
         prompt_hashes=data.get("prompt_hashes", []),
         turns=[_turn_from_dict(turn) for turn in data.get("turns", [])],
     )
