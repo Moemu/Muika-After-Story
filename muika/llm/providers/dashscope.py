@@ -179,7 +179,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         response: GenerationResponse | MultiModalConversationResponse,
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> ModelCompletions:
         """
         处理 Dashscope 的非流式返回对象
@@ -190,6 +190,8 @@ class Dashscope(BaseLLM):
         :param response: 迭代器主体
         :param total_usage: 整体用量
         """
+        if total_usage is None:
+            total_usage = Usage()
         completions = ModelCompletions()
 
         if response.status_code != 200:
@@ -203,7 +205,7 @@ class Dashscope(BaseLLM):
         total_usage.output_tokens += response.usage.output_tokens
         prompt_tokens_details = getattr(response.usage, "prompt_tokens_details", None)
         if prompt_tokens_details:
-            total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens ", 0)
+            total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens", 0)
         completions.usage = total_usage
 
         if response.output.text:
@@ -223,7 +225,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         response: Generator[GenerationResponse, None, None] | Generator[MultiModalConversationResponse, None, None],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
         处理 Dashscope 的流式迭代器
@@ -234,6 +236,8 @@ class Dashscope(BaseLLM):
         :param response: 迭代器主体
         :param total_usage: 整体用量
         """
+        if total_usage is None:
+            total_usage = Usage()
         func_stream = FunctionCallStream()
         thought_stream = ThoughtStream()
 
@@ -255,7 +259,7 @@ class Dashscope(BaseLLM):
             total_usage.output_tokens = chunk.usage.output_tokens
             prompt_tokens_details = getattr(chunk.usage, "prompt_tokens_details", None)
             if prompt_tokens_details:
-                total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens ", 0)
+                total_usage.cached_tokens = getattr(prompt_tokens_details, "cached_tokens", 0)
             stream_completions.usage = total_usage
 
             # 优先判断是否是工具调用（OpenAI-style function calling）
@@ -288,7 +292,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         response: GenerationResponse | MultiModalConversationResponse,
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> ModelCompletions:
         """
         处理非流式工具调用流
@@ -299,6 +303,8 @@ class Dashscope(BaseLLM):
         :param func_stream: 工具调用流实例
         :param total_usage: 整体用量
         """
+        if total_usage is None:
+            total_usage = Usage()
         tool_call = response.output.choices[0].message.tool_calls[0]
         tool_call_id = tool_call["id"]
         function_name = tool_call["function"]["name"]
@@ -317,7 +323,7 @@ class Dashscope(BaseLLM):
         tools: List[dict],
         response_format: Optional[dict],
         func_stream: FunctionCallStream,
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
         处理流式工具调用流
@@ -328,6 +334,8 @@ class Dashscope(BaseLLM):
         :param func_stream: 工具调用流实例
         :param total_usage: 整体用量
         """
+        if total_usage is None:
+            total_usage = Usage()
         function_args = json.loads(func_stream.function_args)
 
         function_return = await function_call_handler(func_stream.function_name, function_args)  # type: ignore
@@ -354,9 +362,11 @@ class Dashscope(BaseLLM):
         return await self._ask(messages, tools, response_format, total_usage)  # type: ignore
 
     async def _ask(
-        self, messages: list, tools: List[dict], response_format: Optional[dict], total_usage: Usage = Usage()
+        self, messages: list, tools: List[dict], response_format: Optional[dict], total_usage: Usage | None = None
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
         # 因为 Dashscope 对于多模态模型的接口不同，所以这里不能统一函数
+        if total_usage is None:
+            total_usage = Usage()
         if not self.config.multimodal:
             call_kwargs: dict[str, Any] = {
                 "api_key": self.api_key,

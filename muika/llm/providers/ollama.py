@@ -89,8 +89,10 @@ class Ollama(BaseLLM):
         messages: list,
         tools: List[dict[str, Any]],
         response_format: Optional[dict[str, Any]],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> ModelCompletions:
+        if total_usage is None:
+            total_usage = Usage()
         completions = ModelCompletions()
 
         try:
@@ -142,8 +144,10 @@ class Ollama(BaseLLM):
         messages: list,
         tools: List[dict[str, Any]],
         response_format: Optional[dict[str, Any]],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        if total_usage is None:
+            total_usage = Usage()
         try:
             response = await self.client.chat(
                 model=self.model,
