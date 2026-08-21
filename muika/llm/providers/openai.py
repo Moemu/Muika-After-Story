@@ -131,8 +131,10 @@ class Openai(BaseLLM):
         messages: list,
         tools: Union[List[ChatCompletionToolParam], NotGiven],
         response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> ModelCompletions:
+        if total_usage is None:
+            total_usage = Usage()
         completions = ModelCompletions()
 
         try:
@@ -215,8 +217,10 @@ class Openai(BaseLLM):
         messages: list,
         tools: Union[List[ChatCompletionToolParam], NotGiven],
         response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        if total_usage is None:
+            total_usage = Usage()
         is_insert_think_label = False
         function_id = ""
         function_name = ""

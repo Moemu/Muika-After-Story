@@ -85,11 +85,13 @@ class Echo(BaseLLM):
         return messages
 
     async def _ask_sync(
-        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage = Usage()
+        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage | None = None
     ) -> ModelCompletions:
         """
         同步模型调用
         """
+        if total_usage is None:
+            total_usage = Usage()
         total_usage.input_tokens += len(messages)
 
         request_info = f"Model: {self.__class__.__name__};\n"
@@ -101,11 +103,13 @@ class Echo(BaseLLM):
         return ModelCompletions(text=request_info, usage=total_usage)
 
     async def _ask_stream(
-        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage = Usage()
+        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage | None = None
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
         流式输出
         """
+        if total_usage is None:
+            total_usage = Usage()
         request_info = f"Model: {self.__class__.__name__};\n"
         request_info += f"Messages: {messages}\n"
         request_info += f"Tools: {tools}\n"

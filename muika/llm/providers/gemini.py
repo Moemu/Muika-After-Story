@@ -160,8 +160,10 @@ class Gemini(BaseLLM):
         messages: list[ContentOrDict],
         tools: Optional[List[dict]],
         response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> ModelCompletions:
+        if total_usage is None:
+            total_usage = Usage()
         gemini_config = self._build_gemini_config(tools, response_format)
         completions = ModelCompletions()
 
@@ -229,8 +231,10 @@ class Gemini(BaseLLM):
         messages: list,
         tools: Optional[List[dict]],
         response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        if total_usage is None:
+            total_usage = Usage()
         gemini_config = self._build_gemini_config(tools, response_format)
         try:
             current_input = 0

@@ -148,8 +148,10 @@ class Azure(BaseLLM):
         messages: List[ChatRequestMessage],
         tools: List[ChatCompletionsToolDefinition],
         response_format: Optional[JsonSchemaFormat],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> ModelCompletions:
+        if total_usage is None:
+            total_usage = Usage()
         client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token))
 
         completions = ModelCompletions()
@@ -224,8 +226,10 @@ class Azure(BaseLLM):
         messages: List[ChatRequestMessage],
         tools: List[ChatCompletionsToolDefinition],
         response_format: Optional[JsonSchemaFormat],
-        total_usage: Usage = Usage(),
+        total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        if total_usage is None:
+            total_usage = Usage()
         client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token))
 
         try:
