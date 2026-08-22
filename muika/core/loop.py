@@ -281,8 +281,8 @@ class Muika:
         heart_cot = re.findall(r"<heart>(.*?)</heart>", reply, re.DOTALL)
         reply = re.sub(r"<heart>(.*?)</heart>", "", reply, flags=re.DOTALL).strip()
 
-        do_nothing_tags = re.findall(r"<do_nothing\s*/?>", reply, re.IGNORECASE)
-        do_nothing = bool(do_nothing_tags)
+        do_nothing = bool(re.search(r"<do_nothing\s*/?>", reply, re.IGNORECASE))
+        reply = re.sub(r"<do_nothing\s*/?>", "", reply, flags=re.IGNORECASE).strip()
 
         memory_contents = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
         reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
@@ -314,7 +314,7 @@ class Muika:
             target=target,
             timeout=timeout,
             god_mode=god_mode,
-            heart_cot=heart_cot,
+            heart_cot=heart_cot or None,
             do_nothing=do_nothing,
         )
 

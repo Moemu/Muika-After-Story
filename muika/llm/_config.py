@@ -72,6 +72,16 @@ class ModelConfig(BaseModel):
     def __hash__(self) -> int:
         return hash(f"{self.provider}::{self.api_host}::{self.model_name}")
 
+    def __eq__(self, config: object) -> bool:
+        if not isinstance(config, ModelConfig):
+            return False
+
+        return (
+            self.provider == config.provider
+            and self.api_host == config.api_host
+            and self.model_name == config.model_name
+        )
+
     @field_validator("provider")
     @classmethod
     def check_model_loader(cls, provider: str) -> str:
