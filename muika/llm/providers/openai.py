@@ -222,7 +222,7 @@ class Openai(BaseLLM):
             completions.succeed = False
 
         except openai.APIStatusError as e:
-            error_message = f"API 状态异常: {e.status_code}({e.response})"
+            error_message = f"API 状态异常: {e.status_code}({e.body})"
             completions.text = error_message
             logger.error(error_message)
             completions.succeed = False
@@ -371,7 +371,7 @@ class Openai(BaseLLM):
             yield stream_completions
 
         except openai.APIStatusError as e:
-            error_message = f"API 状态异常: {e.status_code}({e.response})"
+            error_message = f"API 状态异常: {e.status_code}({e.body})"
             logger.error(error_message)
             stream_completions = ModelStreamCompletions()
             stream_completions.chunk = error_message
@@ -398,8 +398,16 @@ class Openai(BaseLLM):
             else:
                 schema = request.json_schema.model_json_schema()
 
+            # JSONSchema 是 TypedDict，必须显式填写 `name` 与 `schema` 两个字段：
+            # 直接把 pydantic 的 JSON Schema dict 展开进去会丢失 `schema` 键，
+            # 导致 OpenAI 兼容端点（如 DeepSeek）报 "missing field `schema`"。
             response_format = ResponseFormatJSONSchema(
-                type="json_schema", json_schema=JSONSchema(**schema, strict=True)
+                type="json_schema",
+                json_schema=JSONSchema(
+                    name=request.json_schema.__name__ if isinstance(request.json_schema, type) else "response",
+                    schema=schema,
+                    strict=True,
+                ),
             )
         else:
             response_format = NOT_GIVEN
