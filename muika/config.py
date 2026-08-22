@@ -7,7 +7,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, List, Literal, Optional
+from typing import Callable, List, Literal, Optional
 
 import yaml as yaml_
 from pydantic import AliasChoices, Field, ValidationError, field_validator
@@ -154,7 +154,7 @@ mas_config = MASConfig()
 
 # 各强度档位的模型采样覆写表
 # high 收紧 temperature 并提高重复/存在惩罚，符合"高强度思考更专注"的语义
-HEART_INTENSITY_SAMPLING: dict[str, dict[str, Any] | None] = {
+HEART_INTENSITY_SAMPLING: dict[str, dict[str, float] | None] = {
     "off": None,
     "low": {"temperature": 0.8, "top_p": 0.9},
     "medium": {},
@@ -315,15 +315,23 @@ class ModelConfigManager:
         """
         将当前 Heart 强度的采样覆写叠加到基准配置上，返回生效配置
 
+        当且仅当源字段不为 None 时才生效
+
         :return: 叠加后的 ModelConfig；基准缺失时返回 None
         """
         base = self._heart_base_config or self.current_config
         if base is None:
             return self.current_config
-        overrides = HEART_INTENSITY_SAMPLING.get(self.heart_intensity) or {}
+        overrides = HEART_INTENSITY_SAMPLING.get(self.heart_intensity)
         if not overrides:
             return base
-        return base.model_copy(update=overrides)
+
+        new_config = base.model_copy()
+        for item, value in overrides.items():
+            if getattr(new_config, item):
+                setattr(new_config, item, value)
+
+        return new_config
 
     def set_heart_intensity(self, level: Literal["low", "medium", "high", "off"]) -> None:
         """
@@ -347,6 +355,8 @@ class ModelConfigManager:
         # 通知所有注册的监听器
         for listener in self._listeners:
             listener(self.current_config, old)
+
+        mas_config.heartbeat_intensity = level
 
     def change_current_config(self, config: ModelConfig):
         old_default = self.current_config.model_copy() if self.current_config else None
