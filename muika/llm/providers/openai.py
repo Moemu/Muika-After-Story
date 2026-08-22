@@ -41,12 +41,28 @@ class Openai(BaseLLM):
         self.api_base = self.config.api_host or "https://api.openai.com/v1"
         self.max_tokens = self.config.max_tokens
         self.temperature = self.config.temperature
+        self.top_p = self.config.top_p
+        self.presence_penalty = self.config.presence_penalty
+        self.frequency_penalty = self.config.frequency_penalty
         self.stream = self.config.stream
         self.modalities = [m for m in self.config.modalities if m in {"text", "audio"}] or NOT_GIVEN  # type: ignore
         self.audio = self.config.audio if (self.modalities and self.config.audio) else NOT_GIVEN
         self.extra_body = self.config.extra_body
 
         self.client = openai.AsyncOpenAI(api_key=self.api_key, base_url=self.api_base, timeout=30)
+
+    def _sampling_kwargs(self) -> dict:
+        """
+        组装采样相关的可选参数（仅在配置非 None 时传入）
+
+        避免向 OpenAI 兼容端点显式传递 None，防止部分服务拒绝未知空参数。
+        """
+        kwargs = {"top_p": self.top_p}
+        if self.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.presence_penalty
+        if self.frequency_penalty is not None:
+            kwargs["frequency_penalty"] = self.frequency_penalty
+        return kwargs
 
     def __build_multi_messages(self, request: ModelRequest) -> dict:
         """
@@ -149,6 +165,7 @@ class Openai(BaseLLM):
                 tools=tools,  # type: ignore
                 extra_body=self.extra_body,
                 response_format=response_format,  # type: ignore
+                **self._sampling_kwargs(),
             )
 
             logger.debug(f"OpenAI response: id={response.id}, choices={response.choices}, usage={response.usage}")
@@ -240,6 +257,7 @@ class Openai(BaseLLM):
                 tools=tools,  # type: ignore
                 extra_body=self.extra_body,
                 response_format=response_format,  # type: ignore
+                **self._sampling_kwargs(),
             )
 
             async for chunk in response:

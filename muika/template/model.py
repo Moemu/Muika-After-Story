@@ -24,6 +24,8 @@ class PromptTemplatesData(BaseModel):
     """是否为初次对话"""
     is_expand_topic: bool = False
     """是否为主动对话模式"""
+    heartbeat_intensity: str = "off"
+    """内心独白（Heart）强度等级，决定模板渲染哪一段思考指示"""
     memory_context: Optional[str] = None
     """记忆内容"""
     injected_preferences: Optional[List["MemoryRecord"]] = None

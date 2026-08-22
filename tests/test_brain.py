@@ -7,6 +7,8 @@
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from muika.core.brain import MuikaBrain
 from muika.core.events import (
     SessionBootstrapEvent,
@@ -36,6 +38,20 @@ def _brain(fake_llm) -> MuikaBrain:
 
 def _memory() -> MemoryManager:
     return MemoryManager()
+
+
+@pytest.fixture(autouse=True)
+def model_config_manager():
+    """将 ``get_model_config_manager`` 替换为带 heart_intensity 的轻量替身。
+
+    ``generate_reply`` 会读取 Heart 强度；真实管理器会在测试中拉起文件 watcher，
+    因此统一 stub 掉，避免加载 models.yml / 启动 Observer。
+    """
+    from types import SimpleNamespace
+
+    stub = SimpleNamespace(heart_intensity="medium")
+    with patch("muika.core.brain.get_model_config_manager", return_value=stub):
+        yield stub
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +136,47 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     assert data.memory_context == memory.get_memory_prompt()
     assert data.injected_preferences == [pref]
     assert data.adapters_info is None
+
+
+async def test_generate_reply_heartbeat_intensity_in_template(fake_llm_factory, model_config_manager):
+    model_config_manager.heart_intensity = "high"
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    brain = _brain(fake)
+    captured = {}
+
+    def _tmpl(name, data):
+        captured["data"] = data
+        return "SYSTEM"
+
+    with patch("muika.core.brain.generate_prompt_from_template", side_effect=_tmpl):
+        await brain.generate_reply(_user_event(), MuikaState(), _memory())
+
+    assert captured["data"].heartbeat_intensity == "high"
+
+
+async def test_generate_reply_heartbeat_intensity_off(fake_llm_factory, model_config_manager):
+    model_config_manager.heart_intensity = "off"
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    brain = _brain(fake)
+    captured = {}
+
+    def _tmpl(name, data):
+        captured["data"] = data
+        return "SYSTEM"
+
+    with patch("muika.core.brain.generate_prompt_from_template", side_effect=_tmpl):
+        await brain.generate_reply(_user_event(), MuikaState(), _memory())
+
+    assert captured["data"].heartbeat_intensity == "off"
+
+
+async def test_generate_reply_keeps_heart_block(fake_llm_factory, model_config_manager):
+    """heart 是私有内心独白，brain 不剥离——由 loop 的 _parse_reply_tags 从显示文本剥离。"""
+    fake = fake_llm_factory(response=ModelCompletions(text="<heart>secret</heart>Hello"))
+    brain = _brain(fake)
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
+        result = await brain.generate_reply(_user_event(), MuikaState(), _memory())
+    assert result == "<heart>secret</heart>Hello"
 
 
 async def test_generate_reply_session_bootstrap_first(fake_llm_factory):

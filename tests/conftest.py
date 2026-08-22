@@ -32,6 +32,20 @@ def sandbox(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def reset_heartbeat():
+    """每个测试结束后将 Heart 强度回归配置默认值，防止污染其他用例。
+
+    仅当 ModelConfigManager 已被实例化（即有用例触发了它）时才复位，
+    避免在尚未初始化的情况下额外拉起文件 watcher / load config。
+    """
+    from muika.config import _model_config_manager
+
+    yield
+    if _model_config_manager is not None:
+        _model_config_manager.set_heart_intensity(mas_config.heartbeat_intensity)
+
+
 @pytest_asyncio.fixture
 async def db_session(tmp_path):
     """临时 SQLite + ``create_all``，供 CRUD 静态方法直接使用（绕过 Alembic 迁移）。

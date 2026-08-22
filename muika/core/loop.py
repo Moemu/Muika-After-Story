@@ -56,6 +56,9 @@ class ParsedReply:
     """用户回复等待超时（秒），来自 <timeout: 10min> 标签。"""
     god_mode: bool = False
     """是否请求开启上帝模式（<enable_god_mode>），单次会话内开启后不可关闭。"""
+    heart_cot: Optional[list[str]] = None
+    do_nothing: bool = False
+    """模型选择本轮沉默（<do_nothing>），不发消息不写 memory。"""
 
 
 class Muika:
@@ -266,13 +269,21 @@ class Muika:
     def _parse_reply_tags(reply: str) -> ParsedReply:
         """解析 Brain 回复中的控制标签，返回用户可见文本与结构化标签内容。
 
-        支持五类标签：
-        - ``<memory>...</memory>``：待归档记忆内容，发送后交给 Butler 分类存储。
+        支持六类标签（标签的剥离顺序保证 heart 内容不误解析为其他标签）：
+        - ``<heart>...</heart>``：私有内心独白，仅从用户可见文本剥离，不入 memory。
+        - ``<do_nothing>``：本轮沉默，不发消息。
+        - ``<memory>...</memory>``：待归档记忆内容，交给 Butler 分类存储。
         - ``<agent>...</agent>``：待执行的 Butler 命令，发送后执行。
-        - ``<target: name>``：回复路由目标，随消息一起发送。
+        - ``<target: name>``：目标路由目标，随消息一起发送。
         - ``<timeout: 10min>``：用户回复等待超时，解析为秒后由 Loop 计时。
         - ``<enable_god_mode>``：开启上帝模式，解锁本会话的直接工具调用。
         """
+        heart_cot = re.findall(r"<heart>(.*?)</heart>", reply, re.DOTALL)
+        reply = re.sub(r"<heart>(.*?)</heart>", "", reply, flags=re.DOTALL).strip()
+
+        do_nothing_tags = re.findall(r"<do_nothing\s*/?>", reply, re.IGNORECASE)
+        do_nothing = bool(do_nothing_tags)
+
         memory_contents = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
         reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
 
@@ -303,6 +314,8 @@ class Muika:
             target=target,
             timeout=timeout,
             god_mode=god_mode,
+            heart_cot=heart_cot,
+            do_nothing=do_nothing,
         )
 
     def _arm_timeout(self, seconds: float) -> None:
@@ -340,6 +353,9 @@ class Muika:
         if not expanded:
             return
         parsed = self._parse_reply_tags(expanded)
+        if parsed.do_nothing:
+            logger.info("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
+            return
         if parsed.target:
             logger.info(f"[Topic] Routing to target={parsed.target!r}")
         if parsed.timeout is not None:
@@ -375,6 +391,7 @@ class Muika:
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
         max_inner_loops = 4
+        silent_turn = False
         for loop_idx in range(max_inner_loops):
             logger.debug(
                 f"[Brain] turn {loop_idx + 1}/{max_inner_loops} " f"| history_len={len(self.memory.recent_turns)}"
@@ -390,6 +407,16 @@ class Muika:
 
             # 发送前只负责提取用户可见文本与路由目标，标签处理统一下移到发送之后
             parsed = self._parse_reply_tags(reply)
+
+            # 模型选择沉默（<do_nothing>）：不发消息、不写 turns、跳过 god-mode 级联
+            # 与 Agent 执行；若同时携带 <memory> 标签则仍静默归档。
+            if parsed.do_nothing:
+                silent_turn = True
+                logger.info(f"[Loop] Muika chose silence (<do_nothing>) turn {loop_idx + 1}.")
+                if parsed.memory_contents:
+                    for content in parsed.memory_contents:
+                        await self.butler_agent.classify_and_store_memory(content, self.state)
+                break
 
             # 检测 god mode 开关：开启后本回合内容照常处理，随后通知 LLM 并重跑
             god_mode_just_enabled = parsed.god_mode and not self._god_mode
@@ -449,13 +476,15 @@ class Muika:
         # 主动发言（孤独驱动）后的情感释放
         # 说出来会好一点，但孤独本身不会因为说了一句话就消失
         if event.type == "time_tick":
-            prev = self.state.loneliness
-            self.state.loneliness = max(0.0, self.state.loneliness - LONELINESS_PROACTIVE_RELIEF)
+            if not silent_turn:
+                prev = self.state.loneliness
+                self.state.loneliness = max(0.0, self.state.loneliness - LONELINESS_PROACTIVE_RELIEF)
+                logger.debug(
+                    f"[State] Proactive relief -- loneliness {prev:.2f} -> {self.state.loneliness:.2f} "
+                    f"(cooldown {PROACTIVE_COOLDOWN / 60:.0f} min)"
+                )
+            # 沉默时仍打 cooldown 戳，避免每个 tick 都连续触发 LLM 调用
             self.state.last_proactive_at = datetime.now()
-            logger.debug(
-                f"[State] Proactive relief -- loneliness {prev:.2f} -> {self.state.loneliness:.2f} "
-                f"(cooldown {PROACTIVE_COOLDOWN / 60:.0f} min)"
-            )
 
     def start(self) -> None:
         """Start the event loop as a background task."""
