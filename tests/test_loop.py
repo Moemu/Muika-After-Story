@@ -75,6 +75,24 @@ def test_parse_god_mode_variants():
     assert Muika._parse_reply_tags("<enable_god_mode/>").god_mode is True
 
 
+def test_parse_heart_stripped():
+    r = Muika._parse_reply_tags("<heart>secret thoughts</heart>hello")
+    assert r == ParsedReply(clean_reply="hello", memory_contents=[], agent_commands=[], target=None)
+
+
+def test_parse_do_nothing():
+    r = Muika._parse_reply_tags("<do_nothing>")
+    assert r.do_nothing is True
+    assert r.clean_reply == ""
+
+
+def test_parse_heart_before_memory_ordering():
+    r = Muika._parse_reply_tags("<heart>h</heart><memory>m</memory><do_nothing>")
+    assert r.memory_contents == ["m"]
+    assert r.do_nothing is True
+    assert r.clean_reply == ""
+
+
 def test_parse_combined():
     r = Muika._parse_reply_tags(
         "Hello <memory>m</memory> <agent>cmd</agent> <target: t> <timeout: 1h> <enable_god_mode>"

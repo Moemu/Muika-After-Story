@@ -7,10 +7,10 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Literal, Optional
 
 import yaml as yaml_
-from pydantic import ValidationError, field_validator
+from pydantic import AliasChoices, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -92,6 +92,12 @@ class MASConfig(BaseSettings):
     """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
     留空时 Core 启动会自动生成并写入 .env 文件。"""
 
+    heartbeat_intensity: Literal["low", "medium", "high", "off"] = Field(
+        default="off",
+        validation_alias=AliasChoices("HEART_INTENSITY", "heartbeat_intensity"),
+    )
+    """内心思考强度"""
+
     @field_validator("master_id")
     def validate_master_id(cls, v):
         if v:
@@ -146,6 +152,22 @@ class MASConfig(BaseSettings):
 mas_config = MASConfig()
 
 
+# 各强度档位的模型采样覆写表
+# high 收紧 temperature 并提高重复/存在惩罚，符合"高强度思考更专注"的语义
+HEART_INTENSITY_SAMPLING: dict[str, dict[str, Any] | None] = {
+    "off": None,
+    "low": {"temperature": 0.8, "top_p": 0.9},
+    "medium": {},
+    "high": {
+        "temperature": 0.7,
+        "top_p": 0.92,
+        "repetition_penalty": 1.15,
+        "presence_penalty": 0.35,
+        "frequency_penalty": 0.2,
+    },
+}
+
+
 class ConfigFileHandler(FileSystemEventHandler):
     """配置文件变化处理器"""
 
@@ -198,6 +220,15 @@ class ModelConfigManager:
         self._load_configs()
         self._start_file_watcher()
 
+        # Heart 内心思考强度：运行时经 set_heart_intensity 切换，仅存内存；
+        # _heart_base_config 为覆写前的基准配置，用于回到默认档时恢复。
+        self.heart_intensity: Literal["low", "medium", "high", "off"] = mas_config.heartbeat_intensity
+        self._heart_base_config: Optional[ModelConfig] = (
+            self.current_config.model_copy(deep=True) if self.current_config else None
+        )
+        if self.heart_intensity != "medium" and HEART_INTENSITY_SAMPLING.get(self.heart_intensity):
+            self.current_config = self._compose()
+
         self._initialized = True
 
     def _load_configs(self):
@@ -241,6 +272,10 @@ class ModelConfigManager:
 
             self._load_configs()
 
+            # Heart 基准随配置文件重载更新，随后叠加当前强度覆写
+            self._heart_base_config = self.current_config.model_copy(deep=True) if self.current_config else None
+            self.current_config = self._compose()
+
             # 通知所有注册的监听器
             for listener in self._listeners:
                 listener(self.current_config, old_default)
@@ -276,9 +311,49 @@ class ModelConfigManager:
             logger.warning(f"指定的模型配置 '{model_config_name}' 不存在！")
             raise ValueError(f"指定的模型配置 '{model_config_name}' 不存在！")
 
+    def _compose(self) -> Optional[ModelConfig]:
+        """
+        将当前 Heart 强度的采样覆写叠加到基准配置上，返回生效配置
+
+        :return: 叠加后的 ModelConfig；基准缺失时返回 None
+        """
+        base = self._heart_base_config or self.current_config
+        if base is None:
+            return self.current_config
+        overrides = HEART_INTENSITY_SAMPLING.get(self.heart_intensity) or {}
+        if not overrides:
+            return base
+        return base.model_copy(update=overrides)
+
+    def set_heart_intensity(self, level: Literal["low", "medium", "high", "off"]) -> None:
+        """
+        切换内心独白（Heart）强度：将对应采样覆写叠加到全局 ModelConfig 实例上。
+
+        首次切换会把当前配置缓存为基准；之后切换基于基准重新叠加，
+        回落默认档（medium）即恢复基准配置。随后通知监听器（brain 据此重建模型）。
+
+        :param level: 目标强度等级
+        :raise ValueError: 未知强度等级
+        """
+        if level not in HEART_INTENSITY_SAMPLING:
+            raise ValueError(f"Unknown heart intensity: {level}")
+
+        self.heart_intensity = level
+        old = self.current_config
+        if self._heart_base_config is None and old is not None:
+            self._heart_base_config = old.model_copy(deep=True)
+        self.current_config = self._compose()
+
+        # 通知所有注册的监听器
+        for listener in self._listeners:
+            listener(self.current_config, old)
+
     def change_current_config(self, config: ModelConfig):
         old_default = self.current_config.model_copy() if self.current_config else None
         self.current_config = config
+        # 切换模型后，Heart 基准更新，并保持当前强度覆写生效
+        self._heart_base_config = config.model_copy(deep=True)
+        self.current_config = self._compose()
 
         # 通知所有注册的监听器
         for listener in self._listeners:

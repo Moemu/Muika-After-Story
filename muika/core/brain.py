@@ -233,6 +233,7 @@ class MuikaBrain:
             event_type=event.type,
             state=state,
             is_chat=True,
+            heartbeat_intensity=mas_config.heartbeat_intensity,
             memory_context=memory_context,
             injected_preferences=injected_preferences,
             adapters_info=self.generate_adapters_info(adapters, now=current_time),
