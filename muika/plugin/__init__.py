@@ -5,6 +5,7 @@ from .command import (
     get_commands,
     on_alconna,
 )
+from .ctx import ctx
 from .loader import (
     get_plugin_by_module_name,
     get_plugin_data_dir,
@@ -27,4 +28,5 @@ __all__ = [
     "CommandDispatcher",
     "get_commands",
     "COMMAND_PREFIXES",
+    "ctx",
 ]

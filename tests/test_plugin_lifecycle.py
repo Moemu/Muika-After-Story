@@ -10,12 +10,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from muika.plugin import lifecycle as lifecycle_mod
 from muika.plugin import loader as loader_mod
+from muika.plugin import state as state_mod
 from muika.plugin.command import (
     _commands,
     on_alconna,
     remove_commands_for_plugin,
 )
+from muika.plugin.ctx import ctx
 from muika.plugin.func_call.caller import (
     Caller,
     _caller_data,
@@ -37,11 +40,15 @@ from muika.plugin.manager import _BUILTIN_PREFIX, PluginManager
 
 @pytest.fixture(autouse=True)
 def _isolate_registries():
-    """每个测试前后保存并恢复 _commands / _caller_data / _plugins / _declared_plugins。"""
+    """每个测试前后保存并恢复全部插件注册表、钩子表、状态存储与加载上下文。"""
     saved_commands = list(_commands)
     saved_callers = dict(_caller_data)
     saved_plugins = dict(_plugins)
     saved_declared = set(_declared_plugins)
+    saved_load_hooks = {k: list(v) for k, v in lifecycle_mod._load_hooks.items()}
+    saved_unload_hooks = {k: list(v) for k, v in lifecycle_mod._unload_hooks.items()}
+    saved_store = {k: dict(v) for k, v in state_mod._store.items()}
+    saved_loading = _loading_plugin.get()
     yield
     _commands[:] = saved_commands
     _caller_data.clear()
@@ -50,6 +57,13 @@ def _isolate_registries():
     _plugins.update(saved_plugins)
     _declared_plugins.clear()
     _declared_plugins.update(saved_declared)
+    lifecycle_mod._load_hooks.clear()
+    lifecycle_mod._load_hooks.update(saved_load_hooks)
+    lifecycle_mod._unload_hooks.clear()
+    lifecycle_mod._unload_hooks.update(saved_unload_hooks)
+    state_mod._store.clear()
+    state_mod._store.update(saved_store)
+    _loading_plugin.set(saved_loading)
 
 
 # --------------------------------------------------------------------------- ownership tracking
@@ -226,6 +240,85 @@ def test_plugin_manager_list_loaded_includes_counts():
     assert info["commands"] == 1
     assert info["func_calls"] == 1
     assert info["is_builtin"] is False
+
+
+# --------------------------------------------------------------------------- ctx 装饰器与状态存储
+
+
+def test_ctx_load_decorator_registers_hook_in_order():
+    """@ctx.load 按装饰顺序注册，并原样返回被装饰函数。"""
+
+    def first():
+        pass
+
+    def second():
+        pass
+
+    token = _loading_plugin.set("plugins.ctx_probe")
+    try:
+        assert ctx.load(first) is first
+        assert ctx.load(second) is second
+    finally:
+        _loading_plugin.reset(token)
+
+    assert lifecycle_mod._load_hooks["plugins.ctx_probe"] == [first, second]
+
+
+def test_ctx_unload_decorator_registers_hook():
+    """@ctx.unload 注册到 unload 钩子表，并原样返回被装饰函数。"""
+
+    def teardown():
+        pass
+
+    token = _loading_plugin.set("plugins.ctx_probe")
+    try:
+        assert ctx.unload(teardown) is teardown
+    finally:
+        _loading_plugin.reset(token)
+
+    assert lifecycle_mod._unload_hooks["plugins.ctx_probe"] == [teardown]
+
+
+def test_ctx_decorator_without_loading_context_returns_func():
+    """加载上下文缺失时装饰器警告并原样返回，不注册。"""
+
+    def stray():
+        pass
+
+    assert _loading_plugin.get() is None
+    assert ctx.load(stray) is stray
+    assert ctx.unload(stray) is stray
+    assert all(stray not in hooks for hooks in lifecycle_mod._load_hooks.values())
+    assert all(stray not in hooks for hooks in lifecycle_mod._unload_hooks.values())
+
+
+def test_ctx_state_is_per_package_and_stable():
+    """ctx.state 按包隔离；同包重复访问返回同一对象（跨重载恢复的基础）。"""
+    token = _loading_plugin.set("plugins.state_a")
+    try:
+        s1 = ctx.state
+        s1["k"] = 1
+        s2 = ctx.state
+    finally:
+        _loading_plugin.reset(token)
+
+    assert s1 is s2
+    assert s1 is state_mod._store["plugins.state_a"]
+    assert s2["k"] == 1
+
+    token = _loading_plugin.set("plugins.state_b")
+    try:
+        sb = ctx.state
+    finally:
+        _loading_plugin.reset(token)
+    assert sb is not s1
+
+
+def test_ctx_state_outside_loading_context_raises():
+    """加载上下文外访问 ctx.state 应抛 RuntimeError（防止静默写丢状态）。"""
+    assert _loading_plugin.get() is None
+    with pytest.raises(RuntimeError):
+        ctx.state
 
 
 # --------------------------------------------------------------------------- 失败加载回滚
