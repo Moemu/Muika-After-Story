@@ -261,6 +261,17 @@ def test_watcher_derives_package_name_for_dir_plugin(tmp_path: Path):
     assert "my_pkg" in package
 
 
+# --------------------------------------------------------------------------- .plugins command module
+
+
+def test_plugins_plugin_module_structure():
+    from muika.builtin_plugins import plugins
+
+    assert hasattr(plugins, "metadata")
+    assert plugins.metadata.name == "plugins"
+    assert hasattr(plugins, "plugins_cmd")
+
+
 # --------------------------------------------------------------------------- builtin guard
 
 
