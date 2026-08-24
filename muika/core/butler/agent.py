@@ -73,6 +73,16 @@ class ButlerAgent:
         self._skill_manager = get_skill_manager()
         self._mcp_tools: list[dict[str, dict]] = []
 
+    def refresh_tools(self) -> int:
+        """重建 LLM 工具列表（function-call + 已缓存的 MCP 工具）。
+
+        插件热重载或手动 reload 后调用，使 LLM 可见新增 / 移除的工具。
+        :return: 重建后的工具总数。
+        """
+        self.tools = get_function_list() + self._mcp_tools
+        logger.debug(f"[Butler] Tools refreshed: {len(self.tools)} total")
+        return len(self.tools)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

@@ -39,6 +39,8 @@ class Caller:
 
         self.module_name: str = ""
         """函数所在模块名称"""
+        self.plugin_package: Optional[str] = None
+        """注册该函数的插件 package_name；builtin 工具为 None"""
 
     def __call__(self, func: F) -> F:
         """
@@ -58,6 +60,11 @@ class Caller:
         else:
             module_name = ""
         self.module_name = module_name
+
+        # 读取当前加载的插件包名作为所有权标记
+        from ..loader import _loading_plugin
+
+        self.plugin_package = _loading_plugin.get()
 
         _caller_data[self._name] = self
         # logger.debug(f"Function Call 函数 {self.module_name}.{self._name} 已成功加载")
@@ -178,3 +185,15 @@ def get_function_list() -> list[dict[str, dict]]:
         tools.append(caller.data())
 
     return tools
+
+
+def remove_callers_for_plugin(package_name: str) -> int:
+    """移除指定插件注册的所有 func_calls。
+
+    :param package_name: 插件 package_name
+    :return: 实际移除的 func_call 数量
+    """
+    to_remove = [name for name, c in _caller_data.items() if c.plugin_package == package_name]
+    for name in to_remove:
+        del _caller_data[name]
+    return len(to_remove)
