@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -221,6 +223,42 @@ def test_plugin_manager_list_loaded_includes_counts():
     assert info["commands"] == 1
     assert info["func_calls"] == 1
     assert info["is_builtin"] is False
+
+
+# --------------------------------------------------------------------------- PluginWatcher path derivation
+
+
+def test_watcher_derives_package_name_for_file_plugin(tmp_path: Path):
+    """PluginFileHandler._derive_package_name 应识别 plugins/<name>.py。"""
+    from muika.plugin.watcher import PluginFileHandler
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    fake_file = plugins_dir / "my_plugin.py"
+    fake_file.write_text("# placeholder")
+
+    handler = PluginFileHandler(manager=MagicMock(), plugins_dir=plugins_dir, base_path=tmp_path)
+    package = handler._derive_package_name(fake_file)
+    assert package is not None
+    assert package.endswith("my_plugin")
+
+
+def test_watcher_derives_package_name_for_dir_plugin(tmp_path: Path):
+    """PluginFileHandler._derive_package_name 应识别 plugins/<name>/__init__.py。"""
+    from muika.plugin.watcher import PluginFileHandler
+
+    plugins_dir = tmp_path / "plugins"
+    pkg_dir = plugins_dir / "my_pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("# init")
+    inner = pkg_dir / "submodule.py"
+    inner.write_text("# sub")
+
+    handler = PluginFileHandler(manager=MagicMock(), plugins_dir=plugins_dir, base_path=tmp_path)
+    # 任意子文件都应推导出顶层 package
+    package = handler._derive_package_name(inner)
+    assert package is not None
+    assert "my_pkg" in package
 
 
 # --------------------------------------------------------------------------- builtin guard
