@@ -38,14 +38,17 @@ class PluginManager:
         self._butler = butler
 
     def unload(self, package_name: str) -> bool:
-        """卸载指定插件。
+        """卸载指定插件并在成功后刷新 Butler 工具列表。
 
         builtin 插件拒绝卸载（返回 False）。
         """
         if package_name.startswith(_BUILTIN_PREFIX):
             logger.warning(f"[PluginManager] refusing to unload builtin plugin {package_name!r}")
             return False
-        return unload_plugin(package_name)
+        if not unload_plugin(package_name):
+            return False
+        self.refresh_butler()
+        return True
 
     def reload(self, package_name: str) -> bool:
         """重载指定插件并在成功后刷新 Butler 工具列表。"""

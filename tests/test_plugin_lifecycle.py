@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 from pathlib import Path
@@ -25,6 +26,8 @@ from muika.plugin.loader import (
     _declared_plugins,
     _loading_plugin,
     _plugins,
+    load_plugin,
+    reload_plugin,
     unload_plugin,
 )
 from muika.plugin.manager import _BUILTIN_PREFIX, PluginManager
@@ -223,6 +226,103 @@ def test_plugin_manager_list_loaded_includes_counts():
     assert info["commands"] == 1
     assert info["func_calls"] == 1
     assert info["is_builtin"] is False
+
+
+# --------------------------------------------------------------------------- 失败加载回滚
+
+
+def test_failed_load_does_not_poison_declared_plugins(monkeypatch):
+    """加载失败后 _declared_plugins 应回滚，允许修复后重新加载（热重载核心场景）。"""
+
+    def raiser(name):
+        raise RuntimeError("boom")
+
+    real_import = importlib.import_module
+    monkeypatch.setattr(loader_mod.importlib, "import_module", raiser)
+    assert load_plugin("plugins.broken_probe") is None
+    assert "plugins.broken_probe" not in _declared_plugins
+
+    # 模拟修复后重试：导入成功
+    monkeypatch.setattr(loader_mod.importlib, "import_module", real_import)
+    sys.modules["plugins.broken_probe"] = types.ModuleType("plugins.broken_probe")
+    try:
+        assert load_plugin("plugins.broken_probe") is not None
+    finally:
+        unload_plugin("plugins.broken_probe")
+
+
+def test_failed_load_cleans_partial_registrations(monkeypatch):
+    """import 半途失败时，已注册的 commands 应一并清理，不留孤儿注册。"""
+
+    def raiser(name):
+        from arclet.alconna import Alconna
+
+        on_alconna(Alconna("partial_probe_cmd"))  # 模拟模块执行半途的注册
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(loader_mod.importlib, "import_module", raiser)
+    assert load_plugin("plugins.partial_probe") is None
+    assert all(c.alc.command != "partial_probe_cmd" for c in _commands)
+    assert "plugins.partial_probe" not in _declared_plugins
+
+
+# --------------------------------------------------------------------------- reload 语义
+
+
+def test_reload_plugin_loads_never_loaded_plugin():
+    """reload_plugin 对从未加载过的新插件应直接加载（watcher 捡新文件的路径）。"""
+    sys.modules["plugins.fresh_probe"] = types.ModuleType("plugins.fresh_probe")
+    try:
+        plugin = reload_plugin("plugins.fresh_probe")
+        assert plugin is not None
+        assert plugin.package_name == "plugins.fresh_probe"
+        assert "plugins.fresh_probe" in _plugins
+    finally:
+        unload_plugin("plugins.fresh_probe")
+    assert "plugins.fresh_probe" not in sys.modules
+
+
+def test_manager_unload_refreshes_butler():
+    """PluginManager.unload 成功后应刷新 Butler 工具列表，避免 LLM 继续看到死工具。"""
+    butler = FakeButler()
+    mgr = PluginManager(butler=butler)
+    _plugins["plugins.unload_refresh"] = loader_mod.Plugin(
+        name="unload_refresh",
+        module=types.ModuleType("plugins.unload_refresh"),
+        package_name="plugins.unload_refresh",
+        meta=None,
+    )
+    assert mgr.unload("plugins.unload_refresh") is True
+    assert butler.refresh_count == 1
+
+
+# --------------------------------------------------------------------------- 循环稳定性（可逆性回归）
+
+
+def test_load_unload_cycle_returns_to_baseline(tmp_path: Path, monkeypatch):
+    """N 轮加载/卸载后各注册表回到基线，无 sys.modules 残留。"""
+    pkg = tmp_path / "cycle_probe"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        "from arclet.alconna import Alconna\n"
+        "from muika.plugin.command import on_alconna\n"
+        "on_alconna(Alconna('cycle_probe_cmd'))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    base_commands = len(_commands)
+    base_callers = len(_caller_data)
+    for _ in range(3):
+        assert load_plugin("cycle_probe") is not None
+        assert any(c.alc.command == "cycle_probe_cmd" for c in _commands)
+        assert unload_plugin("cycle_probe")
+        assert all(c.alc.command != "cycle_probe_cmd" for c in _commands)
+
+    assert len(_commands) == base_commands
+    assert len(_caller_data) == base_callers
+    assert "cycle_probe" not in sys.modules
+    assert "cycle_probe" not in _declared_plugins
 
 
 # --------------------------------------------------------------------------- PluginWatcher path derivation

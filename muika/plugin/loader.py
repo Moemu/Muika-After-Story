@@ -77,7 +77,26 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
 
     except Exception as e:
         logger.error(f"加载插件 '{module_name}' 失败: {e}")
+        # 回滚失败加载的部分副作用：避免 _declared_plugins 永久毒化、
+        # 或残留半途注册的 commands / func_calls（否则修复后无法重新加载）
+        _declared_plugins.discard(module_name)
+        _purge_side_effects(module_name)
         return None
+
+
+def _purge_side_effects(package_name: str) -> None:
+    """清理指定插件包注册的全部 commands / func_calls 及 sys.modules 条目。"""
+    # 延迟 import 避免循环依赖
+    from .command import remove_commands_for_plugin
+    from .func_call.caller import remove_callers_for_plugin
+
+    removed_cmds = remove_commands_for_plugin(package_name)
+    removed_calls = remove_callers_for_plugin(package_name)
+    logger.debug(f"[PluginLoader] purge {package_name!r}: removed {removed_cmds} commands, {removed_calls} func_calls")
+
+    # 清除 sys.modules 中该 package 及其子模块，以便下次加载重新执行模块代码
+    for mod_name in [m for m in sys.modules if m == package_name or m.startswith(f"{package_name}.")]:
+        del sys.modules[mod_name]
 
 
 def unload_plugin(package_name: str) -> bool:
@@ -90,33 +109,21 @@ def unload_plugin(package_name: str) -> bool:
         logger.warning(f"[PluginLoader] unload: plugin {package_name!r} not loaded")
         return False
 
-    # 1. 清理该插件注册的 commands 与 func_calls（延迟 import 避免循环依赖）
-    from .command import remove_commands_for_plugin
-    from .func_call.caller import remove_callers_for_plugin
-
-    removed_cmds = remove_commands_for_plugin(package_name)
-    removed_calls = remove_callers_for_plugin(package_name)
-    logger.debug(f"[PluginLoader] unload {package_name!r}: removed {removed_cmds} commands, {removed_calls} func_calls")
-
-    # 2. 从注册表移除
+    _purge_side_effects(package_name)
     del _plugins[package_name]
     _declared_plugins.discard(package_name)
-
-    # 3. 清除 sys.modules 中该 package 及其子模块，以便 reload 时重新执行模块代码
-    for mod_name in [m for m in sys.modules if m == package_name or m.startswith(f"{package_name}.")]:
-        del sys.modules[mod_name]
 
     logger.success(f"[PluginLoader] Plugin {package_name!r} unloaded")
     return True
 
 
 def reload_plugin(package_name: str) -> Optional[Plugin]:
-    """卸载后重新加载指定插件。
+    """卸载后重新加载指定插件；若插件从未加载过则直接加载。
 
     :param package_name: 插件的 package_name
     :return: 重新加载后的 Plugin 对象；卸载失败或加载失败返回 None
     """
-    if not unload_plugin(package_name):
+    if package_name in _plugins and not unload_plugin(package_name):
         return None
     return load_plugin(package_name)
 
