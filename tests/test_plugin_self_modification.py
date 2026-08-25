@@ -156,8 +156,9 @@ async def test_state_survives_formal_reload(deploy_env):
     target = plugins / "stateful.py"
     first = "from muika.plugin.ctx import ctx\nstate = ctx.state\nstate['count'] = state.get('count', 0) + 1\n"
     await deployer.deploy(str(target), first, "one")
-    await deployer.deploy(str(target), first + "version = 2\n", "two")
-    assert get_plugins()["plugins.stateful"].module.state["count"] == 2
+    for version in (2, 3, 4):
+        await deployer.deploy(str(target), first + f"version = {version}\n", f"reload {version}")
+    assert get_plugins()["plugins.stateful"].module.state["count"] == 4
 
 
 @pytest.mark.asyncio

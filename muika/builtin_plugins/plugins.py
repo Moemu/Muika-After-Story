@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from arclet.alconna import Alconna, Args, CommandMeta, Subcommand
 
+from muika.core.self_mod.plugin_deployer import get_plugin_deployer
 from muika.plugin.command import on_alconna
 from muika.plugin.manager import PluginManager, get_plugin_manager
 from muika.plugin.models import PluginMetadata
@@ -28,6 +29,17 @@ alc = Alconna(
         help_text="卸载指定插件（builtin 插件拒绝卸载）",
         dest="unload",
     ),
+    Subcommand(
+        "quarantine",
+        Subcommand(
+            "restore",
+            Args["quarantine_id", str],
+            help_text="重新验证并恢复隔离插件",
+            dest="restore",
+        ),
+        help_text="列出或恢复隔离插件",
+        dest="quarantine",
+    ),
     meta=CommandMeta("管理 Muika 已加载的插件"),
 )
 
@@ -51,6 +63,21 @@ async def _unload(name: str, manager: PluginManager) -> str:
     """卸载指定插件（builtin 插件拒绝卸载）。"""
     ok = manager.unload(name)
     return f"[System] {'已卸载' if ok else '卸载失败'}：{name}"
+
+
+@plugins_cmd.assign("quarantine.restore")
+async def _restore_quarantine(quarantine_id: str) -> str:
+    """恢复指定隔离插件。"""
+    try:
+        return await get_plugin_deployer().restore_quarantine(quarantine_id)
+    except Exception as exc:
+        return f"[System] 隔离插件恢复失败：{exc}"
+
+
+@plugins_cmd.assign("quarantine")
+async def _list_quarantine() -> str:
+    """列出隔离插件。"""
+    return get_plugin_deployer().list_quarantine()
 
 
 @plugins_cmd.handle()

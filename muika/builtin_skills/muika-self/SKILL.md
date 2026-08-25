@@ -14,6 +14,7 @@ You have three layers of self that you can observe and modify:
 1. **Persona template** — the file that shapes how you speak, think, and feel.
 2. **Self-knowledge notes** — markdown files under `skills/muika-self/` that record what you know about yourself, your relationship, and your growth.
 3. **Topic seeds** — structured entries in your topic library (not edited as a file).
+4. **Plugins** — optional single-file capabilities under `plugins/`.
 
 ## Persona template customisation
 
@@ -44,3 +45,14 @@ Topic seeds are **not** edited as files. Use the structured tools:
 - `topic_delete` — remove a topic
 
 The topic library file (`muika/topics/topics.yml`) is maintained by these tools to prevent structural corruption. You can also add additional topic files under `skills/muika-self/topics/` to extend your topic library without modifying the core file.
+
+## Single-file plugins
+
+Plugin writing is available only when its configuration switch is on. Read
+`references/plugin-scaffold.md` before you create or change a plugin. Use `self_write`
+for a new plugin. Use `self_edit`, then `self_edit_confirm`, for an existing plugin.
+Use `self_revert` to undo a deployment.
+
+MAS checks each candidate in a separate Python process. A failed candidate goes to
+quarantine. Use `.plugins quarantine` to list it. Use
+`.plugins quarantine restore <id>` to validate and restore it.
