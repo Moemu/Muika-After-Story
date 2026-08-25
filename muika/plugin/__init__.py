@@ -12,16 +12,21 @@ from .loader import (
     get_plugins,
     load_plugin,
     load_plugins,
+    try_load_plugin,
+    try_reload_plugin,
 )
-from .models import Plugin, PluginMetadata
+from .models import Plugin, PluginLoadResult, PluginMetadata
 
 __all__ = [
     "load_plugin",
     "load_plugins",
+    "try_load_plugin",
+    "try_reload_plugin",
     "get_plugins",
     "get_plugin_by_module_name",
     "PluginMetadata",
     "Plugin",
+    "PluginLoadResult",
     "get_plugin_data_dir",
     "on_alconna",
     "CommandRegistry",

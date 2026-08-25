@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import TYPE_CHECKING, Optional
 
 from muika.plugin.lifecycle import run_unload_hooks
@@ -33,6 +35,8 @@ class PluginManager:
 
     def __init__(self, butler: Optional[ButlerAgent] = None) -> None:
         self._butler = butler
+        self._watcher_suppression: dict[str, float] = {}
+        self._watcher_lock = threading.Lock()
 
     def bind_butler(self, butler: ButlerAgent) -> None:
         """延迟绑定 Butler 实例（CoreBootstrap 启动后调用）。"""
@@ -80,6 +84,22 @@ class PluginManager:
         count = self._butler.refresh_tools()
         logger.info(f"[PluginManager] Butler tools refreshed: {count} tools")
         return count
+
+    def suppress_watcher(self, package_name: str, seconds: float = 3.0) -> None:
+        """临时忽略指定插件的文件监听事件。"""
+        with self._watcher_lock:
+            self._watcher_suppression[package_name] = time.monotonic() + seconds
+
+    def is_watcher_suppressed(self, package_name: str) -> bool:
+        """检查指定插件的文件监听事件是否仍被忽略。"""
+        with self._watcher_lock:
+            deadline = self._watcher_suppression.get(package_name)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                self._watcher_suppression.pop(package_name, None)
+                return False
+            return True
 
     def shutdown_all(self) -> None:
         """对所有已加载插件执行 unload 钩子。"""

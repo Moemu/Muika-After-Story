@@ -134,6 +134,21 @@ class SelfModManager:
         logger.info(f"[SelfMod] {rel} reverted (target revision #{target_id})")
         return f"Reverted {rel}: {report_action}."
 
+    async def read_revert_target(self, raw_path: str, revision_id: Optional[int] = None) -> Optional[str]:
+        """读取回滚目标内容，不修改文件或审计记录。"""
+        resolved = resolve_self_path(raw_path, require_write=True)
+        rel = display_path(resolved)
+        async with get_session() as session:
+            if revision_id is not None:
+                record = await SelfModificationCRUD.get_by_id(session, revision_id)
+                if record is None or record.path != rel:
+                    raise SelfModError(f"Revision #{revision_id} not found for {rel}.")
+            else:
+                record = await SelfModificationCRUD.latest_write_for_path(session, rel)
+                if record is None:
+                    raise SelfModError(f"No applied self-modification for {rel}; nothing to revert.")
+        return self._read_snapshot(record.before_path) if record.before_path is not None else None
+
     async def history(self, raw_path: str = "", limit: int = 15) -> str:
         """返回审计日志摘要文本。"""
         path_filter: Optional[str] = None
@@ -153,6 +168,19 @@ class SelfModManager:
             ts = r.created_at[:19].replace("T", " ")
             lines.append(f"  #{r.id} [{ts}] {r.action} ({r.layer}) {r.path} — {r.reason[:60]}")
         return "\n".join(lines)
+
+    async def record_event(self, raw_path: str, action: str, reason: str, source: str) -> int:
+        """记录不直接写文件的自我修改事件。"""
+        resolved = Path(raw_path).resolve()
+        return await self._audit(
+            layer=infer_layer(resolved),
+            path=display_path(resolved),
+            action=action,
+            reason=reason,
+            before_path=None,
+            after_path=None,
+            source=source,
+        )
 
     # ------------------------------------------------------------------
     # 内部实现

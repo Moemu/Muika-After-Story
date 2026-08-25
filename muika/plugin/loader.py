@@ -27,7 +27,7 @@ from muika.config import mas_config
 from muika.utils.logger import logger
 
 from .lifecycle import clear_hooks, run_load_hooks, run_unload_hooks
-from .models import Plugin, PluginMetadata
+from .models import Plugin, PluginLoadResult, PluginMetadata
 from .utils import path_to_module_name
 
 _plugins: Dict[str, Plugin] = {}
@@ -38,7 +38,7 @@ _loading_plugin: ContextVar[Optional[str]] = ContextVar("_loading_plugin", defau
 """当前正在加载的插件包名；供 on_alconna / on_function_call 读取以标记所有权。"""
 
 
-def load_plugin(module_name: str) -> Optional[Plugin]:
+def try_load_plugin(module_name: str) -> PluginLoadResult:
     """
     加载单个插件模块。
 
@@ -52,7 +52,7 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
     try:
         if module_name in _declared_plugins:
             logger.warning(f"插件 '{module_name}' 包名出现冲突，跳过加载")
-            return None
+            return PluginLoadResult(error=f"Plugin package name conflict: {module_name}")
         _declared_plugins.add(module_name)
 
         logger.debug(f"加载 MAS 插件: {module_name}")
@@ -75,7 +75,7 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
         run_load_hooks(module_name)
         logger.success(f"插件 '{plugin.name}' ({module_name}) 已加载")
 
-        return plugin
+        return PluginLoadResult(plugin=plugin)
 
     except Exception as e:
         logger.error(f"加载插件 '{module_name}' 失败: {e}")
@@ -84,7 +84,12 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
         _declared_plugins.discard(module_name)
         _plugins.pop(module_name, None)
         _purge_side_effects(module_name)
-        return None
+        return PluginLoadResult(error=f"{type(e).__name__}: {e}")
+
+
+def load_plugin(module_name: str) -> Optional[Plugin]:
+    """加载单个插件，并保留旧的返回类型。"""
+    return try_load_plugin(module_name).plugin
 
 
 def _purge_side_effects(package_name: str) -> None:
@@ -122,15 +127,20 @@ def unload_plugin(package_name: str) -> bool:
     return True
 
 
-def reload_plugin(package_name: str) -> Optional[Plugin]:
+def try_reload_plugin(package_name: str) -> PluginLoadResult:
     """卸载后重新加载指定插件；若插件从未加载过则直接加载。
 
     :param package_name: 插件的 package_name
     :return: 重新加载后的 Plugin 对象；卸载失败或加载失败返回 None
     """
     if package_name in _plugins and not unload_plugin(package_name):
-        return None
-    return load_plugin(package_name)
+        return PluginLoadResult(error=f"Failed to unload plugin: {package_name}")
+    return try_load_plugin(package_name)
+
+
+def reload_plugin(package_name: str) -> Optional[Plugin]:
+    """重载插件，并保留旧的返回类型。"""
+    return try_reload_plugin(package_name).plugin
 
 
 def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]:
