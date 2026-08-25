@@ -51,18 +51,3 @@ class Plugin:
 
     class Config:
         arbitrary_types_allowed = True
-
-
-@dataclass
-class PluginLoadResult:
-    """插件加载结果。"""
-
-    plugin: Optional[Plugin] = None
-    """成功加载的插件对象。"""
-    error: Optional[str] = None
-    """失败原因。"""
-
-    @property
-    def success(self) -> bool:
-        """加载是否成功。"""
-        return self.plugin is not None and self.error is None

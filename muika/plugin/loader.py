@@ -26,8 +26,16 @@ from typing import Dict, Optional, Set
 from muika.config import mas_config
 from muika.utils.logger import logger
 
+from .exceptions import (
+    PluginConflictError,
+    PluginImportError,
+    PluginLoadError,
+    PluginLoadHookError,
+    PluginRegistrationError,
+    PluginReloadError,
+)
 from .lifecycle import clear_hooks, run_load_hooks, run_unload_hooks
-from .models import Plugin, PluginLoadResult, PluginMetadata
+from .models import Plugin, PluginMetadata
 from .utils import path_to_module_name
 
 _plugins: Dict[str, Plugin] = {}
@@ -38,7 +46,7 @@ _loading_plugin: ContextVar[Optional[str]] = ContextVar("_loading_plugin", defau
 """当前正在加载的插件包名；供 on_alconna / on_function_call 读取以标记所有权。"""
 
 
-def try_load_plugin(module_name: str) -> PluginLoadResult:
+def load_plugin(module_name: str) -> Plugin:
     """
     加载单个插件模块。
 
@@ -47,14 +55,17 @@ def try_load_plugin(module_name: str) -> PluginLoadResult:
     从而建立"命令/工具 → 插件"的归属关系，便于后续按插件卸载。
 
     :param module_name: 模块的全限定包名（如 ``"plugins.notes"``）
-    :return: 插件对象，若已有同名插件声明则返回 None
+    :return: 插件对象
+    :raises PluginLoadError: import、登记或 load 钩子失败
     """
-    try:
-        if module_name in _declared_plugins:
-            logger.warning(f"插件 '{module_name}' 包名出现冲突，跳过加载")
-            return PluginLoadResult(error=f"Plugin package name conflict: {module_name}")
-        _declared_plugins.add(module_name)
+    if module_name in _declared_plugins:
+        error = PluginConflictError(module_name)
+        logger.warning(str(error))
+        raise error
 
+    _declared_plugins.add(module_name)
+    phase = "import"
+    try:
         logger.debug(f"加载 MAS 插件: {module_name}")
         token = _loading_plugin.set(module_name)
         try:
@@ -62,6 +73,7 @@ def try_load_plugin(module_name: str) -> PluginLoadResult:
         finally:
             _loading_plugin.reset(token)
 
+        phase = "registration"
         metadata: Optional[PluginMetadata] = getattr(module, "metadata", None)
 
         plugin = Plugin(
@@ -72,10 +84,11 @@ def try_load_plugin(module_name: str) -> PluginLoadResult:
         )
 
         _plugins[plugin.package_name] = plugin
+        phase = "load hook"
         run_load_hooks(module_name)
         logger.success(f"插件 '{plugin.name}' ({module_name}) 已加载")
 
-        return PluginLoadResult(plugin=plugin)
+        return plugin
 
     except Exception as e:
         logger.error(f"加载插件 '{module_name}' 失败: {e}")
@@ -84,12 +97,12 @@ def try_load_plugin(module_name: str) -> PluginLoadResult:
         _declared_plugins.discard(module_name)
         _plugins.pop(module_name, None)
         _purge_side_effects(module_name)
-        return PluginLoadResult(error=f"{type(e).__name__}: {e}")
-
-
-def load_plugin(module_name: str) -> Optional[Plugin]:
-    """加载单个插件，并保留旧的返回类型。"""
-    return try_load_plugin(module_name).plugin
+        error_type = {
+            "import": PluginImportError,
+            "registration": PluginRegistrationError,
+            "load hook": PluginLoadHookError,
+        }[phase]
+        raise error_type(module_name, e) from e
 
 
 def _purge_side_effects(package_name: str) -> None:
@@ -127,20 +140,16 @@ def unload_plugin(package_name: str) -> bool:
     return True
 
 
-def try_reload_plugin(package_name: str) -> PluginLoadResult:
+def reload_plugin(package_name: str) -> Plugin:
     """卸载后重新加载指定插件；若插件从未加载过则直接加载。
 
     :param package_name: 插件的 package_name
-    :return: 重新加载后的 Plugin 对象；卸载失败或加载失败返回 None
+    :return: 重新加载后的 Plugin 对象
+    :raises PluginLoadError: 卸载或加载失败
     """
     if package_name in _plugins and not unload_plugin(package_name):
-        return PluginLoadResult(error=f"Failed to unload plugin: {package_name}")
-    return try_load_plugin(package_name)
-
-
-def reload_plugin(package_name: str) -> Optional[Plugin]:
-    """重载插件，并保留旧的返回类型。"""
-    return try_reload_plugin(package_name).plugin
+        raise PluginReloadError(package_name)
+    return load_plugin(package_name)
 
 
 def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]:
@@ -170,8 +179,11 @@ def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]
                 module_name = path_to_module_name(plugin_path, base_path)
             elif plugin_path.is_dir() and (plugin_path / plugin_path.name.lower().replace("-", "_")).exists():
                 module_name = path_to_module_name(plugin_path / plugin_path.name.lower().replace("-", "_"), base_path)
-            if module_name and (loaded_plugin := load_plugin(module_name)):
-                plugins.add(loaded_plugin)
+            if module_name:
+                try:
+                    plugins.add(load_plugin(module_name))
+                except PluginLoadError as exc:
+                    logger.error(str(exc))
 
     return plugins
 

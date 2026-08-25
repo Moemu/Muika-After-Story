@@ -19,6 +19,11 @@ from muika.plugin.command import (
     remove_commands_for_plugin,
 )
 from muika.plugin.ctx import ctx
+from muika.plugin.exceptions import (
+    PluginConflictError,
+    PluginImportError,
+    PluginLoadHookError,
+)
 from muika.plugin.func_call.caller import (
     Caller,
     _caller_data,
@@ -332,7 +337,8 @@ def test_failed_load_does_not_poison_declared_plugins(monkeypatch):
 
     real_import = importlib.import_module
     monkeypatch.setattr(loader_mod.importlib, "import_module", raiser)
-    assert load_plugin("plugins.broken_probe") is None
+    with pytest.raises(PluginImportError, match="boom"):
+        load_plugin("plugins.broken_probe")
     assert "plugins.broken_probe" not in _declared_plugins
 
     # 模拟修复后重试：导入成功
@@ -342,6 +348,20 @@ def test_failed_load_does_not_poison_declared_plugins(monkeypatch):
         assert load_plugin("plugins.broken_probe") is not None
     finally:
         unload_plugin("plugins.broken_probe")
+
+
+def test_duplicate_load_raises_without_purging_active_plugin():
+    """重复加载应抛语义异常，并保留当前活动插件。"""
+    module_name = "plugins.conflict_probe"
+    sys.modules[module_name] = types.ModuleType(module_name)
+    try:
+        active = load_plugin(module_name)
+        with pytest.raises(PluginConflictError) as caught:
+            load_plugin(module_name)
+        assert caught.value.module_name == module_name
+        assert _plugins[module_name] is active
+    finally:
+        unload_plugin(module_name)
 
 
 def test_failed_load_cleans_partial_registrations(monkeypatch):
@@ -354,7 +374,8 @@ def test_failed_load_cleans_partial_registrations(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(loader_mod.importlib, "import_module", raiser)
-    assert load_plugin("plugins.partial_probe") is None
+    with pytest.raises(PluginImportError, match="boom"):
+        load_plugin("plugins.partial_probe")
     assert all(c.alc.command != "partial_probe_cmd" for c in _commands)
     assert "plugins.partial_probe" not in _declared_plugins
 
@@ -487,7 +508,8 @@ def test_load_hook_failure_rolls_back_load_but_keeps_state(tmp_path: Path, monke
         "    raise RuntimeError('hook failed')\n",
     )
 
-    assert load_plugin("failing_hook_probe") is None
+    with pytest.raises(PluginLoadHookError, match="hook failed"):
+        load_plugin("failing_hook_probe")
     assert "failing_hook_probe" not in _plugins
     assert "failing_hook_probe" not in _declared_plugins
     assert "failing_hook_probe" not in lifecycle_mod._load_hooks
@@ -572,7 +594,8 @@ def test_failed_load_purges_partial_hooks(monkeypatch):
         raise RuntimeError(module_name)
 
     monkeypatch.setattr(loader_mod.importlib, "import_module", fail_import)
-    assert load_plugin("plugins.orphan_probe") is None
+    with pytest.raises(PluginImportError):
+        load_plugin("plugins.orphan_probe")
     assert "plugins.orphan_probe" not in lifecycle_mod._load_hooks
 
 

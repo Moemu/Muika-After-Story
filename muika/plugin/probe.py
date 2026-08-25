@@ -7,7 +7,8 @@ import importlib
 import json
 import os
 
-from muika.plugin.loader import try_load_plugin, unload_plugin
+from muika.plugin.exceptions import PluginLoadError
+from muika.plugin.loader import load_plugin, unload_plugin
 
 _RESULT_PREFIX = "MUIKA_PLUGIN_PROBE="
 
@@ -21,9 +22,10 @@ def probe(module_name: str) -> tuple[bool, str]:
         package_paths = getattr(package, "__path__", None)
         if package_paths is not None and plugin_root not in package_paths:
             package_paths.append(plugin_root)
-    result = try_load_plugin(module_name)
-    if not result.success:
-        return False, result.error or "Unknown load error"
+    try:
+        load_plugin(module_name)
+    except PluginLoadError as exc:
+        return False, str(exc)
     if not unload_plugin(module_name):
         return False, "Plugin unload failed"
     return True, "Plugin load and unload succeeded"

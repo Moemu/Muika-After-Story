@@ -6,27 +6,24 @@ from .command import (
     on_alconna,
 )
 from .ctx import ctx
+from .exceptions import PluginLoadError
 from .loader import (
     get_plugin_by_module_name,
     get_plugin_data_dir,
     get_plugins,
     load_plugin,
     load_plugins,
-    try_load_plugin,
-    try_reload_plugin,
 )
-from .models import Plugin, PluginLoadResult, PluginMetadata
+from .models import Plugin, PluginMetadata
 
 __all__ = [
     "load_plugin",
     "load_plugins",
-    "try_load_plugin",
-    "try_reload_plugin",
     "get_plugins",
     "get_plugin_by_module_name",
     "PluginMetadata",
     "Plugin",
-    "PluginLoadResult",
+    "PluginLoadError",
     "get_plugin_data_dir",
     "on_alconna",
     "CommandRegistry",

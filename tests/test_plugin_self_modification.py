@@ -11,11 +11,12 @@ import pytest
 
 from muika.config import mas_config
 from muika.core.actions.tools import _self_edit
+from muika.core.actions.tools._plugin import plugin_load
 from muika.core.self_mod import SelfModError
 from muika.core.self_mod.plugin_deployer import PluginDeployer
+from muika.plugin.exceptions import PluginImportError
 from muika.plugin.loader import get_plugins, unload_plugin
 from muika.plugin.manager import PluginManager
-from muika.plugin.models import PluginLoadResult
 from muika.plugin.watcher import PluginFileHandler
 
 
@@ -131,10 +132,14 @@ async def test_subprocess_probe_times_out(deploy_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_legal_new_plugin_is_loaded(deploy_env):
+async def test_legal_new_plugin_requires_manual_activation(deploy_env):
     deployer, plugins, _ = deploy_env
     report = await deployer.deploy(str(plugins / "basic.py"), "value = 1\n", "test")
-    assert "Plugin deployed" in report
+    assert "validated and staged" in report
+    assert not (plugins / "basic.py").exists()
+    assert "plugins.basic" not in get_plugins()
+    report = await deployer.activate("basic")
+    assert "Plugin activated" in report
     assert "plugins.basic" in get_plugins()
 
 
@@ -144,7 +149,9 @@ async def test_reload_has_no_duplicate_hooks(deploy_env):
     target = plugins / "repeat.py"
     content = "from muika.plugin.ctx import ctx\n@ctx.unload\ndef stop():\n    pass\n"
     await deployer.deploy(str(target), content, "one")
+    await deployer.activate("repeat")
     await deployer.deploy(str(target), content + "value = 2\n", "two")
+    await deployer.activate("repeat")
     from muika.plugin.lifecycle import _unload_hooks
 
     assert len(_unload_hooks["plugins.repeat"]) == 1
@@ -156,8 +163,10 @@ async def test_state_survives_formal_reload(deploy_env):
     target = plugins / "stateful.py"
     first = "from muika.plugin.ctx import ctx\nstate = ctx.state\nstate['count'] = state.get('count', 0) + 1\n"
     await deployer.deploy(str(target), first, "one")
+    await deployer.activate("stateful")
     for version in (2, 3, 4):
         await deployer.deploy(str(target), first + f"version = {version}\n", f"reload {version}")
+        await deployer.activate("stateful")
     assert get_plugins()["plugins.stateful"].module.state["count"] == 4
 
 
@@ -186,18 +195,21 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch):
     deployer, plugins, fake = deploy_env
     target = plugins / "restore.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    from muika.plugin.loader import try_load_plugin as real_try_load
+    from muika.plugin.loader import load_plugin as real_load
 
     calls = 0
 
-    def fail_once(name: str) -> PluginLoadResult:
+    def fail_once(name: str):
         nonlocal calls
         calls += 1
-        return PluginLoadResult(error="main process conflict") if calls == 1 else real_try_load(name)
+        if calls == 1:
+            raise PluginImportError(name, RuntimeError("main process conflict"))
+        return real_load(name)
 
-    monkeypatch.setattr("muika.core.self_mod.plugin_deployer.try_load_plugin", fail_once)
+    monkeypatch.setattr("muika.core.self_mod.plugin_deployer.load_plugin", fail_once)
+    await deployer.deploy(str(target), "value = 2\n", "update")
     with pytest.raises(SelfModError, match="Recovery succeeded"):
-        await deployer.deploy(str(target), "value = 2\n", "update")
+        await deployer.activate("restore")
     assert target.read_text(encoding="utf-8") == "value = 1\n"
     assert fake.before[target] == []
 
@@ -206,12 +218,14 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch):
 async def test_new_activation_failure_deletes_formal_file(deploy_env, monkeypatch):
     deployer, plugins, _ = deploy_env
     target = plugins / "newfail.py"
-    monkeypatch.setattr(
-        "muika.core.self_mod.plugin_deployer.try_load_plugin",
-        lambda name: PluginLoadResult(error="main process conflict"),
-    )
+
+    def fail(name: str):
+        raise PluginImportError(name, RuntimeError("main process conflict"))
+
+    monkeypatch.setattr("muika.core.self_mod.plugin_deployer.load_plugin", fail)
+    await deployer.deploy(str(target), "value = 2\n", "new")
     with pytest.raises(SelfModError, match="Recovery succeeded"):
-        await deployer.deploy(str(target), "value = 2\n", "new")
+        await deployer.activate("newfail")
     assert not target.exists()
 
 
@@ -221,11 +235,13 @@ async def test_deployer_revert_restores_old_plugin_or_deletes_new(deploy_env):
     old_target = plugins / "old.py"
     old_target.write_text("value = 1\n", encoding="utf-8")
     await deployer.deploy(str(old_target), "value = 2\n", "update")
+    await deployer.activate("old")
     await deployer.revert(str(old_target))
     assert old_target.read_text(encoding="utf-8") == "value = 1\n"
 
     new_target = plugins / "created.py"
     await deployer.deploy(str(new_target), "value = 1\n", "create")
+    await deployer.activate("created")
     await deployer.revert(str(new_target))
     assert not new_target.exists()
     assert "plugins.created" not in get_plugins()
@@ -260,8 +276,18 @@ async def test_quarantine_hash_guard_and_restore(deploy_env):
     data["candidate_sha256"] = __import__("hashlib").sha256(candidate.read_bytes()).hexdigest()
     metadata.write_text(json.dumps(data), encoding="utf-8")
     report = await deployer.restore_quarantine(data["quarantine_id"])
-    assert "Plugin deployed" in report
-    assert fake.events == ["restore"]
+    assert "validated and staged" in report
+    assert fake.events[-2:] == ["stage", "restore"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_load_tool_activates_staged_candidate(deploy_env, monkeypatch):
+    deployer, plugins, _ = deploy_env
+    await deployer.deploy(str(plugins / "manual.py"), "value = 1\n", "manual")
+    monkeypatch.setattr("muika.core.actions.tools._plugin.get_plugin_deployer", lambda: deployer)
+    report = await plugin_load("manual")
+    assert "Plugin activated" in report
+    assert "plugins.manual" in get_plugins()
 
 
 def test_feature_switch_rejects_plugin_writes(deploy_env, monkeypatch):

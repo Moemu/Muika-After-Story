@@ -69,7 +69,8 @@ async def _unload(name: str, manager: PluginManager) -> str:
 async def _restore_quarantine(quarantine_id: str) -> str:
     """恢复指定隔离插件。"""
     try:
-        return await get_plugin_deployer().restore_quarantine(quarantine_id)
+        report = await get_plugin_deployer().restore_quarantine(quarantine_id)
+        return report + "\n[System] 该候选尚未激活。请让 Muika 调用 plugin_load。"
     except Exception as exc:
         return f"[System] 隔离插件恢复失败：{exc}"
 

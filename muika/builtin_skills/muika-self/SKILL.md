@@ -51,7 +51,9 @@ The topic library file (`muika/topics/topics.yml`) is maintained by these tools 
 Plugin writing is available only when its configuration switch is on. Read
 `references/plugin-scaffold.md` before you create or change a plugin. Use `self_write`
 for a new plugin. Use `self_edit`, then `self_edit_confirm`, for an existing plugin.
-Use `self_revert` to undo a deployment.
+These tools validate the candidate and keep it in staging. They do not change the
+active plugin. Call `plugin_load(name)` to activate the staged candidate. Use
+`self_revert` to discard a staged candidate or undo an active deployment.
 
 MAS checks each candidate in a separate Python process. A failed candidate goes to
 quarantine. These quarantine commands are user chat commands. Muika cannot call them

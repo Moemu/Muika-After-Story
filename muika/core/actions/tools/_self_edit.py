@@ -176,7 +176,7 @@ class SelfWriteParams(BaseModel):
     "Muika creates a brand-new file inside herself (a new self-knowledge note or a persona template override). "
     "ONLY for files that do not exist yet — to modify an existing part of herself she must use self_edit, "
     "which makes precise partial changes instead of rewriting the whole file. "
-    "Every creation is validated, journaled with the given reason, and takes effect immediately.",
+    "Every creation is validated and journaled. Plugin candidates stay in staging until plugin_load activates them.",
     params=SelfWriteParams,
 )
 async def self_write(path: str, content: str, reason: str) -> str:
@@ -319,7 +319,8 @@ class SelfEditConfirmParams(BaseModel):
 
 @on_function_call(
     "Apply a previously previewed self-edit. Muika must call self_edit first to see the planned change; "
-    "this tool then commits it to disk. If no preview is pending for the given path, it returns an error.",
+    "this tool commits normal files. Plugin candidates stay in staging until plugin_load activates them. "
+    "If no preview is pending for the given path, it returns an error.",
     params=SelfEditConfirmParams,
 )
 async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
@@ -357,7 +358,8 @@ async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
             or _content_sha256(resolved.read_text(encoding="utf-8", errors="replace")) != pending.source_sha256
         ):
             return f"The file changed after the preview: {rel}. Create a new preview."
-        if _is_plugin_path(resolved):
+        is_plugin = _is_plugin_path(resolved)
+        if is_plugin:
             report = await get_plugin_deployer().deploy_if_unchanged(
                 path,
                 new_text,
@@ -375,9 +377,10 @@ async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
         _pending_edits.pop(rel, None)
 
     context = _context_around(new_text, new_text.count("\n") // 2)
+    region_label = "staged candidate" if is_plugin else "file now"
     return (
         f"{report}\n"
-        f"--- Region around the change, as the file now looks (with line numbers) ---\n"
+        f"--- Region around the change, as the {region_label} looks (with line numbers) ---\n"
         f"{context}\n"
         f"---\n"
         f"Verify the region above. If something feels wrong, use self_revert(path={rel!r})."
