@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.self_mod import SelfModError, get_self_mod_manager
+from muika.core.self_mod.plugin_deployer import get_plugin_deployer
 from muika.core.self_mod.policy import display_path, resolve_self_path
 from muika.core.self_mod.validators import validate_content, validate_template
 from muika.plugin.func_call import on_function_call
@@ -49,6 +51,7 @@ class PendingEdit:
     new_text: str
     reason: str
     timestamp: datetime
+    source_sha256: str
 
 
 _pending_edits: dict[str, PendingEdit] = {}
@@ -57,6 +60,17 @@ _pending_edits: dict[str, PendingEdit] = {}
 
 def _disabled() -> bool:
     return not mas_config.enable_self_modification
+
+
+def _content_sha256(content: str) -> str:
+    """计算文本 SHA-256。"""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _is_plugin_path(path: Path) -> bool:
+    """检查路径是否位于插件目录内。"""
+    plugins_dir = Path(mas_config.plugins_dir).resolve()
+    return path == plugins_dir or plugins_dir in path.parents
 
 
 def _list_sandbox_files() -> str:
@@ -70,6 +84,11 @@ def _list_sandbox_files() -> str:
         elif root.is_dir():
             found = False
             for p in sorted(root.rglob("*")):
+                rel_parts = p.relative_to(root).parts
+                if root == Path(mas_config.plugins_dir).resolve() and (
+                    len(rel_parts) != 1 or any(part in {"_staging", "_quarantine"} for part in rel_parts)
+                ):
+                    continue
                 if p.is_file() and not p.name.startswith(".") and "__pycache__" not in p.parts:
                     lines.append(f"  [FILE] {display_path(p)}")
                     found = True
@@ -182,6 +201,8 @@ async def self_write(path: str, content: str, reason: str) -> str:
         )
 
     try:
+        if _is_plugin_path(resolved):
+            return await get_plugin_deployer().deploy_new(path, content, reason.strip())
         return await get_self_mod_manager().apply(path, content, reason.strip())
     except SelfModError as e:
         logger.info(f"[SelfEdit] Rejected write to {path!r}: {e}")
@@ -269,6 +290,7 @@ async def self_edit(
         new_text=new_text,
         reason=reason.strip(),
         timestamp=datetime.now(),
+        source_sha256=_content_sha256(original),
     )
 
     return (
@@ -330,7 +352,20 @@ async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
     effective_reason = (reason.strip() if reason and reason.strip() else pending.reason) or "(no reason recorded)"
 
     try:
-        report = await get_self_mod_manager().apply(path, new_text, effective_reason)
+        if (
+            not resolved.is_file()
+            or _content_sha256(resolved.read_text(encoding="utf-8", errors="replace")) != pending.source_sha256
+        ):
+            return f"The file changed after the preview: {rel}. Create a new preview."
+        if _is_plugin_path(resolved):
+            report = await get_plugin_deployer().deploy_if_unchanged(
+                path,
+                new_text,
+                effective_reason,
+                pending.source_sha256,
+            )
+        else:
+            report = await get_self_mod_manager().apply(path, new_text, effective_reason)
     except SelfModError as e:
         return f"The change was rejected: {e}"
     except Exception as e:
@@ -394,6 +429,9 @@ async def self_revert(path: str, revision: Optional[int] = None) -> str:
         return _DISABLED_MSG
 
     try:
+        resolved = resolve_self_path(path, require_write=True)
+        if _is_plugin_path(resolved):
+            return await get_plugin_deployer().revert(path, revision_id=revision)
         return await get_self_mod_manager().revert(path, revision_id=revision)
     except SelfModError as e:
         return str(e)

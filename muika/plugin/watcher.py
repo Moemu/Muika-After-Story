@@ -47,10 +47,15 @@ class PluginFileHandler(FileSystemEventHandler):
         except ValueError:
             return
 
-        # 忽略 __pycache__ 与 .pyc 等临时文件
-        if any(p.startswith("__") for p in src.parts):
+        rel = src.relative_to(self._plugins_dir)
+        # 忽略管理目录、缓存与临时文件
+        if any(p in {"_staging", "_quarantine", "__pycache__"} for p in rel.parts):
             return
-        if src.suffix == ".pyc":
+        if src.suffix in {".pyc", ".tmp"} or src.name.startswith(".") or src.name.endswith("~"):
+            return
+
+        package_name = self._derive_package_name(src)
+        if package_name is None or self._manager.is_watcher_suppressed(package_name):
             return
 
         current = time.time()
@@ -58,10 +63,6 @@ class PluginFileHandler(FileSystemEventHandler):
             if current - self._last_triggered < self._cooldown:
                 return
             self._last_triggered = current
-
-        package_name = self._derive_package_name(src)
-        if package_name is None:
-            return
 
         is_delete = event.event_type == "deleted"
         logger.info(
