@@ -80,8 +80,12 @@ Do not import configured blocked modules. Default blocked modules include
 4. Check the preview.
 5. Call `self_edit_confirm` to deploy it.
 6. Call `self_revert` if the result is wrong.
-7. Run `.plugins quarantine` after a validation failure.
-8. Fix the cause before `.plugins quarantine restore <id>`.
+7. Report the quarantine ID and failure cause after a validation failure.
+8. Fix the source and deploy a new candidate when possible.
+
+The `.plugins quarantine` commands accept user chat messages only. They are not
+function tools. Ask the user to send `.plugins quarantine` to list items. Ask the
+user to send `.plugins quarantine restore <id>` only after the failure cause is gone.
 
 MAS runs a candidate through load and unload in a child process. It then replaces the
 formal file and reloads the plugin. If formal reload fails, MAS restores the old file.

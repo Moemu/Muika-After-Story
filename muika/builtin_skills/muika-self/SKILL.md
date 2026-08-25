@@ -54,5 +54,7 @@ for a new plugin. Use `self_edit`, then `self_edit_confirm`, for an existing plu
 Use `self_revert` to undo a deployment.
 
 MAS checks each candidate in a separate Python process. A failed candidate goes to
-quarantine. Use `.plugins quarantine` to list it. Use
-`.plugins quarantine restore <id>` to validate and restore it.
+quarantine. These quarantine commands are user chat commands. Muika cannot call them
+as function tools. Report the quarantine ID and the failure cause to the user. The
+user can send `.plugins quarantine` to list items. The user can send
+`.plugins quarantine restore <id>` to validate and restore one item.
