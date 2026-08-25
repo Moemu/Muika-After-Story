@@ -123,6 +123,7 @@ class CoreBootstrap:
 
         self._shutdown_event.set()
         stop_plugin_watcher()
+        get_plugin_manager().shutdown_all()
         self._muika.stop()
         await self._ws_server.stop()
         await close_db()

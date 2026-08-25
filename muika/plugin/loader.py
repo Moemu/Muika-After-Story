@@ -26,6 +26,7 @@ from typing import Dict, Optional, Set
 from muika.config import mas_config
 from muika.utils.logger import logger
 
+from .lifecycle import clear_hooks, run_load_hooks, run_unload_hooks
 from .models import Plugin, PluginMetadata
 from .utils import path_to_module_name
 
@@ -71,6 +72,7 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
         )
 
         _plugins[plugin.package_name] = plugin
+        run_load_hooks(module_name)
         logger.success(f"插件 '{plugin.name}' ({module_name}) 已加载")
 
         return plugin
@@ -78,8 +80,9 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
     except Exception as e:
         logger.error(f"加载插件 '{module_name}' 失败: {e}")
         # 回滚失败加载的部分副作用：避免 _declared_plugins 永久毒化、
-        # 或残留半途注册的 commands / func_calls（否则修复后无法重新加载）
+        # 或残留半途注册的 commands / func_calls / hooks（否则修复后无法重新加载）
         _declared_plugins.discard(module_name)
+        _plugins.pop(module_name, None)
         _purge_side_effects(module_name)
         return None
 
@@ -97,6 +100,7 @@ def _purge_side_effects(package_name: str) -> None:
     # 清除 sys.modules 中该 package 及其子模块，以便下次加载重新执行模块代码
     for mod_name in [m for m in sys.modules if m == package_name or m.startswith(f"{package_name}.")]:
         del sys.modules[mod_name]
+    clear_hooks(package_name)
 
 
 def unload_plugin(package_name: str) -> bool:
@@ -109,6 +113,7 @@ def unload_plugin(package_name: str) -> bool:
         logger.warning(f"[PluginLoader] unload: plugin {package_name!r} not loaded")
         return False
 
+    run_unload_hooks(package_name)
     _purge_side_effects(package_name)
     del _plugins[package_name]
     _declared_plugins.discard(package_name)

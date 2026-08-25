@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from muika.plugin.lifecycle import run_unload_hooks
 from muika.plugin.loader import (
     _plugins,
     get_plugins,
@@ -79,6 +80,11 @@ class PluginManager:
         count = self._butler.refresh_tools()
         logger.info(f"[PluginManager] Butler tools refreshed: {count} tools")
         return count
+
+    def shutdown_all(self) -> None:
+        """对所有已加载插件执行 unload 钩子。"""
+        for package_name in list(get_plugins()):
+            run_unload_hooks(package_name)
 
     @staticmethod
     def list_loaded() -> dict[str, dict]:

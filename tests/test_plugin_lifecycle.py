@@ -418,6 +418,210 @@ def test_load_unload_cycle_returns_to_baseline(tmp_path: Path, monkeypatch):
     assert "cycle_probe" not in _declared_plugins
 
 
+# --------------------------------------------------------------------------- 钩子执行与状态保留
+
+
+def _write_plugin(tmp_path: Path, package_name: str, code: str) -> None:
+    """在临时目录中写入插件包。"""
+    package_path = tmp_path / package_name
+    package_path.mkdir()
+    (package_path / "__init__.py").write_text(code, encoding="utf-8")
+
+
+def test_load_plugin_runs_load_hooks_in_registration_order(tmp_path: Path, monkeypatch):
+    """load_plugin 应按注册顺序执行 load 钩子。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "hook_order_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "@ctx.load\n"
+        "def first():\n"
+        "    state.setdefault('order', []).append('first')\n"
+        "@ctx.load\n"
+        "def second():\n"
+        "    state['order'].append('second')\n",
+    )
+    try:
+        assert load_plugin("hook_order_probe") is not None
+        assert state_mod._store["hook_order_probe"]["order"] == ["first", "second"]
+    finally:
+        unload_plugin("hook_order_probe")
+
+
+def test_unload_plugin_runs_unload_hooks_lifo(tmp_path: Path, monkeypatch):
+    """unload_plugin 应按注册逆序执行 unload 钩子。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "lifo_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "state.setdefault('order', [])\n"
+        "@ctx.unload\n"
+        "def first():\n"
+        "    state['order'].append('first')\n"
+        "@ctx.unload\n"
+        "def second():\n"
+        "    state['order'].append('second')\n",
+    )
+    assert load_plugin("lifo_probe") is not None
+    assert unload_plugin("lifo_probe") is True
+    assert state_mod._store["lifo_probe"]["order"] == ["second", "first"]
+
+
+def test_load_hook_failure_rolls_back_load_but_keeps_state(tmp_path: Path, monkeypatch):
+    """load 钩子失败时应回滚插件并保留状态。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "failing_hook_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "@ctx.load\n"
+        "def write_state():\n"
+        "    state['written'] = True\n"
+        "@ctx.load\n"
+        "def fail():\n"
+        "    raise RuntimeError('hook failed')\n",
+    )
+
+    assert load_plugin("failing_hook_probe") is None
+    assert "failing_hook_probe" not in _plugins
+    assert "failing_hook_probe" not in _declared_plugins
+    assert "failing_hook_probe" not in lifecycle_mod._load_hooks
+    assert state_mod._store["failing_hook_probe"]["written"] is True
+
+
+def test_unload_hook_exception_is_best_effort(tmp_path: Path, monkeypatch):
+    """unload 钩子异常不应阻塞其他钩子和卸载。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "best_effort_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "@ctx.unload\n"
+        "def record():\n"
+        "    state['recorded'] = True\n"
+        "@ctx.unload\n"
+        "def fail():\n"
+        "    raise RuntimeError('teardown failed')\n",
+    )
+
+    assert load_plugin("best_effort_probe") is not None
+    assert unload_plugin("best_effort_probe") is True
+    assert state_mod._store["best_effort_probe"]["recorded"] is True
+    assert "best_effort_probe" not in _plugins
+
+
+def test_state_survives_reload_same_object(tmp_path: Path, monkeypatch):
+    """状态对象应跨多次热重载存活。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "state_survive_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "@ctx.load\n"
+        "def increment():\n"
+        "    state['count'] = state.get('count', 0) + 1\n",
+    )
+    try:
+        assert load_plugin("state_survive_probe") is not None
+        state = state_mod._store["state_survive_probe"]
+        assert reload_plugin("state_survive_probe") is not None
+        assert reload_plugin("state_survive_probe") is not None
+        assert state_mod._store["state_survive_probe"] is state
+        assert state["count"] == 3
+    finally:
+        unload_plugin("state_survive_probe")
+
+
+def test_hooks_cleared_on_unload_and_not_duplicated_on_reload(tmp_path: Path, monkeypatch):
+    """卸载应清除旧钩子，重载不应重复执行旧钩子。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "no_duplicate_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "@ctx.load\n"
+        "def increment():\n"
+        "    state['count'] = state.get('count', 0) + 1\n",
+    )
+    try:
+        assert load_plugin("no_duplicate_probe") is not None
+        assert unload_plugin("no_duplicate_probe") is True
+        assert "no_duplicate_probe" not in lifecycle_mod._load_hooks
+        assert reload_plugin("no_duplicate_probe") is not None
+        assert state_mod._store["no_duplicate_probe"]["count"] == 2
+    finally:
+        unload_plugin("no_duplicate_probe")
+
+
+def test_failed_load_purges_partial_hooks(monkeypatch):
+    """import 失败时应清除已注册的部分钩子。"""
+
+    def fail_import(module_name):
+        @ctx.load
+        def orphan():
+            pass
+
+        raise RuntimeError(module_name)
+
+    monkeypatch.setattr(loader_mod.importlib, "import_module", fail_import)
+    assert load_plugin("plugins.orphan_probe") is None
+    assert "plugins.orphan_probe" not in lifecycle_mod._load_hooks
+
+
+def test_manager_shutdown_all_runs_unload_hooks_including_builtin():
+    """shutdown_all 应执行用户插件和 builtin 插件的 unload 钩子。"""
+    executed: list[str] = []
+    lifecycle_mod.register_unload_hook("plugins.user_probe", lambda: executed.append("user"))
+    lifecycle_mod.register_unload_hook("muika.builtin_plugins.fake", lambda: executed.append("builtin"))
+    _plugins["plugins.user_probe"] = loader_mod.Plugin(
+        name="user_probe",
+        module=types.ModuleType("plugins.user_probe"),
+        package_name="plugins.user_probe",
+        meta=None,
+    )
+    _plugins["muika.builtin_plugins.fake"] = loader_mod.Plugin(
+        name="fake",
+        module=types.ModuleType("muika.builtin_plugins.fake"),
+        package_name="muika.builtin_plugins.fake",
+        meta=None,
+    )
+
+    PluginManager().shutdown_all()
+
+    assert set(executed) == {"user", "builtin"}
+
+
+def test_manager_reload_hook_sequence(tmp_path: Path, monkeypatch):
+    """manager reload 应依次执行 unload 和 load 钩子。"""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "sequence_probe",
+        "from muika.plugin.ctx import ctx\n"
+        "state = ctx.state\n"
+        "@ctx.load\n"
+        "def on_load():\n"
+        "    state.setdefault('sequence', []).append('load')\n"
+        "@ctx.unload\n"
+        "def on_unload():\n"
+        "    state['sequence'].append('unload')\n",
+    )
+    try:
+        assert load_plugin("sequence_probe") is not None
+        assert PluginManager().reload("sequence_probe") is True
+        assert state_mod._store["sequence_probe"]["sequence"] == ["load", "unload", "load"]
+    finally:
+        unload_plugin("sequence_probe")
+
+
 # --------------------------------------------------------------------------- PluginWatcher path derivation
 
 
