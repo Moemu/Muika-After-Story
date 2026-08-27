@@ -115,6 +115,12 @@ class MASConfig(BaseSettings):
     )
     """内心思考强度"""
 
+    heartbeat_intensity: Literal["low", "medium", "high", "off"] = Field(
+        default="off",
+        validation_alias=AliasChoices("HEART_INTENSITY", "heartbeat_intensity"),
+    )
+    """内心思考强度"""
+
     @field_validator("master_id")
     def validate_master_id(cls, v):
         if v:
