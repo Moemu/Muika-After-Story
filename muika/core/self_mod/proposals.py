@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import difflib
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from muika.config import mas_config
+from muika.database.crud import SelfModificationCRUD
+from muika.database.db import get_session
+from muika.utils.logger import logger
 
 _ALLOWED_DIRS = ("muika", "muika_bot", "tests")
 _ALLOWED_FILES = ("bot.py", "core_main.py")
@@ -21,10 +29,13 @@ _CONTROL_FILES = (
     "muika/core/self_mod/proposals.py",
     "muika/core/actions/tools/_core_proposal.py",
     "muika/builtin_plugins/patch.py",
+    "muika/core/self_mod/core_probe.py",
     "tests/test_core_proposals.py",
 )
 _CONTROL_PREFIXES = ("muika/migrations/",)
 _PATCH_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9a-f]{8}$")
+_PROBE_MARKER = "[CORE_PROBE_RESULT]"
+_APPLY_LOCK = asyncio.Lock()
 
 
 class CoreProposalError(Exception):
@@ -270,7 +281,7 @@ class CoreProposalManager:
             raise CoreProposalError(f"Proposal record is invalid: {patch_id}.")
         return value
 
-    def list(self, status: str = "") -> list[dict[str, Any]]:
+    def list_proposals(self, status: str = "") -> list[dict[str, Any]]:
         """按创建时间倒序列出提案。"""
         self._require_enabled()
         if not self.proposals_root.is_dir():
@@ -327,6 +338,304 @@ class CoreProposalManager:
             "",
         ]
         return "\n".join(header + selected)
+
+    def _save(self, proposal: dict[str, Any]) -> None:
+        """保存提案记录。"""
+        _atomic_write_json(self.proposals_root / proposal["patch_id"] / "proposal.json", proposal)
+
+    def _snapshot_text(self, patch_id: str, relative_snapshot: Optional[str]) -> Optional[str]:
+        """读取提案快照。"""
+        if relative_snapshot is None:
+            return None
+        return (self.proposals_root / patch_id / relative_snapshot).read_text(encoding="utf-8")
+
+    def _copy_workspace(self, destination: Path) -> None:
+        """复制验证所需的项目文件。"""
+        ignored = shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            "venv",
+            "data",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            "*.pyc",
+        )
+        shutil.copytree(self.project_root, destination, ignore=ignored, dirs_exist_ok=True)
+
+    def _apply_candidate_to_copy(self, proposal: dict[str, Any], destination: Path) -> None:
+        """把提案 after 快照应用到临时副本。"""
+        patch_id = str(proposal["patch_id"])
+        for change in proposal["changes"]:
+            target = destination / change["path"]
+            after_text = self._snapshot_text(patch_id, change.get("after_snapshot"))
+            if after_text is None:
+                if target.exists():
+                    target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(after_text, encoding="utf-8")
+
+    def _run_probe(self, workspace: Path) -> dict[str, Any]:
+        """在子进程中运行候选测试探针。"""
+        command = [sys.executable, "-m", "muika.core.self_mod.core_probe"]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=workspace,
+                capture_output=True,
+                timeout=mas_config.core_validate_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout_output = ((exc.stdout or b"") + (exc.stderr or b""))[-mas_config.core_validate_output_cap_bytes :]
+            return {
+                "status": "failed",
+                "reason": f"Validation timed out after {mas_config.core_validate_timeout_seconds} seconds.",
+                "timed_out": True,
+                "output": timeout_output.decode("utf-8", errors="replace"),
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+            }
+        output_bytes = (completed.stdout or b"") + (completed.stderr or b"")
+        output = output_bytes[-mas_config.core_validate_output_cap_bytes :].decode("utf-8", errors="replace")
+        marker_line = next((line for line in reversed(output.splitlines()) if line.startswith(_PROBE_MARKER)), None)
+        if marker_line is None:
+            return {
+                "status": "unavailable",
+                "reason": f"Validation probe did not return structured output (exit {completed.returncode}).",
+                "timed_out": False,
+                "output": output,
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+            }
+        try:
+            result = json.loads(marker_line[len(_PROBE_MARKER) :])
+        except json.JSONDecodeError as exc:
+            return {
+                "status": "unavailable",
+                "reason": f"Validation probe returned invalid JSON: {exc}",
+                "timed_out": False,
+                "output": output,
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+            }
+        if not isinstance(result, dict):
+            raise CoreProposalError("Validation probe returned a non-object result.")
+        result["output"] = output
+        return result
+
+    def _baseline_report(self, fingerprint: str) -> dict[str, Any]:
+        """读取或动态测量工作区基线。"""
+        cache_path = self.proposals_root / "_baseline" / f"{fingerprint}.json"
+        if cache_path.is_file():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                cached = None
+            if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
+                return cached
+        with tempfile.TemporaryDirectory(prefix="muika-core-baseline-") as tmp:
+            workspace = Path(tmp) / "workspace"
+            self._copy_workspace(workspace)
+            report = self._run_probe(workspace)
+        report["fingerprint"] = fingerprint
+        report["measured_at"] = datetime.now().isoformat()
+        _atomic_write_json(cache_path, report)
+        return report
+
+    def validate(self, patch_id: str, *, force: bool = False) -> dict[str, Any]:
+        """验证一个候选提案并保存结构化报告。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if proposal["status"] != "pending":
+            raise CoreProposalError(f"Only pending proposals can be validated; status is {proposal['status']}.")
+        if self.is_stale(proposal):
+            raise CoreProposalError("Proposal is stale because the workspace changed.")
+        fingerprint = self.workspace_fingerprint()
+        current = proposal.get("validation")
+        validation_path = self.proposals_root / patch_id / "validation.json"
+        if (
+            not force
+            and isinstance(current, dict)
+            and current.get("fingerprint") == fingerprint
+            and validation_path.is_file()
+        ):
+            report = json.loads(validation_path.read_text(encoding="utf-8"))
+            if isinstance(report, dict):
+                return report
+
+        baseline = self._baseline_report(fingerprint)
+        with tempfile.TemporaryDirectory(prefix="muika-core-candidate-") as tmp:
+            workspace = Path(tmp) / "workspace"
+            self._copy_workspace(workspace)
+            self._apply_candidate_to_copy(proposal, workspace)
+            candidate = self._run_probe(workspace)
+
+        warnings: list[str] = []
+        baseline_status = baseline.get("status")
+        candidate_status = candidate.get("status")
+        if baseline_status == "unavailable" or candidate_status == "unavailable":
+            status = "unavailable"
+            reason = candidate.get("reason") or baseline.get("reason") or "The test environment is unavailable."
+            new_failures: list[str] = []
+            new_errors: list[str] = []
+        elif candidate.get("timed_out"):
+            status = "failed"
+            reason = str(candidate.get("reason", "Candidate validation timed out."))
+            new_failures = []
+            new_errors = []
+        else:
+            baseline_failures = set(str(item) for item in baseline.get("failures", []))
+            baseline_errors = set(str(item) for item in baseline.get("errors", []))
+            new_failures = sorted(set(str(item) for item in candidate.get("failures", [])) - baseline_failures)
+            new_errors = sorted(set(str(item) for item in candidate.get("errors", [])) - baseline_errors)
+            status = "failed" if new_failures or new_errors else "passed"
+            reason = "Candidate adds test failures or collection errors." if status == "failed" else "No new failures."
+            if int(candidate.get("test_count", 0)) < int(baseline.get("test_count", 0)):
+                warnings.append(
+                    f"Test count decreased from {baseline.get('test_count', 0)} to {candidate.get('test_count', 0)}."
+                )
+
+        report = {
+            "patch_id": patch_id,
+            "fingerprint": fingerprint,
+            "created_at": datetime.now().isoformat(),
+            "status": status,
+            "reason": reason,
+            "baseline": baseline,
+            "candidate": candidate,
+            "new_failures": new_failures,
+            "new_errors": new_errors,
+            "warnings": warnings,
+        }
+        _atomic_write_json(validation_path, report)
+        proposal["validation"] = {
+            "status": status,
+            "fingerprint": fingerprint,
+            "created_at": report["created_at"],
+            "warnings": warnings,
+        }
+        proposal["warnings"] = warnings
+        self._save(proposal)
+        return report
+
+    async def approve(self, patch_id: str, *, allow_unvalidated: bool = False) -> str:
+        """验证并事务式应用一个待批准提案。"""
+        self._require_enabled()
+        async with _APPLY_LOCK:
+            proposal = self.load(patch_id)
+            if proposal["status"] != "pending":
+                raise CoreProposalError(f"Only pending proposals can be approved; status is {proposal['status']}.")
+            if self.is_stale(proposal):
+                raise CoreProposalError("Proposal is stale because the workspace changed.")
+            report = self.validate(patch_id)
+            if report["status"] == "failed":
+                raise CoreProposalError(f"Proposal validation failed: {report['reason']}")
+            if report["status"] == "unavailable" and not allow_unvalidated:
+                raise CoreProposalError(
+                    "Proposal validation is unavailable. Review the cause, then use the explicit "
+                    "unvalidated approval option."
+                )
+            if report["status"] not in {"passed", "unavailable"}:
+                raise CoreProposalError(f"Proposal validation has invalid status: {report['status']}.")
+
+            proposal = self.load(patch_id)
+            if self.is_stale(proposal):
+                raise CoreProposalError("Proposal became stale before application.")
+            proposal["status"] = "applying"
+            proposal["applying_at"] = datetime.now().isoformat()
+            proposal["unvalidated_approval"] = report["status"] == "unavailable"
+            self._save(proposal)
+            try:
+                self._apply_formal(proposal)
+            except Exception as exc:
+                recovery_errors = self._restore_before(proposal)
+                proposal["status"] = "failed"
+                proposal["failure"] = str(exc)
+                proposal["recovery_errors"] = recovery_errors
+                self._save(proposal)
+                if recovery_errors:
+                    raise CoreProposalError(
+                        f"Proposal application failed: {exc}. Recovery also failed: {'; '.join(recovery_errors)}"
+                    ) from exc
+                raise CoreProposalError(f"Proposal application failed and files were restored: {exc}") from exc
+
+            proposal["status"] = "approved"
+            proposal["approved_at"] = datetime.now().isoformat()
+            self._save(proposal)
+            for change in proposal["changes"]:
+                audit_error = await self._audit_change(proposal, change, "core_approve")
+                if audit_error:
+                    proposal["audit_errors"].append(audit_error)
+                    self._save(proposal)
+            risk = (
+                " The tests were unavailable, so this approval used the explicit risk override."
+                if allow_unvalidated
+                else ""
+            )
+            return f"Core proposal {patch_id} was approved and applied.{risk} Restart is required."
+
+    def _apply_formal(self, proposal: dict[str, Any]) -> None:
+        """应用提案的全部 after 状态。"""
+        patch_id = str(proposal["patch_id"])
+        deleted_root = self.proposals_root / patch_id / "deleted"
+        for change in proposal["changes"]:
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            after_text = self._snapshot_text(patch_id, change.get("after_snapshot"))
+            if after_text is None:
+                moved = deleted_root / change["path"]
+                moved.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, moved)
+            else:
+                _atomic_write_text(target, after_text)
+
+    def _restore_before(self, proposal: dict[str, Any]) -> list[str]:
+        """把全部正式文件恢复到 before 状态。"""
+        errors: list[str] = []
+        patch_id = str(proposal["patch_id"])
+        for change in reversed(proposal["changes"]):
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            before_text = self._snapshot_text(patch_id, change.get("before_snapshot"))
+            try:
+                if before_text is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    _atomic_write_text(target, before_text)
+            except Exception as exc:
+                errors.append(f"{change['path']}: {exc}")
+        return errors
+
+    async def _audit_change(
+        self,
+        proposal: dict[str, Any],
+        change: dict[str, Any],
+        action: str,
+    ) -> Optional[str]:
+        """尽力写入一条 Core 文件审计记录。"""
+        try:
+            async with get_session() as session:
+                record = await SelfModificationCRUD.create(
+                    session,
+                    layer="core",
+                    path=str(change["path"]),
+                    action=action,
+                    reason=str(proposal["reason"]),
+                    before_path=change.get("before_snapshot"),
+                    after_path=change.get("after_snapshot"),
+                    source=f"patch:{proposal['patch_id']}",
+                )
+                await session.flush()
+                logger.info(f"[CoreProposal] Audit #{record.id} recorded for {change['path']}")
+                return None
+        except Exception as exc:
+            message = f"{change['path']}: {exc}"
+            logger.critical(f"[CoreProposal] Audit failed after code application: {message}")
+            return message
 
 
 _manager: Optional[CoreProposalManager] = None
