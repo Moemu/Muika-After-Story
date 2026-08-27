@@ -6,6 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
+from muika.core.self_mod.policy import is_protected_path
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -36,6 +37,9 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
         raise _FSError(
             f"Access denied: {resolved} is not inside any allowed directory. " f"Allowed: {[str(p) for p in allowed]}"
         )
+
+    if require_write and is_protected_path(resolved):
+        raise _FSError(f"Access denied: {resolved} is protected core code and can never be modified.")
 
     if require_write and not mas_config.enable_file_write:
         raise _FSError("File write/delete is disabled by configuration.")

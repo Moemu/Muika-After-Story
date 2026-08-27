@@ -35,7 +35,7 @@ def _project_root() -> Path:
     return Path.cwd()
 
 
-def _is_protected(resolved: Path) -> bool:
+def is_protected_path(resolved: Path) -> bool:
     """判断解析后的路径是否命中受保护清单。
 
     同时拒绝"位于受保护路径内"与"包含受保护路径"（如项目根目录本身）两种情况。
@@ -76,7 +76,7 @@ def resolve_self_path(
     except Exception as e:
         raise SelfModError(f"Invalid path {raw_path!r}: {e}") from e
 
-    if _is_protected(resolved):
+    if is_protected_path(resolved):
         raise SelfModError(f"Access denied: {resolved} is protected core code and can never be self-modified.")
 
     roots = allowed_roots()
