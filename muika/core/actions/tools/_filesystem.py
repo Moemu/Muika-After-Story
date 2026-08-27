@@ -314,16 +314,10 @@ def _apply_edit(
         lines = text.splitlines(keepends=True)
         total = len(lines)
         if line_start > total:
-            raise ValueError(f"line_start ({line_start}) exceeds total lines ({total}); nothing to delete.")
+            return text
         start_idx = line_start - 1
         end_idx = min(line_end, total)
         del lines[start_idx:end_idx]
-        if line_end > total:
-            raise ValueError(
-                f"Only {total - start_idx} line(s) were available to delete "
-                f"(line_end={line_end} exceeds total={total}). "
-                f"Deleted the available range; check the file first."
-            )
         return "".join(lines)
 
     raise ValueError(f"Unknown operation: {operation!r}")
