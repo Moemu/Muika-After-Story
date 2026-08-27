@@ -48,7 +48,7 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 — Read-only (active when fs_allowed_paths is non-empty)
+# Read-only operations
 # ---------------------------------------------------------------------------
 
 
@@ -145,7 +145,7 @@ async def read_file(path: str, encoding: str = "utf-8", max_chars: int = 4000):
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — Write operations (requires file-write permission)
+# Write operations
 # ---------------------------------------------------------------------------
 
 
@@ -161,7 +161,7 @@ class WriteFileParams(BaseModel):
 
 @on_function_call(
     "Write or append text content to a file within the allowed paths. "
-    "Requires file-write permission enabled by the operator.",
+    "Requires file-write permission enabled by the user.",
     params=WriteFileParams,
 )
 async def write_file(path: str, content: str, write_mode: str = "overwrite", encoding: str = "utf-8"):
@@ -225,7 +225,7 @@ class EditFileParams(BaseModel):
 
 @on_function_call(
     "Edit an existing text file within the allowed paths using precise operations. "
-    "Requires file-write permission enabled by the operator.",
+    "Requires file-write permission enabled by the user.",
     params=EditFileParams,
 )
 async def edit_file(
@@ -335,7 +335,7 @@ class DeleteFileParams(BaseModel):
 
 @on_function_call(
     "Permanently delete a single file within the allowed paths. "
-    "Requires file-write permission enabled by the operator. This action is irreversible.",
+    "Requires file-write permission enabled by the user. This action is irreversible.",
     params=DeleteFileParams,
 )
 async def delete_file(path: str):

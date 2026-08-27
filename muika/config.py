@@ -93,31 +93,19 @@ class MASConfig(BaseSettings):
 
     # 自我迭代能力
     enable_self_modification: bool = True
-    """开启 Muika 的自我迭代能力（L1 内容层）。关闭时 self_* 工具全部禁用。"""
+    """开启 Muika 的内容自我修改能力。关闭时 self_* 工具全部禁用。"""
     enable_plugin_self_modification: bool = False
-    """开启后自我编辑沙箱追加 plugins/ 目录，允许 Muika 编写/修改自己的插件（L2 能力层）。"""
+    """开启后允许 Muika 编写和修改自己的单文件插件。"""
     enable_plugin_hot_reload: bool = True
-    """（Phase 3 预留）开启 plugins/ 目录热重载监听：新增/修改的插件自动加载或重载。"""
+    """开启 plugins/ 目录热重载监听。"""
     plugin_import_blacklist: List[str] = ["subprocess", "socket", "ctypes", "multiprocessing", "shutil"]
-    """（Phase 4 预留）自写插件静态检查的顶层 import 黑名单模块名。"""
+    """自写插件静态检查拒绝的顶层 import 模块名。"""
     enable_core_proposals: bool = False
-    """（Phase 5 预留）开启 core 代码变更提案工具（L3 代码层）。"""
-    core_proposal_max_files: int = 12
-    """Core 单个提案允许的最大文件数。"""
-    core_proposal_max_total_bytes: int = 1048576
-    """Core 单个提案允许的候选内容总字节数。"""
-    core_proposal_max_file_bytes: int = 524288
-    """Core 单个候选文件允许的最大字节数。"""
-    core_validate_timeout_seconds: int = 180
-    """Core 候选测试进程的超时秒数。"""
-    core_validate_output_cap_bytes: int = 65536
-    """Core 候选测试进程保留的最大输出字节数。"""
-    core_patch_show_page_lines: int = 120
-    """Core 提案 diff 的每页行数。"""
+    """开启 Core 代码变更提案能力。"""
     enable_auto_reflection: bool = True
-    """（Phase 2 预留）开启 session 结束时的自动自省（概率触发、带冷却）。"""
+    """开启 session 结束时的自动自省。"""
     reflection_cooldown_hours: int = 24
-    """（Phase 2 预留）自动自省的最小间隔（小时）。"""
+    """自动自省的最小间隔（小时）。"""
     self_mod_backup_dir: str = "./data/self_modifications"
     """自我修改备份目录。每次 self_write 前旧文件会被备份到此处。"""
 

@@ -67,7 +67,7 @@ runs unload hooks in reverse registration order. Code is removed during reload. 
 `ctx.state` object stays in memory.
 
 A failed load can change live state before it stops. MAS does not copy or roll back
-live objects in Phase 4.
+live objects after a failed load.
 
 Use `get_plugin_data_dir()` for durable files owned by one plugin. It prevents two
 plugins from writing to the same data directory:
@@ -103,6 +103,6 @@ stays in staging. `plugin_load` replaces the formal file and reloads the plugin.
 formal reload fails, MAS restores the old file.
 The child process isolates Core memory and registries. It is not an operating-system
 security sandbox.
-The structured L3 proposal tools are the only default tool path that writes Core
-code. If the operator enables Python or shell execution, that is a separate trust
-decision and can bypass structured controls.
+The Core proposal workflow is the default structured path for Core code changes.
+If the user enables Python or shell execution, those tools can write files outside
+this workflow.

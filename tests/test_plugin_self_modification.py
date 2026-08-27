@@ -1,4 +1,4 @@
-"""Phase 4 单文件插件安全部署测试。"""
+"""单文件插件安全部署测试。"""
 
 from __future__ import annotations
 

@@ -11,7 +11,7 @@ from muika.plugin.func_call import on_function_call
 
 
 class CoreListParams(BaseModel):
-    path: str = Field("muika", description="Project-relative Core directory or Python file.")
+    path: str = Field("muika", description="Core directory or file relative to the running MAS source root.")
 
 
 @on_function_call("List Python files in the approved Core observation scope.", params=CoreListParams)
@@ -40,7 +40,7 @@ async def core_list(path: str = "muika") -> str:
 
 
 class CoreReadParams(BaseModel):
-    path: str = Field(..., description="Project-relative Python file.")
+    path: str = Field(..., description="Python file relative to the running MAS source root.")
     line_start: int = Field(1, ge=1, description="First line, starting at 1.")
     line_end: int = Field(200, ge=1, description="Last line, inclusive.")
 
@@ -65,7 +65,7 @@ async def core_read(path: str, line_start: int = 1, line_end: int = 200) -> str:
 
 class CoreSearchParams(BaseModel):
     query: str = Field(..., min_length=1, description="Exact text to find.")
-    path: str = Field("muika", description="Project-relative Core search root.")
+    path: str = Field("muika", description="Core search path relative to the running MAS source root.")
 
 
 @on_function_call("Search exact text in Core Python code and return bounded matches.", params=CoreSearchParams)

@@ -6,6 +6,7 @@ import ast
 import asyncio
 import difflib
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -41,6 +42,15 @@ _PROBE_MARKER = "[CORE_PROBE_RESULT]"
 _APPLY_LOCK = asyncio.Lock()
 _BOOT_ID = uuid.uuid4().hex
 _maintenance_patch_id: Optional[str] = None
+
+CORE_PROPOSAL_MAX_FILES = 12
+CORE_PROPOSAL_MAX_TOTAL_BYTES = 1048576
+CORE_PROPOSAL_MAX_FILE_BYTES = 524288
+CORE_VALIDATE_TIMEOUT_SECONDS = 180
+CORE_VALIDATE_OUTPUT_CAP_BYTES = 65536
+CORE_PATCH_SHOW_PAGE_LINES = 120
+
+_RUNTIME_SOURCE_ROOT = Path(__file__).resolve().parents[3]
 
 
 def is_core_maintenance_active() -> bool:
@@ -99,13 +109,20 @@ class CoreProposalManager:
     """管理 Core 多文件提案及其不可变快照。"""
 
     def __init__(self, project_root: Optional[Path] = None) -> None:
-        self.project_root = (project_root or Path.cwd()).resolve()
-        self.proposals_root = (self.project_root / mas_config.data_dir / "core_proposals").resolve()
+        self.project_root = (project_root or _RUNTIME_SOURCE_ROOT).resolve()
+        data_root = Path(mas_config.data_dir)
+        if not data_root.is_absolute():
+            data_root = Path.cwd() / data_root
+        self.proposals_root = (data_root / "core_proposals").resolve()
 
     def _require_enabled(self) -> None:
         """检查 Core 提案的双开关。"""
         if not mas_config.enable_self_modification or not mas_config.enable_core_proposals:
             raise CoreProposalError("Core proposals are disabled by configuration.")
+
+    def _has_source_test_workspace(self) -> bool:
+        """判断当前运行源码是否包含项目测试工作区。"""
+        return (self.project_root / "pyproject.toml").is_file() and (self.project_root / "tests").is_dir()
 
     def resolve_core_path(self, raw_path: str, *, for_write: bool = False) -> Path:
         """解析 Core 路径并检查允许范围。"""
@@ -120,7 +137,7 @@ class CoreProposalManager:
     def resolve_observation_path(self, raw_path: str) -> Path:
         """解析 Core 只读观察路径。"""
         if not raw_path or Path(raw_path).is_absolute():
-            raise CoreProposalError("Core paths must be project-relative.")
+            raise CoreProposalError("Core paths must be relative to the running MAS source root.")
         lexical = Path(raw_path)
         if any(part in ("", ".", "..") for part in lexical.parts):
             raise CoreProposalError(f"Invalid Core path: {raw_path!r}.")
@@ -133,25 +150,31 @@ class CoreProposalManager:
         try:
             rel = resolved.relative_to(self.project_root).as_posix()
         except ValueError as exc:
-            raise CoreProposalError(f"Access denied: {raw_path} is outside the project.") from exc
-        allowed = rel in _ALLOWED_FILES or any(rel.startswith(prefix + "/") for prefix in _ALLOWED_DIRS)
-        allowed = allowed or rel in _ALLOWED_DIRS
+            raise CoreProposalError(f"Access denied: {raw_path} is outside the running MAS source root.") from exc
+        allowed_dirs = _ALLOWED_DIRS if self._has_source_test_workspace() else ("muika",)
+        allowed_files = _ALLOWED_FILES if self._has_source_test_workspace() else ()
+        allowed = rel in allowed_files or any(rel.startswith(prefix + "/") for prefix in allowed_dirs)
+        allowed = allowed or rel in allowed_dirs
         if not allowed:
             raise CoreProposalError(f"Access denied: {rel} is outside the Core proposal scope.")
         return resolved
 
     def workspace_fingerprint(self) -> str:
-        """返回当前 L3 Python 工作区指纹。"""
+        """返回当前运行源码和测试文件的工作区指纹。"""
         digest = hashlib.sha256()
         paths: list[Path] = []
-        for dirname in _ALLOWED_DIRS:
+        source_workspace = self._has_source_test_workspace()
+        for dirname in _ALLOWED_DIRS if source_workspace else ("muika",):
             root = self.project_root / dirname
             if root.is_dir():
                 paths.extend(path for path in root.rglob("*.py") if path.is_file() and not path.is_symlink())
-        for filename in _ALLOWED_FILES:
+        for filename in _ALLOWED_FILES if source_workspace else ():
             path = self.project_root / filename
             if path.is_file() and not path.is_symlink():
                 paths.append(path)
+        project_file = self.project_root / "pyproject.toml"
+        if project_file.is_file():
+            paths.append(project_file)
         for path in sorted(set(paths), key=lambda item: item.relative_to(self.project_root).as_posix()):
             rel = path.relative_to(self.project_root).as_posix()
             digest.update(rel.encode("utf-8"))
@@ -168,8 +191,8 @@ class CoreProposalManager:
             raise CoreProposalError("Proposal reason must not be empty.")
         if not changes:
             raise CoreProposalError("Proposal must contain at least one file change.")
-        if len(changes) > mas_config.core_proposal_max_files:
-            raise CoreProposalError(f"Proposal exceeds the {mas_config.core_proposal_max_files}-file limit.")
+        if len(changes) > CORE_PROPOSAL_MAX_FILES:
+            raise CoreProposalError(f"Proposal exceeds the {CORE_PROPOSAL_MAX_FILES}-file limit.")
 
         prepared: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -180,8 +203,8 @@ class CoreProposalManager:
                 raise CoreProposalError(f"Path appears more than once: {item['path']}.")
             seen.add(item["path"])
             total_bytes += len((item.get("after_text") or "").encode("utf-8"))
-            if total_bytes > mas_config.core_proposal_max_total_bytes:
-                raise CoreProposalError(f"Proposal content exceeds {mas_config.core_proposal_max_total_bytes} bytes.")
+            if total_bytes > CORE_PROPOSAL_MAX_TOTAL_BYTES:
+                raise CoreProposalError(f"Proposal content exceeds {CORE_PROPOSAL_MAX_TOTAL_BYTES} bytes.")
             prepared.append(item)
 
         patch_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
@@ -223,6 +246,7 @@ class CoreProposalManager:
             "status": "pending",
             "reason": reason,
             "source": source,
+            "source_root": str(self.project_root),
             "created_at": datetime.now().isoformat(),
             "workspace_fingerprint": self.workspace_fingerprint(),
             "changes": records,
@@ -261,8 +285,8 @@ class CoreProposalManager:
             after_text = None
         if after_text is not None:
             size = len(after_text.encode("utf-8"))
-            if size > mas_config.core_proposal_max_file_bytes:
-                raise CoreProposalError(f"Candidate {rel} exceeds {mas_config.core_proposal_max_file_bytes} bytes.")
+            if size > CORE_PROPOSAL_MAX_FILE_BYTES:
+                raise CoreProposalError(f"Candidate {rel} exceeds {CORE_PROPOSAL_MAX_FILE_BYTES} bytes.")
             try:
                 ast.parse(after_text, filename=rel)
                 compile(after_text, rel, "exec")
@@ -337,6 +361,8 @@ class CoreProposalManager:
         """判断提案是否与当前工作区发生漂移。"""
         if proposal.get("status") != "pending":
             return False
+        if proposal.get("source_root") != str(self.project_root):
+            return True
         if proposal.get("workspace_fingerprint") != self.workspace_fingerprint():
             return True
         for change in proposal.get("changes", []):
@@ -354,7 +380,7 @@ class CoreProposalManager:
             raise CoreProposalError("Page must be 1 or greater.")
         diff = (self.proposals_root / patch_id / "proposal.diff").read_text(encoding="utf-8")
         lines = diff.splitlines()
-        page_size = mas_config.core_patch_show_page_lines
+        page_size = CORE_PATCH_SHOW_PAGE_LINES
         page_count = max(1, (len(lines) + page_size - 1) // page_size)
         if page > page_count:
             raise CoreProposalError(f"Page {page} exceeds {page_count} pages.")
@@ -369,6 +395,7 @@ class CoreProposalManager:
             *warnings,
             f"提案：{patch_id}",
             f"状态：{proposal['status']} | 过期：{stale}",
+            f"运行源码：{proposal.get('source_root', '(unknown)')}",
             f"理由：{proposal['reason']}",
             f"文件：{', '.join(paths)}",
             f"Diff：第 {page}/{page_count} 页",
@@ -413,22 +440,34 @@ class CoreProposalManager:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(after_text, encoding="utf-8")
 
+    def _validation_environment_error(self) -> Optional[str]:
+        """返回当前安装不能运行源码测试的原因。"""
+        if not self._has_source_test_workspace():
+            return (
+                "The running installation does not include a source test workspace. "
+                f"Core files resolve to {self.project_root}. Install MAS from a source checkout to run validation."
+            )
+        if importlib.util.find_spec("pytest") is None:
+            return "pytest is not installed in the current Python environment."
+        return None
+
     def _run_probe(self, workspace: Path) -> dict[str, Any]:
         """在子进程中运行候选测试探针。"""
-        command = [sys.executable, "-m", "muika.core.self_mod.core_probe"]
+        probe_path = Path(__file__).with_name("core_probe.py")
+        command = [sys.executable, str(probe_path)]
         try:
             completed = subprocess.run(
                 command,
                 cwd=workspace,
                 capture_output=True,
-                timeout=mas_config.core_validate_timeout_seconds,
+                timeout=CORE_VALIDATE_TIMEOUT_SECONDS,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            timeout_output = ((exc.stdout or b"") + (exc.stderr or b""))[-mas_config.core_validate_output_cap_bytes :]
+            timeout_output = ((exc.stdout or b"") + (exc.stderr or b""))[-CORE_VALIDATE_OUTPUT_CAP_BYTES:]
             return {
                 "status": "failed",
-                "reason": f"Validation timed out after {mas_config.core_validate_timeout_seconds} seconds.",
+                "reason": f"Validation timed out after {CORE_VALIDATE_TIMEOUT_SECONDS} seconds.",
                 "timed_out": True,
                 "output": timeout_output.decode("utf-8", errors="replace"),
                 "failures": [],
@@ -436,7 +475,7 @@ class CoreProposalManager:
                 "test_count": 0,
             }
         output_bytes = (completed.stdout or b"") + (completed.stderr or b"")
-        output = output_bytes[-mas_config.core_validate_output_cap_bytes :].decode("utf-8", errors="replace")
+        output = output_bytes[-CORE_VALIDATE_OUTPUT_CAP_BYTES:].decode("utf-8", errors="replace")
         marker_line = next((line for line in reversed(output.splitlines()) if line.startswith(_PROBE_MARKER)), None)
         if marker_line is None:
             return {
@@ -474,7 +513,23 @@ class CoreProposalManager:
             except json.JSONDecodeError:
                 cached = None
             if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
-                return cached
+                if cached.get("status") != "unavailable" or self._validation_environment_error() is not None:
+                    return cached
+        environment_error = self._validation_environment_error()
+        if environment_error:
+            report = {
+                "status": "unavailable",
+                "reason": environment_error,
+                "timed_out": False,
+                "output": "",
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+                "fingerprint": fingerprint,
+                "measured_at": datetime.now().isoformat(),
+            }
+            _atomic_write_json(cache_path, report)
+            return report
         with tempfile.TemporaryDirectory(prefix="muika-core-baseline-") as tmp:
             workspace = Path(tmp) / "workspace"
             self._copy_workspace(workspace)
@@ -650,6 +705,8 @@ class CoreProposalManager:
             proposal = self.load(patch_id)
             if proposal["status"] != "approved":
                 raise CoreProposalError(f"Only approved proposals can be rolled back; status is {proposal['status']}.")
+            if proposal.get("source_root") != str(self.project_root):
+                raise CoreProposalError("Rollback refused because the running MAS source location changed.")
             if not self._matches_state(proposal, "after"):
                 raise CoreProposalError("Rollback refused because an approved target file changed.")
             proposal["status"] = "rolling_back"
@@ -687,6 +744,13 @@ class CoreProposalManager:
             if status not in {"applying", "rolling_back"}:
                 continue
             patch_id = str(proposal["patch_id"])
+            if proposal.get("source_root") != str(self.project_root):
+                proposal["status"] = "failed"
+                proposal["recovery_note"] = "Recovery refused because the running MAS source location changed."
+                proposal["recovered_at"] = datetime.now().isoformat()
+                self._save(proposal)
+                recovered.append(patch_id)
+                continue
             all_before = self._matches_state(proposal, "before")
             all_after = self._matches_state(proposal, "after")
             if status == "applying":

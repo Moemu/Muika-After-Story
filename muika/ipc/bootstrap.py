@@ -259,7 +259,7 @@ async def run_core(
         logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
     if mas_config.enable_core_proposals and (mas_config.enable_code_execution or mas_config.enable_shell_execution):
         logger.warning(
-            "[CoreProposal] Code or shell execution is enabled. These trusted tools can bypass structured L3 controls."
+            "[CoreProposal] Code or shell execution is enabled. These trusted tools can bypass Core proposal controls."
         )
 
     if MCP_CONFIG_PATH.exists():

@@ -39,7 +39,7 @@ Core → (主动消息, 孤独感/话题驱动) → IPC → muika-bot → NapCat
 
 ## 部署流程
 
-### Phase 1：搭建 Core 环境
+### 搭建 Core 环境
 
 Core 是 Muika 的 AI 引擎，**必须先于 Bot 启动**。
 
@@ -67,7 +67,7 @@ grep IPC_SECRET .env
 
 ---
 
-### Phase 2：配置 QQ Bot 环境
+### 配置 QQ Bot 环境
 
 ```bash
 # 1. 复制环境变量模板
@@ -85,7 +85,7 @@ cp .env.qq .env.qq.local
 
 ---
 
-### Phase 3：启动 NapCat 和 muika-bot 适配器
+### 启动 NapCat 和 muika-bot 适配器
 
 ```bash
 cd deploy

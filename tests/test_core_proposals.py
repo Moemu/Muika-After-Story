@@ -27,6 +27,7 @@ def core_workspace(tmp_path: Path, monkeypatch):
     (tmp_path / "muika" / "core").mkdir(parents=True)
     (tmp_path / "muika_bot").mkdir()
     (tmp_path / "tests").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
     (tmp_path / "muika" / "core" / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "core_main.py").write_text("VALUE = 1\n", encoding="utf-8")
     proposals_module._leave_maintenance()
@@ -53,6 +54,7 @@ def test_create_multifile_proposal_keeps_workspace_unchanged(core_workspace):
     proposal_dir = root / "data/core_proposals" / patch_id
     proposal = json.loads((proposal_dir / "proposal.json").read_text(encoding="utf-8"))
     assert proposal["status"] == "pending"
+    assert proposal["source_root"] == str(root)
     assert proposal["audit_errors"] == []
     assert (proposal_dir / "before/muika/core/sample.py").is_file()
     assert (proposal_dir / "after/muika/core/new_file.py").is_file()
@@ -135,6 +137,58 @@ def test_dual_switch_is_required(core_workspace, monkeypatch):
     monkeypatch.setattr(mas_config, "enable_core_proposals", False)
     with pytest.raises(CoreProposalError, match="disabled"):
         manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "No.")
+
+
+def test_default_source_root_is_the_running_muika_installation(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mas_config, "data_dir", Path("data"))
+
+    manager = CoreProposalManager()
+
+    assert manager.project_root == Path(proposals_module.__file__).resolve().parents[3]
+    assert manager.resolve_core_path("muika/core/self_mod/proposals.py") == Path(proposals_module.__file__).resolve()
+    assert manager.resolve_core_path("muika/core/self_mod/manager.py").is_file()
+    assert manager.proposals_root == (tmp_path / "data/core_proposals").resolve()
+
+
+def test_installed_package_without_tests_reports_validation_unavailable(tmp_path, monkeypatch):
+    source_root = tmp_path / "site-packages"
+    (source_root / "muika/core").mkdir(parents=True)
+    (source_root / "muika/core/sample.py").write_text("X = 1\n", encoding="utf-8")
+    monkeypatch.setattr(mas_config, "data_dir", tmp_path / "data")
+    manager = CoreProposalManager(source_root)
+    monkeypatch.setattr(manager, "_copy_workspace", lambda destination: pytest.fail("workspace copy must not run"))
+
+    report = manager._baseline_report(manager.workspace_fingerprint())
+
+    assert report["status"] == "unavailable"
+    assert "does not include a source test workspace" in report["reason"]
+    assert str(source_root.resolve()) in report["reason"]
+    with pytest.raises(CoreProposalError, match="outside the Core proposal scope"):
+        manager.resolve_core_path("tests/test_new.py", for_write=True)
+
+
+def test_probe_runs_the_explicit_trusted_script(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return proposals_module.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=b'[CORE_PROBE_RESULT]{"status":"completed","failures":[],"errors":[],"test_count":1}',
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(proposals_module.subprocess, "run", fake_run)
+
+    report = manager._run_probe(manager.project_root)
+
+    assert captured["command"][0] == proposals_module.sys.executable
+    assert Path(captured["command"][1]).name == "core_probe.py"
+    assert "-m" not in captured["command"]
+    assert report["status"] == "completed"
 
 
 def _probe(status="completed", failures=None, errors=None, test_count=10, timed_out=False):
@@ -419,6 +473,21 @@ def test_recover_mixed_rollback_state_restores_before(core_workspace):
     assert (root / "muika/core/sample.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert not (root / "muika/core/new.py").exists()
     assert manager.load(patch_id)["status"] == "rolled_back"
+
+
+def test_recovery_refuses_proposal_from_another_source_location(core_workspace):
+    root, manager = core_workspace
+    patch_id = manager.create(
+        [{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Wrong source."
+    )
+    proposal = manager.load(patch_id)
+    proposal["status"] = "applying"
+    proposal["source_root"] = str(root / "other-install")
+    manager._save(proposal)
+
+    assert manager.recover_incomplete() == [patch_id]
+    assert manager.load(patch_id)["status"] == "failed"
+    assert not (root / "muika/core/new.py").exists()
 
 
 @pytest.mark.parametrize(

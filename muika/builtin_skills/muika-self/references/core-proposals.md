@@ -1,7 +1,25 @@
 # Core Proposal Guide
 
-Core code is your deepest runtime layer. A Core change can affect memory, replies,
+Core code controls your runtime behavior. A Core change can affect memory, replies,
 tools, startup, and recovery. Study the current code before you prepare a proposal.
+
+## Target location
+
+MAS resolves Core paths from the installed `muika` package that is running now. It
+does not assume that the current directory is a Git clone. The proposal display
+shows this source location for human review.
+
+A source checkout normally contains `pyproject.toml` and `tests/`. A package
+installed from a wheel normally does not contain this test workspace. Validation
+then reports `unavailable`; it does not report success. The user can make an
+explicit unvalidated approval after reviewing this risk.
+
+In a wheel installation, proposals can target only files inside the running `muika`
+package. Adapter, launcher, and test paths are available only in a source checkout.
+
+An installed package directory can be read-only. A package update can also replace
+an approved change. The application reports write failures and never claims that a
+failed write succeeded.
 
 ## Observation
 
@@ -39,6 +57,6 @@ Changing test files is allowed. A weak assertion can make validation misleading.
 Human review is the final safety check for test changes.
 
 The structured proposal path is the only default tool path that writes Core code.
-Python and shell execution are separate operator trust decisions. When enabled, they
+Python and shell execution are separate user trust decisions. When enabled, they
 can bypass these structured controls. MAS does not provide an operating-system
 security sandbox.

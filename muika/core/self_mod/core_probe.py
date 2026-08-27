@@ -1,8 +1,10 @@
-"""Core 候选 pytest 子进程探针。"""
+"""由 Core 提案管理器按文件路径启动的 pytest 子进程探针。"""
 
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from typing import Any
 
 _MARKER = "[CORE_PROBE_RESULT]"
@@ -36,7 +38,7 @@ class _ProbePlugin:
 
 
 def main() -> None:
-    """运行 pytest 并输出结构化结果。"""
+    """运行 pytest 并输出结构化结果；缺少 pytest 时报告不可用。"""
     try:
         import pytest
     except ImportError as exc:
@@ -53,9 +55,11 @@ def main() -> None:
 
     plugin = _ProbePlugin()
     try:
+        sys.path.insert(0, str(Path.cwd()))
         exit_code = int(pytest.main(["-q", "-o", "addopts="], plugins=[plugin]))
+        status = "unavailable" if exit_code in {2, 3, 4} and not plugin.errors else "completed"
         result = {
-            "status": "completed",
+            "status": status,
             "reason": f"pytest exited with code {exit_code}.",
             "exit_code": exit_code,
             "timed_out": False,
