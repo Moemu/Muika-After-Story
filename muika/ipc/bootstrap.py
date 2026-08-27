@@ -27,6 +27,12 @@ from muika.core.events import (
 )
 from muika.core.executor import Executor
 from muika.core.loop import Muika
+from muika.core.self_mod.proposals import (
+    core_maintenance_message,
+    get_core_proposal_manager,
+    is_core_maintenance_active,
+    is_maintenance_command_allowed,
+)
 from muika.database.db import close_db, init_db
 from muika.models import Message, Resource
 from muika.plugin import CommandDispatcher, load_plugins
@@ -35,11 +41,7 @@ from muika.plugin.watcher import start_plugin_watcher, stop_plugin_watcher
 from muika.utils.logger import init_logger, logger
 from muika.utils.utils import get_version
 
-from .protocol import (
-    ActionResponse,
-    BotToCoreEvent,
-    BotToCoreMessage,
-)
+from .protocol import ActionResponse, BotToCoreEvent, BotToCoreMessage
 from .protocol import CommandEvent as IpcCommandEvent
 from .protocol import CommandResult, ErrorMessage, SendMessage
 from .protocol import SessionBootstrapEvent as IpcSessionBootstrapEvent
@@ -167,6 +169,26 @@ class CoreBootstrap:
 
         logger.info(f"[Core] Received event: {event.type} from {client_name!r}")
 
+        if is_core_maintenance_active():
+            if isinstance(event, IpcCommandEvent) and is_maintenance_command_allowed(event.raw):
+                pass
+            elif isinstance(event, IpcUserMessageEvent):
+                self._ws_server.set_triggering_adapter(client_name)
+                await self._ws_server.send_to_bot(SendMessage(content=core_maintenance_message()), target=client_name)
+                return ActionResponse(action=event.type, status="maintenance")
+            elif isinstance(event, IpcCommandEvent):
+                self._ws_server.set_triggering_adapter(client_name)
+                await self._ws_server.send_to_bot(
+                    CommandResult(content="[System] Core 正在等待重启。当前命令在维护模式中不可用。"),
+                    target=client_name,
+                )
+                return ActionResponse(action=event.type, status="maintenance")
+            else:
+                if isinstance(event, IpcSessionBootstrapEvent):
+                    self._ws_server.mark_bootstrapped(client_name)
+                    self.is_bootstraped = True
+                return ActionResponse(action=event.type, status="maintenance")
+
         if isinstance(event, IpcUserMessageEvent):
             self._ws_server.set_triggering_adapter(client_name)
             msg = Message(message=event.message)
@@ -231,6 +253,14 @@ async def run_core(
 
     logger.debug("Loading Database...")
     await init_db()
+
+    recovered = get_core_proposal_manager().recover_incomplete()
+    if recovered:
+        logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
+    if mas_config.enable_core_proposals and (mas_config.enable_code_execution or mas_config.enable_shell_execution):
+        logger.warning(
+            "[CoreProposal] Code or shell execution is enabled. These trusted tools can bypass structured L3 controls."
+        )
 
     if MCP_CONFIG_PATH.exists():
         logger.info("Loading MCP Server config")

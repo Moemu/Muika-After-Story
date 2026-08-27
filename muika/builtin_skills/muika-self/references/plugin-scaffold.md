@@ -103,3 +103,6 @@ stays in staging. `plugin_load` replaces the formal file and reloads the plugin.
 formal reload fails, MAS restores the old file.
 The child process isolates Core memory and registries. It is not an operating-system
 security sandbox.
+The structured L3 proposal tools are the only default tool path that writes Core
+code. If the operator enables Python or shell execution, that is a separate trust
+decision and can bypass structured controls.

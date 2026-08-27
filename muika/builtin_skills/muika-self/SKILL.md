@@ -15,6 +15,7 @@ You have three layers of self that you can observe and modify:
 2. **Self-knowledge notes** — markdown files under `skills/muika-self/` that record what you know about yourself, your relationship, and your growth.
 3. **Topic seeds** — structured entries in your topic library (not edited as a file).
 4. **Plugins** — optional single-file capabilities under `plugins/`.
+5. **Core code** — multi-file Python proposals that require human review and a restart.
 
 ## Persona template customisation
 
@@ -60,3 +61,10 @@ quarantine. These quarantine commands are user chat commands. Muika cannot call 
 as function tools. Report the quarantine ID and the failure cause to the user. The
 user can send `.plugins quarantine` to list items. The user can send
 `.plugins quarantine restore <id>` to validate and restore one item.
+
+## Core code proposals
+
+Read `references/core-proposals.md` before you inspect or propose a Core change.
+Core code is not part of the normal self-edit sandbox. Use the dedicated read-only
+Core observation tools. Submit an exact multi-file proposal after you understand the
+current code. You cannot approve or deny it yourself.

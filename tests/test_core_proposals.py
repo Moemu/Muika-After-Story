@@ -10,7 +10,11 @@ import pytest
 
 from muika.config import mas_config
 from muika.core.actions.tools import _filesystem
+from muika.core.events import UserMessageEvent, UserMessagePayload
+from muika.core.loop import Muika
+from muika.core.self_mod import proposals as proposals_module
 from muika.core.self_mod.proposals import CoreProposalError, CoreProposalManager
+from muika.models import Message
 
 
 @pytest.fixture
@@ -25,7 +29,9 @@ def core_workspace(tmp_path: Path, monkeypatch):
     (tmp_path / "tests").mkdir()
     (tmp_path / "muika" / "core" / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "core_main.py").write_text("VALUE = 1\n", encoding="utf-8")
-    return tmp_path, CoreProposalManager(tmp_path)
+    proposals_module._leave_maintenance()
+    yield tmp_path, CoreProposalManager(tmp_path)
+    proposals_module._leave_maintenance()
 
 
 def test_create_multifile_proposal_keeps_workspace_unchanged(core_workspace):
@@ -74,6 +80,9 @@ def test_modify_requires_each_old_text_to_match_once(core_workspace):
         "muika/core/self_mod/proposals.py",
         "muika/core/actions/tools/_core_proposal.py",
         "muika/builtin_plugins/patch.py",
+        "muika/config.py",
+        "muika/core/loop.py",
+        "muika/ipc/bootstrap.py",
         "muika/migrations/new.py",
         "tests/test_core_proposals.py",
         "configs/models.py",
@@ -201,6 +210,18 @@ async def test_failed_validation_cannot_be_overridden(core_workspace, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_candidate_probe_error_cannot_be_overridden(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Add code.")
+    probes = [_probe(), _probe(status="unavailable")]
+    monkeypatch.setattr(manager, "_run_probe", lambda workspace: probes.pop(0))
+    monkeypatch.setattr(manager, "_copy_workspace", lambda destination: destination.mkdir(parents=True))
+
+    with pytest.raises(CoreProposalError, match="validation failed"):
+        await manager.approve(patch_id, allow_unvalidated=True)
+
+
+@pytest.mark.asyncio
 async def test_approve_applies_modify_create_delete_transaction(core_workspace, monkeypatch):
     root, manager = core_workspace
     delete_target = root / "muika/core/delete_me.py"
@@ -273,3 +294,164 @@ async def test_audit_failure_does_not_rollback_applied_code(core_workspace, monk
     proposal = manager.load(patch_id)
     assert proposal["status"] == "approved"
     assert proposal["audit_errors"] == ["muika/core/new.py: database down"]
+
+
+@pytest.mark.asyncio
+async def test_same_boot_rollback_restores_files_and_ends_maintenance(core_workspace, monkeypatch):
+    root, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Try code.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
+
+    await manager.approve(patch_id)
+    assert proposals_module.is_core_maintenance_active()
+    report = await manager.rollback(patch_id)
+
+    assert "Maintenance mode ended" in report
+    assert not proposals_module.is_core_maintenance_active()
+    assert not (root / "muika/core/new.py").exists()
+    assert manager.load(patch_id)["status"] == "rolled_back"
+
+
+@pytest.mark.asyncio
+async def test_maintenance_rejects_second_approval(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    first = manager.create([{"action": "create", "path": "muika/core/first.py", "content": "X = 1\n"}], "First.")
+    second = manager.create([{"action": "create", "path": "muika/core/second.py", "content": "X = 2\n"}], "Second.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
+
+    await manager.approve(first)
+    with pytest.raises(CoreProposalError, match="waiting for a restart"):
+        await manager.approve(second)
+
+
+@pytest.mark.asyncio
+async def test_rollback_rejects_hash_drift(core_workspace, monkeypatch):
+    root, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Try code.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
+    await manager.approve(patch_id)
+    (root / "muika/core/new.py").write_text("X = 2\n", encoding="utf-8")
+
+    with pytest.raises(CoreProposalError, match="changed"):
+        await manager.rollback(patch_id)
+
+
+@pytest.mark.asyncio
+async def test_cross_boot_rollback_requires_another_restart(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Try code.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
+    await manager.approve(patch_id)
+    proposals_module._leave_maintenance()
+    monkeypatch.setattr(proposals_module, "_BOOT_ID", "new-boot")
+
+    report = await manager.rollback(patch_id)
+
+    assert "Restart is required" in report
+    assert not proposals_module.is_core_maintenance_active()
+
+
+def test_deny_changes_status_without_changing_code(core_workspace):
+    root, manager = core_workspace
+    patch_id = manager.create(
+        [{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Decline code."
+    )
+
+    manager.deny(patch_id, "Not needed.")
+
+    proposal = manager.load(patch_id)
+    assert proposal["status"] == "denied"
+    assert proposal["denial_reason"] == "Not needed."
+    assert not (root / "muika/core/new.py").exists()
+
+
+def test_recover_mixed_applying_state_restores_before(core_workspace):
+    root, manager = core_workspace
+    patch_id = manager.create(
+        [
+            {
+                "action": "modify",
+                "path": "muika/core/sample.py",
+                "replacements": [{"old_text": "VALUE = 1", "new_text": "VALUE = 2"}],
+            },
+            {"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"},
+        ],
+        "Recover code.",
+    )
+    proposal = manager.load(patch_id)
+    first_only = dict(proposal)
+    first_only["changes"] = proposal["changes"][:1]
+    manager._apply_formal(first_only)
+    proposal["status"] = "applying"
+    manager._save(proposal)
+
+    assert manager.recover_incomplete() == [patch_id]
+    assert (root / "muika/core/sample.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (root / "muika/core/new.py").exists()
+    assert manager.load(patch_id)["status"] == "failed"
+
+
+def test_recover_mixed_rollback_state_restores_before(core_workspace):
+    root, manager = core_workspace
+    patch_id = manager.create(
+        [
+            {
+                "action": "modify",
+                "path": "muika/core/sample.py",
+                "replacements": [{"old_text": "VALUE = 1", "new_text": "VALUE = 2"}],
+            },
+            {"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"},
+        ],
+        "Recover rollback.",
+    )
+    proposal = manager.load(patch_id)
+    manager._apply_formal(proposal)
+    (root / "muika/core/sample.py").write_text("VALUE = 1\n", encoding="utf-8")
+    proposal["status"] = "rolling_back"
+    manager._save(proposal)
+
+    manager.recover_incomplete()
+
+    assert (root / "muika/core/sample.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (root / "muika/core/new.py").exists()
+    assert manager.load(patch_id)["status"] == "rolled_back"
+
+
+@pytest.mark.parametrize(
+    ("raw", "allowed"),
+    [
+        (".patch list", True),
+        ("/patch show id", True),
+        (".patch validate id", True),
+        (".patch deny id", True),
+        (".patch rollback id", True),
+        (".patch approve id", False),
+        (".help", False),
+    ],
+)
+def test_maintenance_command_subset(raw, allowed):
+    assert proposals_module.is_maintenance_command_allowed(raw) is allowed
+
+
+@pytest.mark.asyncio
+async def test_maintenance_loop_gate_does_not_start_persona_work(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    engine = Muika.__new__(Muika)
+    engine.is_alive = True
+    engine._is_collecting_event = False
+
+    async def collect_event():
+        engine.is_alive = False
+        return UserMessageEvent(payload=UserMessagePayload(message=Message(message="hello")))
+
+    monkeypatch.setattr(engine, "collect_events", collect_event)
+    monkeypatch.setattr(engine, "get_think_mode", lambda event: pytest.fail("maintenance started persona work"))
+    proposals_module._enter_maintenance("test-patch")
+
+    await engine.loop()
+
+    assert manager.list_proposals() == []

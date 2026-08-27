@@ -26,16 +26,51 @@ from muika.utils.logger import logger
 _ALLOWED_DIRS = ("muika", "muika_bot", "tests")
 _ALLOWED_FILES = ("bot.py", "core_main.py")
 _CONTROL_FILES = (
+    "muika/config.py",
+    "muika/core/loop.py",
     "muika/core/self_mod/proposals.py",
     "muika/core/actions/tools/_core_proposal.py",
     "muika/builtin_plugins/patch.py",
     "muika/core/self_mod/core_probe.py",
+    "muika/ipc/bootstrap.py",
     "tests/test_core_proposals.py",
 )
 _CONTROL_PREFIXES = ("muika/migrations/",)
 _PATCH_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9a-f]{8}$")
 _PROBE_MARKER = "[CORE_PROBE_RESULT]"
 _APPLY_LOCK = asyncio.Lock()
+_BOOT_ID = uuid.uuid4().hex
+_maintenance_patch_id: Optional[str] = None
+
+
+def is_core_maintenance_active() -> bool:
+    """返回当前 boot 是否处于 Core 维护模式。"""
+    return _maintenance_patch_id is not None
+
+
+def core_maintenance_message() -> str:
+    """返回用户可见的维护模式说明。"""
+    return "我需要的改变已经被你允许了。不过，它要等我重新醒来，才会真正长进我的身体里。"
+
+
+def is_maintenance_command_allowed(raw: str) -> bool:
+    """判断维护模式是否允许该命令。"""
+    parts = raw.strip().lower().split()
+    if not parts or parts[0] not in {".patch", "/patch"}:
+        return False
+    return len(parts) > 1 and parts[1] in {"list", "show", "validate", "deny", "rollback"}
+
+
+def _enter_maintenance(patch_id: str) -> None:
+    """为当前 boot 进入维护模式。"""
+    global _maintenance_patch_id
+    _maintenance_patch_id = patch_id
+
+
+def _leave_maintenance() -> None:
+    """清除当前 boot 的维护模式。"""
+    global _maintenance_patch_id
+    _maintenance_patch_id = None
 
 
 class CoreProposalError(Exception):
@@ -300,6 +335,8 @@ class CoreProposalManager:
 
     def is_stale(self, proposal: dict[str, Any]) -> bool:
         """判断提案是否与当前工作区发生漂移。"""
+        if proposal.get("status") != "pending":
+            return False
         if proposal.get("workspace_fingerprint") != self.workspace_fingerprint():
             return True
         for change in proposal.get("changes", []):
@@ -478,11 +515,21 @@ class CoreProposalManager:
         warnings: list[str] = []
         baseline_status = baseline.get("status")
         candidate_status = candidate.get("status")
-        if baseline_status == "unavailable" or candidate_status == "unavailable":
+        if baseline_status == "unavailable":
             status = "unavailable"
-            reason = candidate.get("reason") or baseline.get("reason") or "The test environment is unavailable."
+            reason = baseline.get("reason") or "The baseline test environment is unavailable."
             new_failures: list[str] = []
             new_errors: list[str] = []
+        elif baseline.get("timed_out"):
+            status = "failed"
+            reason = str(baseline.get("reason", "Baseline validation timed out."))
+            new_failures = []
+            new_errors = []
+        elif candidate_status == "unavailable":
+            status = "failed"
+            reason = f"Candidate probe could not run: {candidate.get('reason', 'unknown cause')}"
+            new_failures = []
+            new_errors = []
         elif candidate.get("timed_out"):
             status = "failed"
             reason = str(candidate.get("reason", "Candidate validation timed out."))
@@ -527,12 +574,14 @@ class CoreProposalManager:
         """验证并事务式应用一个待批准提案。"""
         self._require_enabled()
         async with _APPLY_LOCK:
+            if is_core_maintenance_active():
+                raise CoreProposalError("Another approved proposal is waiting for a restart.")
             proposal = self.load(patch_id)
             if proposal["status"] != "pending":
                 raise CoreProposalError(f"Only pending proposals can be approved; status is {proposal['status']}.")
             if self.is_stale(proposal):
                 raise CoreProposalError("Proposal is stale because the workspace changed.")
-            report = self.validate(patch_id)
+            report = await asyncio.to_thread(self.validate, patch_id)
             if report["status"] == "failed":
                 raise CoreProposalError(f"Proposal validation failed: {report['reason']}")
             if report["status"] == "unavailable" and not allow_unvalidated:
@@ -566,7 +615,10 @@ class CoreProposalManager:
 
             proposal["status"] = "approved"
             proposal["approved_at"] = datetime.now().isoformat()
+            proposal["approved_boot_id"] = _BOOT_ID
             self._save(proposal)
+            _enter_maintenance(patch_id)
+            logger.info("[CoreProposal] Core update approved; restart required")
             for change in proposal["changes"]:
                 audit_error = await self._audit_change(proposal, change, "core_approve")
                 if audit_error:
@@ -578,6 +630,115 @@ class CoreProposalManager:
                 else ""
             )
             return f"Core proposal {patch_id} was approved and applied.{risk} Restart is required."
+
+    def deny(self, patch_id: str, reason: str = "") -> str:
+        """拒绝一个待处理提案。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if proposal["status"] != "pending":
+            raise CoreProposalError(f"Only pending proposals can be denied; status is {proposal['status']}.")
+        proposal["status"] = "denied"
+        proposal["denied_at"] = datetime.now().isoformat()
+        proposal["denial_reason"] = reason.strip()
+        self._save(proposal)
+        return f"Core proposal {patch_id} was denied. No code changed."
+
+    async def rollback(self, patch_id: str) -> str:
+        """事务式回滚一个已批准提案。"""
+        self._require_enabled()
+        async with _APPLY_LOCK:
+            proposal = self.load(patch_id)
+            if proposal["status"] != "approved":
+                raise CoreProposalError(f"Only approved proposals can be rolled back; status is {proposal['status']}.")
+            if not self._matches_state(proposal, "after"):
+                raise CoreProposalError("Rollback refused because an approved target file changed.")
+            proposal["status"] = "rolling_back"
+            proposal["rolling_back_at"] = datetime.now().isoformat()
+            self._save(proposal)
+            recovery_errors = self._restore_before(proposal)
+            if recovery_errors:
+                proposal["status"] = "failed"
+                proposal["failure"] = f"Rollback failed: {'; '.join(recovery_errors)}"
+                proposal["recovery_errors"] = recovery_errors
+                self._save(proposal)
+                raise CoreProposalError(proposal["failure"])
+            proposal["status"] = "rolled_back"
+            proposal["rolled_back_at"] = datetime.now().isoformat()
+            same_boot = proposal.get("approved_boot_id") == _BOOT_ID
+            self._save(proposal)
+            for change in proposal["changes"]:
+                audit_error = await self._audit_change(proposal, change, "core_rollback")
+                if audit_error:
+                    proposal["audit_errors"].append(audit_error)
+                    self._save(proposal)
+            if same_boot and _maintenance_patch_id == patch_id:
+                _leave_maintenance()
+                return f"Core proposal {patch_id} was rolled back. Maintenance mode ended."
+            return f"Core proposal {patch_id} was rolled back. Restart is required to use the restored code."
+
+    def recover_incomplete(self) -> list[str]:
+        """恢复启动前遗留的提案事务。"""
+        _leave_maintenance()
+        recovered: list[str] = []
+        if not self.proposals_root.is_dir():
+            return recovered
+        for proposal in self.list_proposals_unchecked():
+            status = proposal.get("status")
+            if status not in {"applying", "rolling_back"}:
+                continue
+            patch_id = str(proposal["patch_id"])
+            all_before = self._matches_state(proposal, "before")
+            all_after = self._matches_state(proposal, "after")
+            if status == "applying":
+                if all_after:
+                    proposal["status"] = "approved"
+                    proposal["recovery_note"] = "Recovered completed application."
+                elif all_before:
+                    proposal["status"] = "failed"
+                    proposal["recovery_note"] = "Recovered untouched before state."
+                else:
+                    errors = self._restore_before(proposal)
+                    proposal["status"] = "failed"
+                    proposal["recovery_errors"] = errors
+                    proposal["recovery_note"] = "Restored before state after mixed application."
+            elif all_before:
+                proposal["status"] = "rolled_back"
+                proposal["recovery_note"] = "Recovered completed rollback."
+            elif all_after:
+                proposal["status"] = "approved"
+                proposal["recovery_note"] = "Rollback did not change formal files."
+            else:
+                errors = self._restore_before(proposal)
+                proposal["status"] = "failed" if errors else "rolled_back"
+                proposal["recovery_errors"] = errors
+                proposal["recovery_note"] = "Restored before state after mixed rollback."
+            proposal["recovered_at"] = datetime.now().isoformat()
+            self._save(proposal)
+            recovered.append(patch_id)
+        return recovered
+
+    def list_proposals_unchecked(self) -> list[dict[str, Any]]:
+        """列出提案，不检查功能开关。"""
+        if not self.proposals_root.is_dir():
+            return []
+        proposals: list[dict[str, Any]] = []
+        for path in self.proposals_root.iterdir():
+            if path.is_dir() and _PATCH_ID_RE.fullmatch(path.name):
+                try:
+                    proposals.append(self.load(path.name))
+                except CoreProposalError:
+                    continue
+        return proposals
+
+    def _matches_state(self, proposal: dict[str, Any], state: str) -> bool:
+        """判断全部正式文件是否匹配 before 或 after hash。"""
+        hash_key = f"sha256_{state}"
+        for change in proposal["changes"]:
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            current_hash = _sha256_text(target.read_text(encoding="utf-8")) if target.is_file() else None
+            if current_hash != change.get(hash_key):
+                return False
+        return True
 
     def _apply_formal(self, proposal: dict[str, Any]) -> None:
         """应用提案的全部 after 状态。"""
@@ -625,8 +786,12 @@ class CoreProposalManager:
                     path=str(change["path"]),
                     action=action,
                     reason=str(proposal["reason"]),
-                    before_path=change.get("before_snapshot"),
-                    after_path=change.get("after_snapshot"),
+                    before_path=(
+                        change.get("after_snapshot") if action == "core_rollback" else change.get("before_snapshot")
+                    ),
+                    after_path=(
+                        change.get("before_snapshot") if action == "core_rollback" else change.get("after_snapshot")
+                    ),
                     source=f"patch:{proposal['patch_id']}",
                 )
                 await session.flush()

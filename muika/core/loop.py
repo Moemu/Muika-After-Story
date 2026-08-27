@@ -11,10 +11,7 @@ from typing import Literal, Optional
 
 from muika.config import mas_config
 from muika.ipc.server import AdapterInfo
-from muika.plugin.func_call._context import (
-    pop_resources,
-    set_butler_context,
-)
+from muika.plugin.func_call._context import pop_resources, set_butler_context
 from muika.utils.logger import logger
 from muika.utils.utils import parse_duration
 
@@ -31,15 +28,11 @@ from .constants import (
     SESSION_IDLE_TIMEOUT,
 )
 from .digest_agent import DigestAgent
-from .events import (
-    Event,
-    SessionEndEvent,
-    TimeoutEvent,
-    TimeTickEvent,
-)
+from .events import Event, SessionEndEvent, TimeoutEvent, TimeTickEvent
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
 from .reflection import ReflectionAgent
+from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
 
@@ -163,6 +156,9 @@ class Muika:
                 self._is_collecting_event = True
 
             event = await self.collect_events()
+            if is_core_maintenance_active():
+                logger.debug(f"[Loop] Maintenance mode rejected new {event.type} work.")
+                continue
             think_mode = self.get_think_mode(event)
 
             if think_mode is None:
