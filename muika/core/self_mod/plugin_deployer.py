@@ -487,6 +487,10 @@ class PluginDeployer:
 
     def _ensure_plugins_import_path(self) -> None:
         """把配置的插件目录加入顶层包搜索路径。"""
+        plugin_parent = str(self._plugins_dir.parent)
+        if plugin_parent not in sys.path:
+            sys.path.insert(0, plugin_parent)
+        importlib.invalidate_caches()
         package = importlib.import_module(self._plugins_dir.name)
         package_paths = getattr(package, "__path__", None)
         plugin_root = str(self._plugins_dir)
