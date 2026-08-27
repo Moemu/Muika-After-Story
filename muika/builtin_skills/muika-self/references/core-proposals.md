@@ -3,23 +3,10 @@
 Core code controls your runtime behavior. A Core change can affect memory, replies,
 tools, startup, and recovery. Study the current code before you prepare a proposal.
 
-## Target location
+## Installed package risk
 
-MAS resolves Core paths from the installed `muika` package that is running now. It
-does not assume that the current directory is a Git clone. The proposal display
-shows this source location for human review.
-
-A source checkout normally contains `pyproject.toml` and `tests/`. A package
-installed from a wheel normally does not contain this test workspace. Validation
-then reports `unavailable`; it does not report success. The user can make an
-explicit unvalidated approval after reviewing this risk.
-
-In a wheel installation, proposals can target only files inside the running `muika`
-package. Adapter, launcher, and test paths are available only in a source checkout.
-
-An installed package directory can be read-only. A package update can also replace
-an approved change. The application reports write failures and never claims that a
-failed write succeeded.
+If the user installed MAS with pip instead of using a Git clone, a package upgrade
+can overwrite approved Core changes. Tell the user about this risk before approval.
 
 ## Observation
 
