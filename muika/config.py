@@ -34,7 +34,7 @@ USER_SKILL_PATHS = (Path.home() / ".agents" / "skills", Path.home() / ".claude" 
 _model_config_manager: Optional["ModelConfigManager"] = None
 
 
-class MASConfig(BaseSettings):
+class MASConfig(BaseSettings):
     master_id: str = ""
     """对话目标ID。"""
     max_memory_records: int = 100
@@ -85,20 +85,20 @@ class MASConfig(BaseSettings):
     plugins_dir: str = "plugins"
     """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
 
-    enable_self_modification: bool = False
-    """开启 Muika 的内容自我修改能力。关闭时 self_* 工具全部禁用。"""
-    enable_plugin_self_modification: bool = False
-    """开启后允许 Muika 编写和修改自己的单文件插件。"""
-    enable_plugin_hot_reload: bool = False
-    """开启 plugins/ 目录热重载监听。"""
-    plugin_import_blacklist: List[str] = ["subprocess", "socket", "ctypes", "multiprocessing", "shutil"]
-    """自写插件静态检查拒绝的顶层 import 模块名。"""
-    enable_core_proposals: bool = False
-    """开启 Core 代码变更提案能力。"""
-    enable_auto_reflection: bool = True
-    """开启 session 结束时的自动自省。"""
-    reflection_cooldown_hours: int = 24
-    """自动自省的最小间隔（小时）。"""
+    enable_self_modification: bool = False
+    """开启 Muika 的内容自我修改能力。关闭时 self_* 工具全部禁用。"""
+    enable_plugin_self_modification: bool = False
+    """开启后允许 Muika 编写和修改自己的单文件插件。"""
+    enable_plugin_hot_reload: bool = False
+    """开启 plugins/ 目录热重载监听。"""
+    plugin_import_blacklist: List[str] = ["subprocess", "socket", "ctypes", "multiprocessing", "shutil"]
+    """自写插件静态检查拒绝的顶层 import 模块名。"""
+    enable_core_proposals: bool = False
+    """开启 Core 代码变更提案能力。"""
+    enable_auto_reflection: bool = True
+    """开启每日定时自动自省（受冷却间隔与待处理会话数门控）。"""
+    reflection_cooldown_hours: int = 24
+    """自动自省的最小间隔（小时）。"""
     self_mod_backup_dir: str = "./data/self_modifications"
     """自我修改备份目录。每次 self_write 前旧文件会被备份到此处。"""
 
@@ -108,7 +108,7 @@ class MASConfig(BaseSettings):
     )
     """内心思考强度"""
 
-    @field_validator("master_id")
+    @field_validator("master_id")
     def validate_master_id(cls, v):
         if v:
             return v
@@ -209,7 +209,7 @@ class ConfigFileHandler(FileSystemEventHandler):
             self._cancel_pending()
             self.callback()
         elif self._pending_timer is None:
-            delay = self.cooldown - (current_time - self.last_modified) + 0.05
+            delay = self.cooldown - (current_time - self.last_modified) + 0.05
             self._pending_timer = threading.Timer(delay, self._delayed_fire)
             self._pending_timer.daemon = True
             self._pending_timer.start()
