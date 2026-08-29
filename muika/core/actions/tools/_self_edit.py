@@ -491,6 +491,9 @@ class PersonaSwitchParams(BaseModel):
 )
 async def persona_switch(template_name: str) -> str:
     """切换人格模板：校验格式 → 更新配置 → 回写 .env → 立即生效。"""
+    if _disabled():
+        return _DISABLED_MSG
+
     name = template_name.strip()
     if not name:
         return "template_name must not be empty."

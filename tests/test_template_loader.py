@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 from jinja2 import TemplateNotFound
 
+from muika.config import mas_config
+from muika.core.actions.tools._self_edit import persona_switch
 from muika.template import loader
 
 
@@ -26,3 +28,15 @@ def test_template_configuration_fails_before_startup(tmp_path: Path, monkeypatch
 
     with pytest.raises(RuntimeError, match="Invalid template configuration"):
         loader.validate_template_configuration(["missing.jinja2"])
+
+
+@pytest.mark.asyncio
+async def test_persona_switch_respects_self_modification_switch(tmp_path: Path, monkeypatch):
+    original_template = mas_config.persona_template
+    monkeypatch.setattr(mas_config, "enable_self_modification", False)
+
+    result = await persona_switch("missing.jinja2")
+
+    assert result == "Self-modification is disabled by configuration."
+    assert mas_config.persona_template == original_template
+    assert not (tmp_path / ".env").exists()
