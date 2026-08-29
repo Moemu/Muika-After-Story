@@ -153,6 +153,9 @@ docs
 data
 benchmarks/.runtime
 benchmarks/results
+benchmarks/dashboard/
+benchmarks/screenshots/
+tests/test_benchmark_dashboard.py
 
 # launcher is maintained in the nested MuikaAI/mas-launcher repository
 launcher/

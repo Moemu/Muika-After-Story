@@ -67,6 +67,27 @@ class TopicHistoryORM(Base):
     engaged_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class SelfModificationORM(Base):
+    """自我修改审计日志——记录 Muika 对自身文件（模板/话题/技能/插件）的每次变更。
+
+    ``before_path`` / ``after_path`` 为相对备份目录的文件路径，保存修改前后的完整内容；
+    ``before_path`` 为 ``None`` 表示该次写入前文件不存在（revert 到此版本即删除文件）。
+    """
+
+    __tablename__ = "self_modification_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[str] = mapped_column(String)
+    layer: Mapped[str] = mapped_column(String, index=True)
+    path: Mapped[str] = mapped_column(String, index=True)
+    action: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(Text)
+    before_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    after_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="applied")
+    source: Mapped[str] = mapped_column(String, default="self")
+
+
 class RssDigestCacheORM(Base):
     """RSS 评估结果缓存——持久化所有 LLM 评估结果，避免重启后重复抓取和评估。"""
 

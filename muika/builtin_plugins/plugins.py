@@ -1,0 +1,97 @@
+""".plugins —— 查看 / 重载 / 卸载已加载插件。"""
+
+from __future__ import annotations
+
+from arclet.alconna import Alconna, Args, CommandMeta, Subcommand
+
+from muika.core.self_mod.plugin_deployer import get_plugin_deployer
+from muika.plugin.command import on_alconna
+from muika.plugin.manager import PluginManager
+from muika.plugin.models import PluginMetadata
+
+metadata = PluginMetadata(
+    name="plugins",
+    description="查看 / 重载 / 卸载已加载插件",
+    usage=".plugins [reload [name] | unload <name>]",
+)
+
+alc = Alconna(
+    "plugins",
+    Subcommand(
+        "reload",
+        Args["name", str, ""],
+        help_text="重载指定插件；未指定名字则重载所有用户插件",
+        dest="reload",
+    ),
+    Subcommand(
+        "unload",
+        Args["name", str],
+        help_text="卸载指定插件（builtin 插件拒绝卸载）",
+        dest="unload",
+    ),
+    Subcommand(
+        "quarantine",
+        Subcommand(
+            "restore",
+            Args["quarantine_id", str],
+            help_text="重新验证并恢复隔离插件",
+            dest="restore",
+        ),
+        help_text="列出或恢复隔离插件",
+        dest="quarantine",
+    ),
+    meta=CommandMeta("管理 Muika 已加载的插件"),
+)
+
+plugins_cmd = on_alconna(alc)
+
+
+@plugins_cmd.assign("reload")
+async def _reload(name: str, manager: PluginManager) -> str:
+    """重载指定插件；未指定名字则重载所有用户插件。"""
+    if name:
+        ok = manager.reload(name)
+        return f"[System] {'已重载' if ok else '重载失败'}：{name}"
+    reloaded = manager.reload_all_user_plugins()
+    if not reloaded:
+        return "[System] 没有需要重载的用户插件"
+    return f"[System] 已重载 {len(reloaded)} 个用户插件：{', '.join(reloaded)}"
+
+
+@plugins_cmd.assign("unload")
+async def _unload(name: str, manager: PluginManager) -> str:
+    """卸载指定插件（builtin 插件拒绝卸载）。"""
+    ok = manager.unload(name)
+    return f"[System] {'已卸载' if ok else '卸载失败'}：{name}"
+
+
+@plugins_cmd.assign("quarantine.restore")
+async def _restore_quarantine(quarantine_id: str) -> str:
+    """恢复指定隔离插件。"""
+    try:
+        await get_plugin_deployer().restore_quarantine(quarantine_id)
+        return "[System] 该候选已通过重新验证，但尚未激活。Muika 可以在准备好后启用它。"
+    except Exception as exc:
+        return f"[System] 隔离插件恢复失败：{exc}"
+
+
+@plugins_cmd.assign("quarantine")
+async def _list_quarantine() -> str:
+    """列出隔离插件。"""
+    return get_plugin_deployer().list_quarantine()
+
+
+@plugins_cmd.handle()
+async def _list(manager: PluginManager) -> str:
+    """列出所有已加载插件。"""
+    loaded = manager.list_loaded()
+    if not loaded:
+        return "[System] 当前没有加载任何插件"
+
+    lines = ["已加载插件："]
+    for package_name, info in loaded.items():
+        tag = "[builtin]" if info["is_builtin"] else "[user]"
+        lines.append(
+            f"- {info['name']} ({package_name}) {tag} " f"— cmds: {info['commands']}, tools: {info['func_calls']}"
+        )
+    return "\n".join(lines)

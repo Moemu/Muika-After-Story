@@ -42,7 +42,6 @@ from muika.plugin.func_call._context import (
 )
 from muika.plugin.skills import get_skill_manager
 from muika.template.loader import generate_prompt_from_template
-from muika.template.model import PromptTemplatesData
 from muika.utils.logger import logger
 
 ENABLE_MCP = Path("./configs/mcp.json").exists()
@@ -73,6 +72,16 @@ class ButlerAgent:
         # 技能管理器：启动时扫描技能目录并启动热重载监听
         self._skill_manager = get_skill_manager()
         self._mcp_tools: list[dict[str, dict]] = []
+
+    def refresh_tools(self) -> int:
+        """重建 LLM 工具列表（function-call + 已缓存的 MCP 工具）。
+
+        插件热重载或手动 reload 后调用，使 LLM 可见新增 / 移除的工具。
+        :return: 重建后的工具总数。
+        """
+        self.tools = get_function_list() + self._mcp_tools
+        logger.debug(f"[Butler] Tools refreshed: {len(self.tools)} total")
+        return len(self.tools)
 
     # ------------------------------------------------------------------
     # Public API
@@ -219,9 +228,8 @@ class ButlerAgent:
         set_butler_context(state, executor)
         try:
             # 组装系统提示（Muika 的行动半身模板），注入可用技能列表
-            system = generate_prompt_from_template(
-                mas_config.agent_template, PromptTemplatesData(event_type="agent_called", state=state)
-            )
+            system = generate_prompt_from_template(mas_config.agent_template)
+
             skills_section = self._skill_manager.render_prompt_section()
             if skills_section:
                 system += f"\n\n{skills_section}"

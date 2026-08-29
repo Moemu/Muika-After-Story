@@ -1,5 +1,6 @@
 """``TopicStore``（临时 YAML 注入）与 ``TopicManager.get_next_topic`` 测试。"""
 
+import asyncio
 from collections import deque
 from pathlib import Path
 from unittest.mock import patch
@@ -7,13 +8,11 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from muika.config import mas_config
+from muika.core import topic_manager as topic_manager_module
+from muika.core.actions.tools import _topics as topic_tools
 from muika.core.state import ActiveTopicState, MuikaState
-from muika.core.topic_manager import (
-    EventTopic,
-    TopicManager,
-    TopicSource,
-    TopicStore,
-)
+from muika.core.topic_manager import EventTopic, TopicManager, TopicSource, TopicStore
 
 
 def _write_topics(tmp_path: Path, topics: list[dict]) -> Path:
@@ -78,6 +77,57 @@ def test_topic_store_invalid_yaml_empty(tmp_path):
     p.write_text("not: [valid", encoding="utf-8")
     store = TopicStore(p)
     assert store.is_empty() is True
+
+
+def test_topic_store_prefers_user_override_and_falls_back_to_builtin(tmp_path, monkeypatch):
+    user_path = tmp_path / "configs/topics.yml"
+    builtin_path = _write_topics(tmp_path, [{"id": "builtin", "concept": "default"}])
+    monkeypatch.setattr(topic_manager_module, "TOPICS_PATH", user_path)
+    monkeypatch.setattr(topic_manager_module, "BUILTIN_TOPICS_PATH", builtin_path)
+    store = TopicStore()
+    assert store.get_by_category("misc")[0].id == "builtin"
+
+    user_path.parent.mkdir()
+    user_path.write_text(yaml.safe_dump({"topics": [{"id": "user", "concept": "custom"}]}), encoding="utf-8")
+    store.reload()
+
+    assert store.get_by_category("misc")[0].id == "user"
+
+
+@pytest.mark.asyncio
+async def test_topic_mutations_hold_lock_until_write(tmp_path, monkeypatch):
+    topic_path = tmp_path / "topics.yml"
+    topic_path.write_text(
+        "topics:\n  - id: first\n    category: trivia\n    concept: old\n    cooldown_days: 7\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(topic_tools, "TOPICS_PATH", topic_path)
+    monkeypatch.setattr(topic_tools, "BUILTIN_TOPICS_PATH", topic_path)
+    monkeypatch.setattr(topic_tools, "_TOPICS_LOCK", asyncio.Lock())
+    monkeypatch.setattr(mas_config, "enable_self_modification", True)
+    active = 0
+    max_active = 0
+
+    async def delayed_write(new_text: str, reason: str, action: str) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        topic_path.write_text(new_text, encoding="utf-8")
+        active -= 1
+        return reason + action
+
+    monkeypatch.setattr(topic_tools, "_apply_topics_change", delayed_write)
+
+    await asyncio.gather(
+        topic_tools.topic_update("first", concept="new", reason="update"),
+        topic_tools.topic_add("second", "trivia", "second", reason="add"),
+    )
+
+    data = yaml.safe_load(topic_path.read_text(encoding="utf-8"))
+    assert max_active == 1
+    assert {item["id"] for item in data["topics"]} == {"first", "second"}
+    assert data["topics"][0]["concept"] == "new"
 
 
 # ---------------------------------------------------------------------------

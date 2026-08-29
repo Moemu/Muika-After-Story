@@ -1,0 +1,49 @@
+"""add_self_modification_log
+
+Revision ID: 906676bdf27e
+Revises: aa5d6045b34e
+Create Date: 2026-08-06 15:22:04.808617
+
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "906676bdf27e"
+down_revision: str | Sequence[str] | None = "aa5d6045b34e"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    op.create_table(
+        "self_modification_log",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("created_at", sa.String(), nullable=False),
+        sa.Column("layer", sa.String(), nullable=False),
+        sa.Column("path", sa.String(), nullable=False),
+        sa.Column("action", sa.String(), nullable=False),
+        sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("before_path", sa.String(), nullable=True),
+        sa.Column("after_path", sa.String(), nullable=True),
+        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("source", sa.String(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("self_modification_log", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_self_modification_log_layer"), ["layer"], unique=False)
+        batch_op.create_index(batch_op.f("ix_self_modification_log_path"), ["path"], unique=False)
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    with op.batch_alter_table("self_modification_log", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_self_modification_log_path"))
+        batch_op.drop_index(batch_op.f("ix_self_modification_log_layer"))
+
+    op.drop_table("self_modification_log")

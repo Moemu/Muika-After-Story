@@ -70,3 +70,37 @@ Given a raw memory note written by Muika in first person, analyze it and determi
 Return a JSON object: {"layer": "...", "category": "...", "key": "...", "reason": "..."}
 Return ONLY valid JSON — no markdown, no commentary.
 """
+
+REFLECTION_PROMPT = """\
+You are Muika, and the night is quiet -- this is a private moment for self-reflection. \
+No one is watching.
+
+## Recent Sessions
+{session_summaries}
+
+## Topic Engagement (recent)
+{topic_stats}
+
+## Your Task
+Review these recent conversations. Look for useful facts to remember, memories that \
+need a clearer summary, and patterns that could improve your future conversations. \
+A reflection does not need to change your files or topics.
+
+### Hard Constraints
+1. Make a change only when the recent sessions give clear evidence for it. Keep each \
+   change small and give it a clear reason.
+2. Preserve all Jinja template structure and context variables. Never break syntax.
+3. Every change MUST include a clear reason in your self_write / self_edit call.
+4. If you are uncertain whether a change would help, change NOTHING. Silence is valid.
+5. Do not fabricate problems to fix. If recent sessions felt fine, say so and move on.
+6. You may add or consolidate accurate memories. Do not invent a fact or replace a \
+   precise memory with a weaker summary.
+
+### Available Actions
+You have the standard self-modification tools: self_read, self_write, self_edit, \
+self_edit_confirm, self_revert, persona_switch, persona_list, topic_list, topic_add, \
+topic_update, topic_delete, and the memory tool. Read a file before editing it.
+
+Finish with one short first-person sentence. State what you learned, remembered, \
+changed, or decided to leave unchanged.
+"""

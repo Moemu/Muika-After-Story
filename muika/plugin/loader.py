@@ -3,21 +3,38 @@
 
 Attributes:
     _plugins (Dict[str, Plugin]): 插件注册表，存储已加载的插件
+    _declared_plugins (Set[str]): 已声明插件注册表（不一定加载成功）
+    _loading_plugin (ContextVar): 当前正在加载的插件包名，供 ``on_alconna`` /
+        ``on_function_call`` 在注册时标记所有权
+
 Functions:
     load_plugin: 加载单个插件
     load_plugins: 加载指定目录下的所有插件
+    unload_plugin: 卸载单个插件并清理其注册的 commands / func_calls
+    reload_plugin: 卸载后重新加载
     get_plugins: 获取已加载的插件列表
 """
 
 import importlib
 import inspect
 import os
+import sys
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Dict, Optional, Set
 
 from muika.config import mas_config
 from muika.utils.logger import logger
 
+from .exceptions import (
+    PluginConflictError,
+    PluginImportError,
+    PluginLoadError,
+    PluginLoadHookError,
+    PluginRegistrationError,
+    PluginReloadError,
+)
+from .lifecycle import clear_hooks, run_load_hooks, run_unload_hooks
 from .models import Plugin, PluginMetadata
 from .utils import path_to_module_name
 
@@ -25,24 +42,38 @@ _plugins: Dict[str, Plugin] = {}
 """插件注册表"""
 _declared_plugins: Set[str] = set()
 """已声明插件注册表（不一定加载成功）"""
+_loading_plugin: ContextVar[Optional[str]] = ContextVar("_loading_plugin", default=None)
+"""当前正在加载的插件包名；供 on_alconna / on_function_call 读取以标记所有权。"""
 
 
-def load_plugin(module_name: str) -> Optional[Plugin]:
+def load_plugin(module_name: str) -> Plugin:
     """
     加载单个插件模块。
 
+    加载期间通过 :data:`_loading_plugin` ContextVar 广播当前包名，
+    模块内触发的 ``on_alconna`` / ``on_function_call`` 注册会读到该值，
+    从而建立"命令/工具 → 插件"的归属关系，便于后续按插件卸载。
+
     :param module_name: 模块的全限定包名（如 ``"plugins.notes"``）
-    :return: 插件对象，若已有同名插件声明则返回 None
+    :return: 插件对象
+    :raises PluginLoadError: import、登记或 load 钩子失败
     """
+    if module_name in _declared_plugins:
+        error = PluginConflictError(module_name)
+        logger.warning(str(error))
+        raise error
+
+    _declared_plugins.add(module_name)
+    phase = "import"
     try:
-        if module_name in _declared_plugins:
-            logger.warning(f"插件 '{module_name}' 包名出现冲突，跳过加载")
-            return None
-        _declared_plugins.add(module_name)
-
         logger.debug(f"加载 MAS 插件: {module_name}")
-        module = importlib.import_module(module_name)
+        token = _loading_plugin.set(module_name)
+        try:
+            module = importlib.import_module(module_name)
+        finally:
+            _loading_plugin.reset(token)
 
+        phase = "registration"
         metadata: Optional[PluginMetadata] = getattr(module, "metadata", None)
 
         plugin = Plugin(
@@ -53,13 +84,68 @@ def load_plugin(module_name: str) -> Optional[Plugin]:
         )
 
         _plugins[plugin.package_name] = plugin
+        phase = "load hook"
+        run_load_hooks(module_name)
         logger.success(f"插件 '{plugin.name}' ({module_name}) 已加载")
 
         return plugin
 
     except Exception as e:
         logger.error(f"加载插件 '{module_name}' 失败: {e}")
-        return None
+        _declared_plugins.discard(module_name)
+        _plugins.pop(module_name, None)
+        _purge_side_effects(module_name)
+        error_type = {
+            "import": PluginImportError,
+            "registration": PluginRegistrationError,
+            "load hook": PluginLoadHookError,
+        }[phase]
+        raise error_type(module_name, e) from e
+
+
+def _purge_side_effects(package_name: str) -> None:
+    """清理指定插件包注册的全部 commands / func_calls 及 sys.modules 条目。"""
+    from .command import remove_commands_for_plugin
+    from .func_call.caller import remove_callers_for_plugin
+
+    removed_cmds = remove_commands_for_plugin(package_name)
+    removed_calls = remove_callers_for_plugin(package_name)
+    logger.debug(f"[PluginLoader] purge {package_name!r}: removed {removed_cmds} commands, {removed_calls} func_calls")
+
+    for mod_name in [m for m in sys.modules if m == package_name or m.startswith(f"{package_name}.")]:
+        del sys.modules[mod_name]
+    clear_hooks(package_name)
+
+
+def unload_plugin(package_name: str) -> bool:
+    """卸载单个插件：从注册表移除并清理其注册的 commands / func_calls / sys.modules。
+
+    :param package_name: 插件的 package_name（即模块全限定名）
+    :return: 是否成功卸载（插件不存在返回 False）
+    """
+    if package_name not in _plugins:
+        logger.warning(f"[PluginLoader] unload: plugin {package_name!r} not loaded")
+        return False
+
+    run_unload_hooks(package_name)
+    _purge_side_effects(package_name)
+    del _plugins[package_name]
+    _declared_plugins.discard(package_name)
+
+    logger.success(f"[PluginLoader] Plugin {package_name!r} unloaded")
+    return True
+
+
+def reload_plugin(package_name: str) -> Plugin:
+    """卸载后重新加载指定插件；若插件从未加载过则直接加载。
+
+    :param package_name: 插件的 package_name
+    :return: 重新加载后的 Plugin 对象
+    :raises PluginLoadError: 卸载或加载失败
+    """
+    if package_name in _plugins and not unload_plugin(package_name):
+        raise PluginReloadError(package_name)
+    return load_plugin(package_name)
 
 
 def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]:
@@ -89,8 +175,11 @@ def load_plugins(*plugins_dirs: Path | str, base_path=Path.cwd()) -> set[Plugin]
                 module_name = path_to_module_name(plugin_path, base_path)
             elif plugin_path.is_dir() and (plugin_path / plugin_path.name.lower().replace("-", "_")).exists():
                 module_name = path_to_module_name(plugin_path / plugin_path.name.lower().replace("-", "_"), base_path)
-            if module_name and (loaded_plugin := load_plugin(module_name)):
-                plugins.add(loaded_plugin)
+            if module_name:
+                try:
+                    plugins.add(load_plugin(module_name))
+                except PluginLoadError as exc:
+                    logger.error(str(exc))
 
     return plugins
 

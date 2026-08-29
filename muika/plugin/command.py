@@ -29,14 +29,7 @@ from __future__ import annotations
 import inspect
 import uuid
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Coroutine,
-    Optional,
-    get_type_hints,
-)
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional, get_type_hints
 
 import aiofiles
 
@@ -121,6 +114,8 @@ class CommandRegistry:
     """命令别名。派发时将头部 token 替换为主命令名再解析"""
     priority: int = 10
     """越小越优先匹配"""
+    plugin_package: Optional[str] = None
+    """注册该命令的插件 package_name；builtin 命令为 None"""
 
     _handlers: dict[str, Callable[..., Coroutine[None, None, None]]] = field(default_factory=dict)
     """dest → handler 映射。由 ``assign(dest)`` 装饰器填充"""
@@ -213,10 +208,13 @@ def on_alconna(
 
     :return CommandRegistry: 注册句柄，可继续 ``.assign(dest)`` 或 ``.handle()`` 绑定处理器
     """
+    from .loader import _loading_plugin
+
     registry = CommandRegistry(
         alc=alc,
         aliases=aliases or set(),
         priority=priority,
+        plugin_package=_loading_plugin.get(),
     )
     _commands.append(registry)
     logger.debug(f"[Command] Registered '{alc.command}' (priority={priority}, aliases={registry.aliases})")
@@ -226,6 +224,17 @@ def on_alconna(
 def get_commands() -> list[CommandRegistry]:
     """获取按优先级排序的命令注册表列表。"""
     return sorted(_commands, key=lambda c: c.priority)
+
+
+def remove_commands_for_plugin(package_name: str) -> int:
+    """移除指定插件注册的所有 commands。
+
+    :param package_name: 插件 package_name
+    :return: 实际移除的 command 数量
+    """
+    before = len(_commands)
+    _commands[:] = [c for c in _commands if c.plugin_package != package_name]
+    return before - len(_commands)
 
 
 class CommandDispatcher:
@@ -245,8 +254,10 @@ class CommandDispatcher:
         from muika.core.executor import Executor
         from muika.core.loop import Muika as MuikaCls
         from muika.core.memory import MemoryManager
+        from muika.core.reflection import ReflectionAgent
         from muika.core.state import MuikaState
         from muika.core.topic_manager import TopicManager
+        from muika.plugin.manager import PluginManager, get_plugin_manager
 
         self.muika = muika
         self._command_reply = command_reply
@@ -258,6 +269,8 @@ class CommandDispatcher:
             Executor: muika.executor,
             TopicManager: muika.topic_manager,
             ButlerAgent: muika.butler_agent,
+            ReflectionAgent: muika.reflection,
+            PluginManager: get_plugin_manager(),
         }
 
     @classmethod

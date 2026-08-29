@@ -55,40 +55,63 @@ TOPIC_WEIGHTS: dict[str, float] = {
     "meta": 0.05,
 }
 
-_TOPICS_PATH = Path(__file__).parent.parent.parent / "configs" / "topics.yml"
+TOPICS_PATH = Path("configs/topics.yml")
+"""用户话题库路径。"""
+BUILTIN_TOPICS_PATH = Path(__file__).parent.parent / "topics" / "topics.yml"
+"""包内默认话题库路径。"""
+
 _RECENT_TYPE_PENALTY: float = 0.25
 _RECENT_TYPE_WINDOW: int = 3
 
 
 class TopicStore:
-    """从 YAML 文件加载并索引静态话题种子。"""
+    """从 YAML 文件加载并索引静态话题种子"""
 
-    def __init__(self, path: Path = _TOPICS_PATH) -> None:
+    def __init__(self, path: Optional[Path] = None) -> None:
+        self._path = path
         self._by_category: dict[str, list[StaticTopic]] = {}
-        self._load(path)
+        self.reload()
 
-    def _load(self, path: Path) -> None:
+    def _current_path(self) -> Path:
+        """返回当前生效的用户或包内话题库路径。"""
+        if self._path is not None:
+            return self._path
+        return TOPICS_PATH if TOPICS_PATH.is_file() else BUILTIN_TOPICS_PATH
+
+    def _load_from(self, path: Path) -> dict[str, list[StaticTopic]]:
+        new_map: dict[str, list[StaticTopic]] = {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            raise ValueError("topics.yml must be a mapping containing a 'topics' list")
+        for entry in data.get("topics", []):
+            concept = entry.get("concept", entry.get("content", ""))
+            topic = StaticTopic(
+                id=entry["id"],
+                source=TopicSource.STATIC,
+                category=entry.get("category", entry.get("type", "misc")),
+                content=concept,
+                tags=entry.get("tags", []),
+                cooldown_days=entry.get("cooldown_days", 7),
+            )
+            new_map.setdefault(topic.category, []).append(topic)
+        return new_map
+
+    def reload(self) -> None:
+        """重新解析话题文件并原子替换索引；解析失败时保留旧话题。"""
+        path = self._current_path()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            for entry in data.get("topics", []):
-                # 兼容旧字段：如果存在 content 则作为 content
-                concept = entry.get("concept", entry.get("content", ""))
-                topic = StaticTopic(
-                    id=entry["id"],
-                    source=TopicSource.STATIC,
-                    category=entry.get("category", entry.get("type", "misc")),
-                    content=concept,
-                    tags=entry.get("tags", []),
-                    cooldown_days=entry.get("cooldown_days", 7),
-                )
-                self._by_category.setdefault(topic.category, []).append(topic)
-            total = sum(len(v) for v in self._by_category.values())
-            logger.info(f"[TopicStore] Loaded {total} static topics across {len(self._by_category)} categories")
+            new_map = self._load_from(path)
         except FileNotFoundError:
             logger.warning(f"[TopicStore] topics.yml not found at {path} — static topics disabled")
+            return
         except Exception as e:
-            logger.error(f"[TopicStore] Failed to load topics.yml: {e}")
+            logger.error(f"[TopicStore] Failed to (re)load topics.yml, keeping previous topics: {e}")
+            return
+
+        self._by_category = new_map
+        total = sum(len(v) for v in new_map.values())
+        logger.info(f"[TopicStore] Loaded {total} static topics across {len(new_map)} categories")
 
     def get_by_category(self, category: str) -> list[StaticTopic]:
         return self._by_category.get(category, [])
@@ -104,9 +127,15 @@ class TopicManager:
     """话题选择与历史追踪的调度器。"""
 
     def __init__(self) -> None:
+        global _topic_manager
         self.store = TopicStore()
         self._recent_categories: deque[str] = deque(maxlen=_RECENT_TYPE_WINDOW)
         self._event_queue: deque[EventTopic] = deque()
+        _topic_manager = self
+
+    def reload_store(self) -> None:
+        """重新加载话题种子库（话题被 topic_* 工具修改后调用）。"""
+        self.store.reload()
 
     def enqueue_event(self, topic: EventTopic) -> None:
         """从外部（如 DigestAgent / 管家）注入动态新闻。"""
@@ -114,9 +143,6 @@ class TopicManager:
 
     async def _get_available_candidates(self) -> dict[str, list[tuple[StaticTopic, float]]]:
         """获取所有度过冷却期的话题，并根据历史互动率计算独立权重。"""
-        from muika.database.crud import TopicHistoryCRUD
-        from muika.database.db import get_session
-
         candidates: dict[str, list[tuple[StaticTopic, float]]] = {}
         try:
             async with get_session() as db_session:
@@ -221,3 +247,40 @@ class TopicManager:
             logger.debug(f"[TopicManager] Recorded topic {topic_id!r} (engaged={user_engaged})")
         except Exception as e:
             logger.error(f"[TopicManager] Failed to record topic history for {topic_id!r}: {e}")
+
+    async def get_engagement_stats(self, top_n: int = 10) -> str:
+        """返回 Top-N 话题的互动统计文本，供自省使用。
+
+        格式：每行 ``- topic_id (category): used Nx, engaged Mx (P%)``
+        空/异常时返回占位文本。
+        """
+        try:
+            async with get_session() as db_session:
+                records = await TopicHistoryCRUD.list_all(db_session, limit=top_n)
+        except Exception as e:
+            logger.error(f"[TopicManager] get_engagement_stats failed: {e}")
+            return "(no topic history available)"
+
+        if not records:
+            return "(no topic history available)"
+
+        topic_to_category: dict[str, str] = {}
+        for category in self.store.categories():
+            for topic in self.store.get_by_category(category):
+                topic_to_category[topic.id] = category
+
+        lines: list[str] = []
+        for r in records:
+            category = topic_to_category.get(r.topic_id, "unknown")
+            rate = (r.engaged_count / r.use_count * 100) if r.use_count > 0 else 0.0
+            lines.append(f"- {r.topic_id} ({category}): used {r.use_count}x, engaged {r.engaged_count}x ({rate:.0f}%)")
+        return "\n".join(lines)
+
+
+_topic_manager: Optional[TopicManager] = None
+"""运行时唯一的 TopicManager（由 Muika 构造时写入）。"""
+
+
+def get_topic_manager() -> Optional[TopicManager]:
+    """获取运行时 TopicManager 实例（未构造时返回 None）。"""
+    return _topic_manager

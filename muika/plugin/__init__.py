@@ -5,6 +5,8 @@ from .command import (
     get_commands,
     on_alconna,
 )
+from .ctx import ctx
+from .exceptions import PluginLoadError
 from .loader import (
     get_plugin_by_module_name,
     get_plugin_data_dir,
@@ -21,10 +23,12 @@ __all__ = [
     "get_plugin_by_module_name",
     "PluginMetadata",
     "Plugin",
+    "PluginLoadError",
     "get_plugin_data_dir",
     "on_alconna",
     "CommandRegistry",
     "CommandDispatcher",
     "get_commands",
     "COMMAND_PREFIXES",
+    "ctx",
 ]

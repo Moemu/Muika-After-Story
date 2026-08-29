@@ -11,10 +11,7 @@ from typing import Literal, Optional
 
 from muika.config import mas_config
 from muika.ipc.server import AdapterInfo
-from muika.plugin.func_call._context import (
-    pop_resources,
-    set_butler_context,
-)
+from muika.plugin.func_call._context import pop_resources, set_butler_context
 from muika.utils.logger import logger
 from muika.utils.utils import parse_duration
 
@@ -31,14 +28,11 @@ from .constants import (
     SESSION_IDLE_TIMEOUT,
 )
 from .digest_agent import DigestAgent
-from .events import (
-    Event,
-    SessionEndEvent,
-    TimeoutEvent,
-    TimeTickEvent,
-)
+from .events import Event, SessionEndEvent, TimeoutEvent, TimeTickEvent
 from .executor import Executor
 from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
+from .reflection import ReflectionAgent
+from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
 
@@ -81,6 +75,13 @@ class Muika:
         self.butler_agent = ButlerAgent()
         self.topic_manager = TopicManager()
         self.digest_agent = DigestAgent(self.topic_manager)
+        self.reflection = ReflectionAgent(
+            butler_agent=self.butler_agent,
+            memory=self.memory,
+            state=self.state,
+            topic_manager=self.topic_manager,
+            executor=self.executor,
+        )
 
         self._session_end_triggered: bool = False
         self._is_collecting_event: bool = False
@@ -88,6 +89,7 @@ class Muika:
         self._last_summary_turn: Optional[SessionTurn] = None
         self._last_summary_time: float = datetime.now().timestamp()
         self._timeout_task: Optional[asyncio.Task] = None
+        self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
 
         asyncio.create_task(self.memory.load())
@@ -155,53 +157,66 @@ class Muika:
                 self._is_collecting_event = True
 
             event = await self.collect_events()
-            think_mode = self.get_think_mode(event)
+            try:
+                await self._process_event(event, dt)
+            except Exception as exc:
+                logger.exception(f"[Loop] Event {event.type} failed: {exc}")
 
-            if think_mode is None:
-                await self._tick_idle(event, dt)
-                continue
+    async def _process_event(self, event: Event, dt: float) -> None:
+        """处理一个事件并让单次失败停留在事件边界内。
 
-            self._is_collecting_event = False
-            self._log_event(event)
-            if event.type == "user_message":
-                self.memory.add_context("user", event.payload.message.message)
-                # 用户已回复，取消挂起的等待超时
-                self._cancel_timeout()
+        :param event: 待处理事件
+        :param dt: 距上次循环的秒数
+        """
+        if is_core_maintenance_active():
+            logger.debug(f"[Loop] Maintenance mode rejected new {event.type} work.")
+            return
+        think_mode = self.get_think_mode(event)
 
-            self.state.tick_state(event, dt)
-            logger.debug(
-                f"[State] mood={self.state.mood} "
-                f"loneliness={self.state.loneliness:.2f} "
-                f"boredom={self.state.boredom:.2f} "
-                f"attention={self.state.attention:.2f}"
-            )
+        if think_mode is None:
+            await self._tick_idle(event, dt)
+            return
 
-            if event.type == "session_end":
-                self._session_end_triggered = False
-                await self._handle_session_end()
-                continue
+        self._is_collecting_event = False
+        self._log_event(event)
+        if event.type == "user_message":
+            self.memory.add_context("user", event.payload.message.message)
+            self._cancel_timeout()
 
-            if event.type == "session_bootstrap" and self.memory.session.is_first_session:
-                await self._record_first_conversation()
+        self.state.tick_state(event, dt)
+        logger.debug(
+            f"[State] mood={self.state.mood} "
+            f"loneliness={self.state.loneliness:.2f} "
+            f"boredom={self.state.boredom:.2f} "
+            f"attention={self.state.attention:.2f}"
+        )
 
-            if event.type == "adapter_online":
-                self.current_adapters.append(event.adapter)
-                logger.info(f"[Loop] Adapter online: {event.adapter!r} — status updated")
-                if len(self.current_adapters) < 2:
-                    continue
+        if event.type == "session_end":
+            self._session_end_triggered = False
+            await self._handle_session_end()
+            return
 
-            if event.type == "adapter_offline" and event.adapter in self.current_adapters:
-                self.current_adapters.remove(event.adapter)
-                logger.info(f"[Loop] Adapter offline: {event.adapter!r} — status updated")
-                continue
+        if event.type == "session_bootstrap" and self.memory.session.is_first_session:
+            await self._record_first_conversation()
 
-            if think_mode == "topic":
-                await self._run_topic_pipeline()
-                continue
+        if event.type == "adapter_online":
+            self.current_adapters.append(event.adapter)
+            logger.info(f"[Loop] Adapter online: {event.adapter!r} — status updated")
+            if len(self.current_adapters) < 2:
+                return
 
-            injected_preferences = await self._fetch_preferences(event)
-            await self._run_brain_pipeline(event, injected_preferences)
-            self._save_last_connection_time()
+        if event.type == "adapter_offline" and event.adapter in self.current_adapters:
+            self.current_adapters.remove(event.adapter)
+            logger.info(f"[Loop] Adapter offline: {event.adapter!r} — status updated")
+            return
+
+        if think_mode == "topic":
+            await self._run_topic_pipeline()
+            return
+
+        injected_preferences = await self._fetch_preferences(event)
+        await self._run_brain_pipeline(event, injected_preferences)
+        self._save_last_connection_time()
 
     @staticmethod
     def _log_event(event: Event) -> None:
@@ -483,11 +498,15 @@ class Muika:
         logger.info("Muika is waking up...")
         self.is_alive = True
         asyncio.create_task(self.loop())
+        self._reflection_task = asyncio.create_task(self.reflection.run_daily())
 
     def stop(self) -> None:
         """Stop the event loop."""
         logger.info("Muika is going to sleep.")
         self.is_alive = False
+        if self._reflection_task is not None:
+            self._reflection_task.cancel()
+            self._reflection_task = None
 
     async def _update_session_memory(self):
         """
@@ -554,6 +573,7 @@ class Muika:
         self.memory.new_session()
         self._last_summary_turn = None
         self._last_summary_time = datetime.now().timestamp()
+
         logger.info("[Loop] Session reset complete -- waiting for next user interaction silently.")
 
     @staticmethod

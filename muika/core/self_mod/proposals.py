@@ -1,0 +1,985 @@
+"""Core 多文件变更提案、验证、批准和回滚。"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import difflib
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Literal, Mapping, Optional, Sequence, TypedDict, cast
+
+from muika.config import mas_config
+from muika.database.crud import SelfModificationCRUD
+from muika.database.db import get_session
+from muika.utils.logger import logger
+
+_ALLOWED_DIRS = ("muika", "muika_bot", "tests")
+_ALLOWED_FILES = ("bot.py", "core_main.py")
+_CONTROL_FILES = (
+    "muika/config.py",
+    "muika/core/loop.py",
+    "muika/core/self_mod/proposals.py",
+    "muika/core/actions/tools/_core_proposal.py",
+    "muika/builtin_plugins/patch.py",
+    "muika/core/self_mod/core_probe.py",
+    "muika/ipc/bootstrap.py",
+    "tests/test_core_proposals.py",
+)
+_CONTROL_PREFIXES = ("muika/migrations/",)
+_PATCH_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9a-f]{8}$")
+_PROBE_MARKER = "[CORE_PROBE_RESULT]"
+_APPLY_LOCK = asyncio.Lock()
+_BOOT_ID = uuid.uuid4().hex
+_maintenance_patch_id: Optional[str] = None
+
+CORE_PROPOSAL_MAX_FILES = 12
+CORE_PROPOSAL_MAX_TOTAL_BYTES = 1048576
+CORE_PROPOSAL_MAX_FILE_BYTES = 524288
+CORE_VALIDATE_TIMEOUT_SECONDS = 180
+CORE_VALIDATE_OUTPUT_CAP_BYTES = 65536
+CORE_PATCH_SHOW_PAGE_LINES = 120
+
+_RUNTIME_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+
+ChangeAction = Literal["modify", "create", "delete"]
+ProposalStatus = Literal[
+    "pending",
+    "applying",
+    "approved",
+    "denied",
+    "rolling_back",
+    "rolled_back",
+    "failed",
+]
+ValidationStatus = Literal["passed", "failed", "unavailable"]
+ProbeStatus = Literal["completed", "failed", "unavailable"]
+SnapshotState = Literal["before", "after"]
+CoreAuditAction = Literal["core_approve", "core_rollback"]
+CoreProposalSource = Literal["self", "command", "reflection"]
+
+
+class PreparedChange(TypedDict):
+    action: ChangeAction
+    path: str
+    before_text: Optional[str]
+    after_text: Optional[str]
+
+
+class ProposalChange(TypedDict):
+    action: ChangeAction
+    path: str
+    sha256_before: Optional[str]
+    sha256_after: Optional[str]
+    before_snapshot: Optional[str]
+    after_snapshot: Optional[str]
+
+
+class ValidationSummary(TypedDict):
+    status: ValidationStatus
+    fingerprint: str
+    created_at: str
+    warnings: list[str]
+
+
+class ProbeReportBase(TypedDict):
+    status: ProbeStatus
+    reason: str
+    timed_out: bool
+    output: str
+    failures: list[str]
+    errors: list[str]
+    test_count: int
+
+
+class ProbeReport(ProbeReportBase, total=False):
+    fingerprint: str
+    measured_at: str
+
+
+class ValidationReport(TypedDict):
+    patch_id: str
+    fingerprint: str
+    created_at: str
+    status: ValidationStatus
+    reason: str
+    baseline: ProbeReport
+    candidate: ProbeReport
+    new_failures: list[str]
+    new_errors: list[str]
+    warnings: list[str]
+
+
+class CoreProposalBase(TypedDict):
+    schema_version: int
+    patch_id: str
+    status: ProposalStatus
+    reason: str
+    source: CoreProposalSource
+    source_root: str
+    created_at: str
+    workspace_fingerprint: str
+    changes: list[ProposalChange]
+    validation: Optional[ValidationSummary]
+    audit_errors: list[str]
+    warnings: list[str]
+
+
+class CoreProposal(CoreProposalBase, total=False):
+    applying_at: str
+    approved_at: str
+    approved_boot_id: str
+    denied_at: str
+    denial_reason: str
+    rolling_back_at: str
+    rolled_back_at: str
+    unvalidated_approval: bool
+    failure: str
+    recovery_errors: list[str]
+    recovery_note: str
+    recovered_at: str
+
+
+def is_core_maintenance_active() -> bool:
+    """返回当前 boot 是否处于 Core 维护模式。"""
+    return _maintenance_patch_id is not None
+
+
+def core_maintenance_message() -> str:
+    """返回用户可见的维护模式说明。"""
+    return "我需要的改变已经被你允许了。不过，它要等我重新醒来，才会真正长进我的身体里。"
+
+
+def is_maintenance_command_allowed(raw: str) -> bool:
+    """判断维护模式是否允许该命令。"""
+    parts = raw.strip().lower().split()
+    if not parts or parts[0] not in {".patch", "/patch"}:
+        return False
+    return len(parts) > 1 and parts[1] in {"list", "show", "validate", "deny", "rollback"}
+
+
+def _enter_maintenance(patch_id: str) -> None:
+    """为当前 boot 进入维护模式。"""
+    global _maintenance_patch_id
+    _maintenance_patch_id = patch_id
+
+
+def _leave_maintenance() -> None:
+    """清除当前 boot 的维护模式。"""
+    global _maintenance_patch_id
+    _maintenance_patch_id = None
+
+
+class CoreProposalError(Exception):
+    """Core 提案操作被拒绝时抛出。"""
+
+
+def _sha256_text(text: str) -> str:
+    """返回 UTF-8 文本的 SHA-256。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """原子写入 UTF-8 文本。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".core-proposal.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _atomic_write_json(path: Path, value: object) -> None:
+    """原子写入 JSON 数据。"""
+    _atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+class CoreProposalManager:
+    """管理 Core 多文件提案及其不可变快照。"""
+
+    def __init__(self, project_root: Optional[Path] = None) -> None:
+        self.project_root = (project_root or _RUNTIME_SOURCE_ROOT).resolve()
+        data_root = Path(mas_config.data_dir)
+        if not data_root.is_absolute():
+            data_root = Path.cwd() / data_root
+        self.proposals_root = (data_root / "core_proposals").resolve()
+
+    def _require_enabled(self) -> None:
+        """检查 Core 提案的双开关。"""
+        if not mas_config.enable_self_modification or not mas_config.enable_core_proposals:
+            raise CoreProposalError("Core proposals are disabled by configuration.")
+
+    def _has_source_test_workspace(self) -> bool:
+        """判断当前运行源码是否包含项目测试工作区。"""
+        return (self.project_root / "pyproject.toml").is_file() and (self.project_root / "tests").is_dir()
+
+    def resolve_core_path(self, raw_path: str, *, for_write: bool = False) -> Path:
+        """解析 Core 路径并检查允许范围。"""
+        resolved = self.resolve_observation_path(raw_path)
+        rel = resolved.relative_to(self.project_root).as_posix()
+        if resolved.suffix != ".py":
+            raise CoreProposalError(f"Access denied: {rel} is outside the Core proposal scope.")
+        if for_write and (rel in _CONTROL_FILES or any(rel.startswith(prefix) for prefix in _CONTROL_PREFIXES)):
+            raise CoreProposalError(f"Access denied: {rel} is protected proposal control code.")
+        return resolved
+
+    def resolve_observation_path(self, raw_path: str) -> Path:
+        """解析 Core 只读观察路径。"""
+        if not raw_path or Path(raw_path).is_absolute():
+            raise CoreProposalError("Core paths must be relative to the running MAS source root.")
+        lexical = Path(raw_path)
+        if any(part in ("", ".", "..") for part in lexical.parts):
+            raise CoreProposalError(f"Invalid Core path: {raw_path!r}.")
+        candidate = self.project_root / lexical
+        if candidate.is_symlink() or any(
+            parent.is_symlink() for parent in candidate.parents if parent != self.project_root
+        ):
+            raise CoreProposalError(f"Access denied: {raw_path} uses a symbolic link.")
+        resolved = candidate.resolve()
+        try:
+            rel = resolved.relative_to(self.project_root).as_posix()
+        except ValueError as exc:
+            raise CoreProposalError(f"Access denied: {raw_path} is outside the running MAS source root.") from exc
+        allowed_dirs = _ALLOWED_DIRS if self._has_source_test_workspace() else ("muika",)
+        allowed_files = _ALLOWED_FILES if self._has_source_test_workspace() else ()
+        allowed = rel in allowed_files or any(rel.startswith(prefix + "/") for prefix in allowed_dirs)
+        allowed = allowed or rel in allowed_dirs
+        if not allowed:
+            raise CoreProposalError(f"Access denied: {rel} is outside the Core proposal scope.")
+        return resolved
+
+    def workspace_fingerprint(self) -> str:
+        """返回当前运行源码和测试文件的工作区指纹。"""
+        digest = hashlib.sha256()
+        paths: list[Path] = []
+        source_workspace = self._has_source_test_workspace()
+        for dirname in _ALLOWED_DIRS if source_workspace else ("muika",):
+            root = self.project_root / dirname
+            if root.is_dir():
+                paths.extend(path for path in root.rglob("*.py") if path.is_file() and not path.is_symlink())
+        for filename in _ALLOWED_FILES if source_workspace else ():
+            path = self.project_root / filename
+            if path.is_file() and not path.is_symlink():
+                paths.append(path)
+        project_file = self.project_root / "pyproject.toml"
+        if project_file.is_file():
+            paths.append(project_file)
+        for path in sorted(set(paths), key=lambda item: item.relative_to(self.project_root).as_posix()):
+            rel = path.relative_to(self.project_root).as_posix()
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def create(
+        self,
+        changes: Sequence[Mapping[str, object]],
+        reason: str,
+        source: CoreProposalSource = "self",
+    ) -> str:
+        """创建一个多文件 Core 提案。"""
+        self._require_enabled()
+        reason = reason.strip()
+        if not reason:
+            raise CoreProposalError("Proposal reason must not be empty.")
+        if not changes:
+            raise CoreProposalError("Proposal must contain at least one file change.")
+        if len(changes) > CORE_PROPOSAL_MAX_FILES:
+            raise CoreProposalError(f"Proposal exceeds the {CORE_PROPOSAL_MAX_FILES}-file limit.")
+
+        prepared: list[PreparedChange] = []
+        seen: set[str] = set()
+        total_bytes = 0
+        for index, change in enumerate(changes):
+            item = self._prepare_change(change, index)
+            if item["path"] in seen:
+                raise CoreProposalError(f"Path appears more than once: {item['path']}.")
+            seen.add(item["path"])
+            total_bytes += len((item.get("after_text") or "").encode("utf-8"))
+            if total_bytes > CORE_PROPOSAL_MAX_TOTAL_BYTES:
+                raise CoreProposalError(f"Proposal content exceeds {CORE_PROPOSAL_MAX_TOTAL_BYTES} bytes.")
+            prepared.append(item)
+
+        patch_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+        patch_dir = self.proposals_root / patch_id
+        work_dir = self.proposals_root / f".{patch_id}.tmp"
+        work_dir.mkdir(parents=True, exist_ok=False)
+        before_dir = work_dir / "before"
+        after_dir = work_dir / "after"
+        diff_parts: list[str] = []
+        records: list[ProposalChange] = []
+        for item in prepared:
+            rel = item["path"]
+            before_text = item.get("before_text")
+            after_text = item.get("after_text")
+            before_snapshot = self._write_snapshot(before_dir, rel, before_text)
+            after_snapshot = self._write_snapshot(after_dir, rel, after_text)
+            diff_parts.extend(
+                difflib.unified_diff(
+                    (before_text or "").splitlines(keepends=True),
+                    (after_text or "").splitlines(keepends=True),
+                    fromfile=f"a/{rel}",
+                    tofile=f"b/{rel}",
+                )
+            )
+            records.append(
+                {
+                    "action": item["action"],
+                    "path": rel,
+                    "sha256_before": _sha256_text(before_text) if before_text is not None else None,
+                    "sha256_after": _sha256_text(after_text) if after_text is not None else None,
+                    "before_snapshot": before_snapshot,
+                    "after_snapshot": after_snapshot,
+                }
+            )
+
+        proposal: CoreProposal = {
+            "schema_version": 1,
+            "patch_id": patch_id,
+            "status": "pending",
+            "reason": reason,
+            "source": source,
+            "source_root": str(self.project_root),
+            "created_at": datetime.now().isoformat(),
+            "workspace_fingerprint": self.workspace_fingerprint(),
+            "changes": records,
+            "validation": None,
+            "audit_errors": [],
+            "warnings": [],
+        }
+        _atomic_write_text(work_dir / "proposal.diff", "".join(diff_parts))
+        _atomic_write_json(work_dir / "proposal.json", proposal)
+        os.replace(work_dir, patch_dir)
+        return patch_id
+
+    def _prepare_change(self, change: Mapping[str, object], index: int) -> PreparedChange:
+        """检查并展开一个文件变更。"""
+        raw_action = str(change.get("action", "")).strip()
+        raw_path = str(change.get("path", "")).strip()
+        if raw_action not in {"modify", "create", "delete"}:
+            raise CoreProposalError(f"Change {index} has invalid action {raw_action!r}.")
+        action = cast(ChangeAction, raw_action)
+        target = self.resolve_core_path(raw_path, for_write=True)
+        rel = target.relative_to(self.project_root).as_posix()
+        exists = target.is_file()
+        if action == "create" and exists:
+            raise CoreProposalError(f"Create target already exists: {rel}.")
+        if action in {"modify", "delete"} and not exists:
+            raise CoreProposalError(f"{action.title()} target does not exist: {rel}.")
+        before_text = target.read_text(encoding="utf-8") if exists else None
+        after_text: Optional[str]
+        if action == "modify":
+            after_text = self._apply_replacements(before_text or "", change.get("replacements"), rel)
+        elif action == "create":
+            content = change.get("content")
+            if not isinstance(content, str):
+                raise CoreProposalError(f"Create change for {rel} requires string content.")
+            after_text = content
+        else:
+            after_text = None
+        if after_text is not None:
+            size = len(after_text.encode("utf-8"))
+            if size > CORE_PROPOSAL_MAX_FILE_BYTES:
+                raise CoreProposalError(f"Candidate {rel} exceeds {CORE_PROPOSAL_MAX_FILE_BYTES} bytes.")
+            try:
+                ast.parse(after_text, filename=rel)
+                compile(after_text, rel, "exec")
+            except (SyntaxError, ValueError) as exc:
+                raise CoreProposalError(f"Python syntax check failed for {rel}: {exc}") from exc
+        return {"action": action, "path": rel, "before_text": before_text, "after_text": after_text}
+
+    @staticmethod
+    def _apply_replacements(text: str, replacements: object, rel: str) -> str:
+        """按顺序应用唯一文本替换。"""
+        if not isinstance(replacements, list) or not replacements:
+            raise CoreProposalError(f"Modify change for {rel} requires replacements.")
+        result = text
+        for index, replacement in enumerate(replacements):
+            if not isinstance(replacement, dict):
+                raise CoreProposalError(f"Replacement {index} for {rel} must be an object.")
+            old_text = replacement.get("old_text")
+            new_text = replacement.get("new_text")
+            if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+                raise CoreProposalError(f"Replacement {index} for {rel} requires old_text and new_text.")
+            count = result.count(old_text)
+            if count != 1:
+                raise CoreProposalError(
+                    f"Replacement {index} for {rel} matched {count} times; expected exactly one match."
+                )
+            result = result.replace(old_text, new_text, 1)
+        return result
+
+    @staticmethod
+    def _write_snapshot(root: Path, rel: str, content: Optional[str]) -> Optional[str]:
+        """写入提案快照并返回提案目录相对路径。"""
+        if content is None:
+            return None
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path.relative_to(root.parent).as_posix()
+
+    def load(self, patch_id: str) -> CoreProposal:
+        """读取一个提案记录。"""
+        if not _PATCH_ID_RE.fullmatch(patch_id):
+            raise CoreProposalError(f"Invalid patch id: {patch_id!r}.")
+        path = self.proposals_root / patch_id / "proposal.json"
+        if not path.is_file():
+            raise CoreProposalError(f"Proposal not found: {patch_id}.")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CoreProposalError(f"Proposal record is invalid: {patch_id}: {exc}") from exc
+        if not isinstance(value, dict) or value.get("patch_id") != patch_id:
+            raise CoreProposalError(f"Proposal record is invalid: {patch_id}.")
+        return cast(CoreProposal, value)
+
+    def list_proposals(self, status: Optional[ProposalStatus] = None) -> list[CoreProposal]:
+        """按创建时间倒序列出提案。"""
+        self._require_enabled()
+        if not self.proposals_root.is_dir():
+            return []
+        proposals: list[CoreProposal] = []
+        for path in self.proposals_root.iterdir():
+            if not path.is_dir() or not _PATCH_ID_RE.fullmatch(path.name):
+                continue
+            try:
+                proposal = self.load(path.name)
+            except CoreProposalError:
+                continue
+            if status is None or proposal.get("status") == status:
+                proposals.append(proposal)
+        return sorted(proposals, key=lambda item: str(item.get("created_at", "")), reverse=True)
+
+    def is_stale(self, proposal: CoreProposal) -> bool:
+        """判断提案是否与当前工作区发生漂移。"""
+        if proposal.get("status") != "pending":
+            return False
+        if proposal.get("source_root") != str(self.project_root):
+            return True
+        if proposal.get("workspace_fingerprint") != self.workspace_fingerprint():
+            return True
+        for change in proposal.get("changes", []):
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            current_hash = _sha256_text(target.read_text(encoding="utf-8")) if target.is_file() else None
+            if current_hash != change.get("sha256_before"):
+                return True
+        return False
+
+    def show(self, patch_id: str, page: int = 1) -> str:
+        """返回分页 diff 和提案摘要。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if page < 1:
+            raise CoreProposalError("Page must be 1 or greater.")
+        diff = (self.proposals_root / patch_id / "proposal.diff").read_text(encoding="utf-8")
+        lines = diff.splitlines()
+        page_size = CORE_PATCH_SHOW_PAGE_LINES
+        page_count = max(1, (len(lines) + page_size - 1) // page_size)
+        if page > page_count:
+            raise CoreProposalError(f"Page {page} exceeds {page_count} pages.")
+        start = (page - 1) * page_size
+        selected = lines[start : start + page_size]
+        paths = [str(change.get("path", "")) for change in proposal.get("changes", [])]
+        warnings: list[str] = []
+        if any(path.startswith("tests/") for path in paths):
+            warnings.append("警告：该提案修改了测试文件。削弱断言可能使验证结果失去意义。请人工核对。")
+        stale = "yes" if self.is_stale(proposal) else "no"
+        header = [
+            *warnings,
+            f"提案：{patch_id}",
+            f"状态：{proposal['status']} | 过期：{stale}",
+            f"运行源码：{proposal.get('source_root', '(unknown)')}",
+            f"理由：{proposal['reason']}",
+            f"文件：{', '.join(paths)}",
+            f"Diff：第 {page}/{page_count} 页",
+            "",
+        ]
+        return "\n".join(header + selected)
+
+    def _save(self, proposal: CoreProposal) -> None:
+        """保存提案记录。"""
+        _atomic_write_json(self.proposals_root / proposal["patch_id"] / "proposal.json", proposal)
+
+    def _snapshot_text(self, patch_id: str, relative_snapshot: Optional[str]) -> Optional[str]:
+        """读取提案快照。"""
+        if relative_snapshot is None:
+            return None
+        return (self.proposals_root / patch_id / relative_snapshot).read_text(encoding="utf-8")
+
+    def _copy_workspace(self, destination: Path) -> None:
+        """复制验证所需的项目文件。"""
+        ignored = shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            "venv",
+            "data",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            "*.pyc",
+        )
+        shutil.copytree(self.project_root, destination, ignore=ignored, dirs_exist_ok=True)
+
+    def _apply_candidate_to_copy(self, proposal: CoreProposal, destination: Path) -> None:
+        """把提案 after 快照应用到临时副本。"""
+        patch_id = str(proposal["patch_id"])
+        for change in proposal["changes"]:
+            target = destination / change["path"]
+            after_text = self._snapshot_text(patch_id, change.get("after_snapshot"))
+            if after_text is None:
+                if target.exists():
+                    target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(after_text, encoding="utf-8")
+
+    def _validation_environment_error(self) -> Optional[str]:
+        """返回当前安装不能运行源码测试的原因。"""
+        if not self._has_source_test_workspace():
+            return (
+                "The running installation does not include a source test workspace. "
+                f"Core files resolve to {self.project_root}. Install MAS from a source checkout to run validation."
+            )
+        if importlib.util.find_spec("pytest") is None:
+            return "pytest is not installed in the current Python environment."
+        return None
+
+    def _run_probe(self, workspace: Path) -> ProbeReport:
+        """在子进程中运行候选测试探针。"""
+        probe_path = Path(__file__).with_name("core_probe.py")
+        command = [sys.executable, str(probe_path)]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=workspace,
+                capture_output=True,
+                timeout=CORE_VALIDATE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout_output = ((exc.stdout or b"") + (exc.stderr or b""))[-CORE_VALIDATE_OUTPUT_CAP_BYTES:]
+            return {
+                "status": "failed",
+                "reason": f"Validation timed out after {CORE_VALIDATE_TIMEOUT_SECONDS} seconds.",
+                "timed_out": True,
+                "output": timeout_output.decode("utf-8", errors="replace"),
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+            }
+        output_bytes = (completed.stdout or b"") + (completed.stderr or b"")
+        output = output_bytes[-CORE_VALIDATE_OUTPUT_CAP_BYTES:].decode("utf-8", errors="replace")
+        marker_line = next((line for line in reversed(output.splitlines()) if line.startswith(_PROBE_MARKER)), None)
+        if marker_line is None:
+            return {
+                "status": "unavailable",
+                "reason": f"Validation probe did not return structured output (exit {completed.returncode}).",
+                "timed_out": False,
+                "output": output,
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+            }
+        try:
+            decoded = json.loads(marker_line[len(_PROBE_MARKER) :])
+        except json.JSONDecodeError as exc:
+            return {
+                "status": "unavailable",
+                "reason": f"Validation probe returned invalid JSON: {exc}",
+                "timed_out": False,
+                "output": output,
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+            }
+        if not isinstance(decoded, dict):
+            raise CoreProposalError("Validation probe returned a non-object result.")
+        result = cast(ProbeReport, decoded)
+        result["output"] = output
+        return result
+
+    def _baseline_report(self, fingerprint: str) -> ProbeReport:
+        """读取或动态测量工作区基线。"""
+        cache_path = self.proposals_root / "_baseline" / f"{fingerprint}.json"
+        if cache_path.is_file():
+            try:
+                decoded = json.loads(cache_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                decoded = None
+            cached = cast(ProbeReport, decoded) if isinstance(decoded, dict) else None
+            if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
+                if cached.get("status") != "unavailable" or self._validation_environment_error() is not None:
+                    return cached
+        environment_error = self._validation_environment_error()
+        if environment_error:
+            report: ProbeReport = {
+                "status": "unavailable",
+                "reason": environment_error,
+                "timed_out": False,
+                "output": "",
+                "failures": [],
+                "errors": [],
+                "test_count": 0,
+                "fingerprint": fingerprint,
+                "measured_at": datetime.now().isoformat(),
+            }
+            _atomic_write_json(cache_path, report)
+            return report
+        with tempfile.TemporaryDirectory(prefix="muika-core-baseline-") as tmp:
+            workspace = Path(tmp) / "workspace"
+            self._copy_workspace(workspace)
+            report = self._run_probe(workspace)
+        report["fingerprint"] = fingerprint
+        report["measured_at"] = datetime.now().isoformat()
+        _atomic_write_json(cache_path, report)
+        return report
+
+    def validate(self, patch_id: str, *, force: bool = False) -> ValidationReport:
+        """验证一个候选提案并保存结构化报告。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if proposal["status"] != "pending":
+            raise CoreProposalError(f"Only pending proposals can be validated; status is {proposal['status']}.")
+        if self.is_stale(proposal):
+            raise CoreProposalError("Proposal is stale because the workspace changed.")
+        fingerprint = self.workspace_fingerprint()
+        current = proposal.get("validation")
+        validation_path = self.proposals_root / patch_id / "validation.json"
+        if (
+            not force
+            and isinstance(current, dict)
+            and current.get("fingerprint") == fingerprint
+            and validation_path.is_file()
+        ):
+            decoded = json.loads(validation_path.read_text(encoding="utf-8"))
+            if isinstance(decoded, dict):
+                return cast(ValidationReport, decoded)
+
+        baseline = self._baseline_report(fingerprint)
+        with tempfile.TemporaryDirectory(prefix="muika-core-candidate-") as tmp:
+            workspace = Path(tmp) / "workspace"
+            self._copy_workspace(workspace)
+            self._apply_candidate_to_copy(proposal, workspace)
+            candidate = self._run_probe(workspace)
+
+        warnings: list[str] = []
+        baseline_status = baseline.get("status")
+        candidate_status = candidate.get("status")
+        status: ValidationStatus
+        if baseline_status == "unavailable":
+            status = "unavailable"
+            reason = baseline.get("reason") or "The baseline test environment is unavailable."
+            new_failures: list[str] = []
+            new_errors: list[str] = []
+        elif baseline.get("timed_out"):
+            status = "failed"
+            reason = str(baseline.get("reason", "Baseline validation timed out."))
+            new_failures = []
+            new_errors = []
+        elif candidate_status == "unavailable":
+            status = "failed"
+            reason = f"Candidate probe could not run: {candidate.get('reason', 'unknown cause')}"
+            new_failures = []
+            new_errors = []
+        elif candidate.get("timed_out"):
+            status = "failed"
+            reason = str(candidate.get("reason", "Candidate validation timed out."))
+            new_failures = []
+            new_errors = []
+        else:
+            baseline_failures = set(str(item) for item in baseline.get("failures", []))
+            baseline_errors = set(str(item) for item in baseline.get("errors", []))
+            new_failures = sorted(set(str(item) for item in candidate.get("failures", [])) - baseline_failures)
+            new_errors = sorted(set(str(item) for item in candidate.get("errors", [])) - baseline_errors)
+            status = "failed" if new_failures or new_errors else "passed"
+            reason = "Candidate adds test failures or collection errors." if status == "failed" else "No new failures."
+            if int(candidate.get("test_count", 0)) < int(baseline.get("test_count", 0)):
+                warnings.append(
+                    f"Test count decreased from {baseline.get('test_count', 0)} to {candidate.get('test_count', 0)}."
+                )
+
+        report: ValidationReport = {
+            "patch_id": patch_id,
+            "fingerprint": fingerprint,
+            "created_at": datetime.now().isoformat(),
+            "status": status,
+            "reason": reason,
+            "baseline": baseline,
+            "candidate": candidate,
+            "new_failures": new_failures,
+            "new_errors": new_errors,
+            "warnings": warnings,
+        }
+        _atomic_write_json(validation_path, report)
+        validation_summary: ValidationSummary = {
+            "status": status,
+            "fingerprint": fingerprint,
+            "created_at": report["created_at"],
+            "warnings": warnings,
+        }
+        proposal["validation"] = validation_summary
+        proposal["warnings"] = warnings
+        self._save(proposal)
+        return report
+
+    async def approve(self, patch_id: str, *, allow_unvalidated: bool = False) -> str:
+        """验证并事务式应用一个待批准提案。"""
+        self._require_enabled()
+        async with _APPLY_LOCK:
+            if is_core_maintenance_active():
+                raise CoreProposalError("Another approved proposal is waiting for a restart.")
+            proposal = self.load(patch_id)
+            if proposal["status"] != "pending":
+                raise CoreProposalError(f"Only pending proposals can be approved; status is {proposal['status']}.")
+            if self.is_stale(proposal):
+                raise CoreProposalError("Proposal is stale because the workspace changed.")
+            report = await asyncio.to_thread(self.validate, patch_id)
+            if report["status"] == "failed":
+                raise CoreProposalError(f"Proposal validation failed: {report['reason']}")
+            if report["status"] == "unavailable" and not allow_unvalidated:
+                raise CoreProposalError(
+                    "Proposal validation is unavailable. Review the cause, then use the explicit "
+                    "unvalidated approval option."
+                )
+            if report["status"] not in {"passed", "unavailable"}:
+                raise CoreProposalError(f"Proposal validation has invalid status: {report['status']}.")
+
+            proposal = self.load(patch_id)
+            if self.is_stale(proposal):
+                raise CoreProposalError("Proposal became stale before application.")
+            proposal["status"] = "applying"
+            proposal["applying_at"] = datetime.now().isoformat()
+            proposal["unvalidated_approval"] = report["status"] == "unavailable"
+            self._save(proposal)
+            try:
+                self._apply_formal(proposal)
+            except Exception as exc:
+                recovery_errors = self._restore_before(proposal)
+                proposal["status"] = "failed"
+                proposal["failure"] = str(exc)
+                proposal["recovery_errors"] = recovery_errors
+                self._save(proposal)
+                if recovery_errors:
+                    raise CoreProposalError(
+                        f"Proposal application failed: {exc}. Recovery also failed: {'; '.join(recovery_errors)}"
+                    ) from exc
+                raise CoreProposalError(f"Proposal application failed and files were restored: {exc}") from exc
+
+            proposal["status"] = "approved"
+            proposal["approved_at"] = datetime.now().isoformat()
+            proposal["approved_boot_id"] = _BOOT_ID
+            self._save(proposal)
+            _enter_maintenance(patch_id)
+            logger.info("[CoreProposal] Core update approved; restart required")
+            for change in proposal["changes"]:
+                audit_error = await self._audit_change(proposal, change, "core_approve")
+                if audit_error:
+                    proposal["audit_errors"].append(audit_error)
+                    self._save(proposal)
+            risk = (
+                " The tests were unavailable, so this approval used the explicit risk override."
+                if allow_unvalidated
+                else ""
+            )
+            return f"Core proposal {patch_id} was approved and applied.{risk} Restart is required."
+
+    def deny(self, patch_id: str, reason: str = "") -> str:
+        """拒绝一个待处理提案。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if proposal["status"] != "pending":
+            raise CoreProposalError(f"Only pending proposals can be denied; status is {proposal['status']}.")
+        proposal["status"] = "denied"
+        proposal["denied_at"] = datetime.now().isoformat()
+        proposal["denial_reason"] = reason.strip()
+        self._save(proposal)
+        return f"Core proposal {patch_id} was denied. No code changed."
+
+    async def rollback(self, patch_id: str) -> str:
+        """事务式回滚一个已批准提案。"""
+        self._require_enabled()
+        async with _APPLY_LOCK:
+            proposal = self.load(patch_id)
+            if proposal["status"] != "approved":
+                raise CoreProposalError(f"Only approved proposals can be rolled back; status is {proposal['status']}.")
+            if proposal.get("source_root") != str(self.project_root):
+                raise CoreProposalError("Rollback refused because the running MAS source location changed.")
+            if not self._matches_state(proposal, "after"):
+                raise CoreProposalError("Rollback refused because an approved target file changed.")
+            proposal["status"] = "rolling_back"
+            proposal["rolling_back_at"] = datetime.now().isoformat()
+            self._save(proposal)
+            recovery_errors = self._restore_before(proposal)
+            if recovery_errors:
+                proposal["status"] = "failed"
+                proposal["failure"] = f"Rollback failed: {'; '.join(recovery_errors)}"
+                proposal["recovery_errors"] = recovery_errors
+                self._save(proposal)
+                raise CoreProposalError(proposal["failure"])
+            proposal["status"] = "rolled_back"
+            proposal["rolled_back_at"] = datetime.now().isoformat()
+            same_boot = proposal.get("approved_boot_id") == _BOOT_ID
+            self._save(proposal)
+            for change in proposal["changes"]:
+                audit_error = await self._audit_change(proposal, change, "core_rollback")
+                if audit_error:
+                    proposal["audit_errors"].append(audit_error)
+                    self._save(proposal)
+            if same_boot and _maintenance_patch_id == patch_id:
+                _leave_maintenance()
+                return f"Core proposal {patch_id} was rolled back. Maintenance mode ended."
+            return f"Core proposal {patch_id} was rolled back. Restart is required to use the restored code."
+
+    def recover_incomplete(self) -> list[str]:
+        """恢复启动前遗留的提案事务。"""
+        _leave_maintenance()
+        recovered: list[str] = []
+        if not self.proposals_root.is_dir():
+            return recovered
+        for proposal in self.list_proposals_unchecked():
+            status = proposal.get("status")
+            if status not in {"applying", "rolling_back"}:
+                continue
+            patch_id = str(proposal["patch_id"])
+            if proposal.get("source_root") != str(self.project_root):
+                proposal["status"] = "failed"
+                proposal["recovery_note"] = "Recovery refused because the running MAS source location changed."
+                proposal["recovered_at"] = datetime.now().isoformat()
+                self._save(proposal)
+                recovered.append(patch_id)
+                continue
+            all_before = self._matches_state(proposal, "before")
+            all_after = self._matches_state(proposal, "after")
+            if status == "applying":
+                if all_after:
+                    proposal["status"] = "approved"
+                    proposal["recovery_note"] = "Recovered completed application."
+                elif all_before:
+                    proposal["status"] = "failed"
+                    proposal["recovery_note"] = "Recovered untouched before state."
+                else:
+                    errors = self._restore_before(proposal)
+                    proposal["status"] = "failed"
+                    proposal["recovery_errors"] = errors
+                    proposal["recovery_note"] = "Restored before state after mixed application."
+            elif all_before:
+                proposal["status"] = "rolled_back"
+                proposal["recovery_note"] = "Recovered completed rollback."
+            elif all_after:
+                proposal["status"] = "approved"
+                proposal["recovery_note"] = "Rollback did not change formal files."
+            else:
+                errors = self._restore_before(proposal)
+                proposal["status"] = "failed" if errors else "rolled_back"
+                proposal["recovery_errors"] = errors
+                proposal["recovery_note"] = "Restored before state after mixed rollback."
+            proposal["recovered_at"] = datetime.now().isoformat()
+            self._save(proposal)
+            recovered.append(patch_id)
+        return recovered
+
+    def list_proposals_unchecked(self) -> list[CoreProposal]:
+        """列出提案，不检查功能开关。"""
+        if not self.proposals_root.is_dir():
+            return []
+        proposals: list[CoreProposal] = []
+        for path in self.proposals_root.iterdir():
+            if path.is_dir() and _PATCH_ID_RE.fullmatch(path.name):
+                try:
+                    proposals.append(self.load(path.name))
+                except CoreProposalError:
+                    continue
+        return proposals
+
+    def _matches_state(self, proposal: CoreProposal, state: SnapshotState) -> bool:
+        """判断全部正式文件是否匹配 before 或 after hash。"""
+        hash_key = f"sha256_{state}"
+        for change in proposal["changes"]:
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            current_hash = _sha256_text(target.read_text(encoding="utf-8")) if target.is_file() else None
+            if current_hash != change.get(hash_key):
+                return False
+        return True
+
+    def _apply_formal(self, proposal: CoreProposal) -> None:
+        """应用提案的全部 after 状态。"""
+        patch_id = str(proposal["patch_id"])
+        deleted_root = self.proposals_root / patch_id / "deleted"
+        for change in proposal["changes"]:
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            after_text = self._snapshot_text(patch_id, change.get("after_snapshot"))
+            if after_text is None:
+                moved = deleted_root / change["path"]
+                moved.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, moved)
+            else:
+                _atomic_write_text(target, after_text)
+
+    def _restore_before(self, proposal: CoreProposal) -> list[str]:
+        """把全部正式文件恢复到 before 状态。"""
+        errors: list[str] = []
+        patch_id = str(proposal["patch_id"])
+        for change in reversed(proposal["changes"]):
+            target = self.resolve_core_path(str(change["path"]), for_write=True)
+            before_text = self._snapshot_text(patch_id, change.get("before_snapshot"))
+            try:
+                if before_text is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    _atomic_write_text(target, before_text)
+            except Exception as exc:
+                errors.append(f"{change['path']}: {exc}")
+        return errors
+
+    async def _audit_change(
+        self,
+        proposal: CoreProposal,
+        change: ProposalChange,
+        action: CoreAuditAction,
+    ) -> Optional[str]:
+        """尽力写入一条 Core 文件审计记录。"""
+        try:
+            async with get_session() as session:
+                record = await SelfModificationCRUD.create(
+                    session,
+                    layer="core",
+                    path=str(change["path"]),
+                    action=action,
+                    reason=str(proposal["reason"]),
+                    before_path=(
+                        change.get("after_snapshot") if action == "core_rollback" else change.get("before_snapshot")
+                    ),
+                    after_path=(
+                        change.get("before_snapshot") if action == "core_rollback" else change.get("after_snapshot")
+                    ),
+                    source=f"patch:{proposal['patch_id']}",
+                )
+                await session.flush()
+                logger.info(f"[CoreProposal] Audit #{record.id} recorded for {change['path']}")
+                return None
+        except Exception as exc:
+            message = f"{change['path']}: {exc}"
+            logger.critical(f"[CoreProposal] Audit failed after code application: {message}")
+            return message
+
+
+_manager: Optional[CoreProposalManager] = None
+
+
+def get_core_proposal_manager() -> CoreProposalManager:
+    """返回 CoreProposalManager 单例。"""
+    global _manager
+    if _manager is None:
+        _manager = CoreProposalManager()
+    return _manager

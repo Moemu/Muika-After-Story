@@ -8,6 +8,7 @@ from .orm_models import (
     ArchiveRecordORM,
     MemoryRecordORM,
     RssDigestCacheORM,
+    SelfModificationORM,
     TopicHistoryORM,
     Usage,
 )
@@ -249,6 +250,89 @@ class TopicHistoryCRUD:
         )
         session.add(entry)
         return entry
+
+    @staticmethod
+    async def list_all(
+        session: AsyncSession,
+        limit: int = 20,
+    ) -> list[TopicHistoryORM]:
+        """按 use_count 降序返回最近的话题历史，供自省统计。"""
+        result = await session.execute(select(TopicHistoryORM).order_by(TopicHistoryORM.use_count.desc()).limit(limit))
+        return list(result.scalars().all())
+
+
+class SelfModificationCRUD:
+    """自我修改审计日志的持久化操作。"""
+
+    @staticmethod
+    async def create(
+        session: AsyncSession,
+        *,
+        layer: str,
+        path: str,
+        action: str,
+        reason: str,
+        before_path: Optional[str] = None,
+        after_path: Optional[str] = None,
+        status: str = "applied",
+        source: str = "self",
+    ) -> SelfModificationORM:
+        """插入一条自我修改审计记录。调用方负责 commit。
+
+        ``before_path`` / ``after_path`` 为相对备份目录的文件路径，保存修改前后的完整内容。
+        """
+        record = SelfModificationORM(
+            created_at=datetime.now().isoformat(),
+            layer=layer,
+            path=path,
+            action=action,
+            reason=reason,
+            before_path=before_path,
+            after_path=after_path,
+            status=status,
+            source=source,
+        )
+        session.add(record)
+        return record
+
+    @staticmethod
+    async def get_by_id(session: AsyncSession, revision_id: int) -> Optional[SelfModificationORM]:
+        """按主键查找审计记录。"""
+        result = await session.execute(
+            select(SelfModificationORM).where(SelfModificationORM.id == revision_id).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def list_recent(
+        session: AsyncSession,
+        path: Optional[str] = None,
+        limit: int = 20,
+    ) -> list[SelfModificationORM]:
+        """按时间倒序返回最近的审计记录，可按 path 过滤。"""
+        query = select(SelfModificationORM).order_by(SelfModificationORM.id.desc()).limit(limit)
+        if path:
+            query = query.where(SelfModificationORM.path == path)
+        result = await session.execute(query)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def latest_write_for_path(session: AsyncSession, path: str) -> Optional[SelfModificationORM]:
+        """返回指定 path 最近一条 ``action='write'`` 记录（revert 的目标版本）。
+
+        回滚记录本身不作为 revert 目标，避免"撤销回滚"的振荡语义。
+        """
+        result = await session.execute(
+            select(SelfModificationORM)
+            .where(
+                SelfModificationORM.path == path,
+                SelfModificationORM.action == "write",
+                SelfModificationORM.status == "applied",
+            )
+            .order_by(SelfModificationORM.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
 
 class RssDigestCacheCRUD:
