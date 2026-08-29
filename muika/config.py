@@ -35,7 +35,6 @@ _model_config_manager: Optional["ModelConfigManager"] = None
 
 
 class MASConfig(BaseSettings):
-    # 主设置
     master_id: str = ""
     """对话目标ID。"""
     max_memory_records: int = 100
@@ -45,7 +44,6 @@ class MASConfig(BaseSettings):
     agent_template: str = "Muika.agent.jinja2"
     """行动半身（Agent）模板：Muika 执行 <agent>...</agent> 内联命令时的系统提示"""
 
-    # Agent 模型设置
     butler_model: Optional[str] = None
     """管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
     session_summarize_model: Optional[str] = None
@@ -53,14 +51,12 @@ class MASConfig(BaseSettings):
     load_user_skills: bool = False
     """是否加载用户文件夹中的技能（~/.agents/skills 与 ~/.claude/skills）"""
 
-    # WebSocket 服务器设置
     core_ws_url: str = "ws://127.0.0.1:8765/ws"
     """Core 进程的 WebSocket 地址。Bot 通过此地址连接 Core。"""
     ipc_secret: str = ""
     """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
     留空时 Core 启动会自动生成并写入 .env 文件。"""
 
-    # Bot 适配器设置
     input_timeout: int = 0
     """输入等待时间"""
     telegram_proxy: Optional[str] = None
@@ -69,13 +65,11 @@ class MASConfig(BaseSettings):
     """适配器唯一名称。用于多适配器场景下标识当前 Bot 实例的身份。
     例如 ``"qq-desktop"``, ``"qq-phone"``。留空时自动分配。"""
 
-    # 日志设置
     log_level: str = "INFO"
     """日志等级"""
     mas_log_only: bool = False
     """仅输出 MAS 相关日志"""
 
-    # 操作系统能力
     fs_allowed_paths: List[str] = []
     """文件操作白名单目录列表。空列表时文件系统工具全部禁用。
     示例: ["D:/Documents", "D:/Downloads"]"""
@@ -91,7 +85,6 @@ class MASConfig(BaseSettings):
     plugins_dir: str = "plugins"
     """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
 
-    # 自我迭代能力
     enable_self_modification: bool = True
     """开启 Muika 的内容自我修改能力。关闭时 self_* 工具全部禁用。"""
     enable_plugin_self_modification: bool = False
@@ -216,7 +209,6 @@ class ConfigFileHandler(FileSystemEventHandler):
             self._cancel_pending()
             self.callback()
         elif self._pending_timer is None:
-            # 冷却期内的重复事件：延迟到窗口结束后复查一次，避免丢失最终状态
             delay = self.cooldown - (current_time - self.last_modified) + 0.05
             self._pending_timer = threading.Timer(delay, self._delayed_fire)
             self._pending_timer.daemon = True

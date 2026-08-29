@@ -29,14 +29,7 @@ from __future__ import annotations
 import inspect
 import uuid
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Coroutine,
-    Optional,
-    get_type_hints,
-)
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional, get_type_hints
 
 import aiofiles
 
@@ -264,6 +257,7 @@ class CommandDispatcher:
         from muika.core.reflection import ReflectionAgent
         from muika.core.state import MuikaState
         from muika.core.topic_manager import TopicManager
+        from muika.plugin.manager import PluginManager, get_plugin_manager
 
         self.muika = muika
         self._command_reply = command_reply
@@ -276,6 +270,7 @@ class CommandDispatcher:
             TopicManager: muika.topic_manager,
             ButlerAgent: muika.butler_agent,
             ReflectionAgent: muika.reflection,
+            PluginManager: get_plugin_manager(),
         }
 
     @classmethod

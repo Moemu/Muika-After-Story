@@ -32,7 +32,6 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
     except Exception as e:
         raise _FSError(f"Invalid path {raw_path!r}: {e}") from e
 
-    # Path traversal guard: resolved path must be inside at least one allowed root.
     if not any(resolved == root or root in resolved.parents for root in allowed):
         raise _FSError(
             f"Access denied: {resolved} is not inside any allowed directory. " f"Allowed: {[str(p) for p in allowed]}"
@@ -45,11 +44,6 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
         raise _FSError("File write/delete is disabled by configuration.")
 
     return resolved
-
-
-# ---------------------------------------------------------------------------
-# Read-only operations
-# ---------------------------------------------------------------------------
 
 
 class ListDirectoryParams(BaseModel):
@@ -142,11 +136,6 @@ async def read_file(path: str, encoding: str = "utf-8", max_chars: int = 4000):
     suffix = f"\n...(truncated, {total - max_chars:,} chars omitted)" if total > max_chars else ""
     logger.debug(f"[ReadFile] Read {total:,} chars from {resolved}")
     return f"File: {resolved}\n\n{truncated}{suffix}"
-
-
-# ---------------------------------------------------------------------------
-# Write operations
-# ---------------------------------------------------------------------------
 
 
 class WriteFileParams(BaseModel):

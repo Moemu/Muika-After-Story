@@ -113,7 +113,7 @@ class SelfReadParams(BaseModel):
         description=(
             "What to read. Empty string: list everything you can edit. "
             "'.history': show your recent self-modification journal. "
-            "Otherwise a path such as 'skills/muika-self/SKILL.md'."
+            "Otherwise a path such as 'configs/skills/muika-self/SKILL.md'."
         ),
     )
 
@@ -213,7 +213,7 @@ async def self_write(path: str, content: str, reason: str) -> str:
 
 
 class SelfEditParams(BaseModel):
-    path: str = Field(..., description="The existing file to modify, e.g. 'skills/muika-self/SKILL.md'.")
+    path: str = Field(..., description="The existing file to modify, e.g. 'configs/skills/muika-self/SKILL.md'.")
     operation: Literal["replace", "insert", "delete_lines"] = Field(
         ...,
         description=(
@@ -285,7 +285,6 @@ async def self_edit(
     change_line = _locate_change_line(original, operation, old_string, line_number, line_start)
     context = _context_around(new_text, change_line)
 
-    # Always preview-only: store the pending edit and return guidance.
     _pending_edits[rel] = PendingEdit(
         new_text=new_text,
         reason=reason.strip(),
@@ -414,7 +413,7 @@ def _context_around(text: str, line_idx: int) -> str:
 
 
 class SelfRevertParams(BaseModel):
-    path: str = Field(..., description="The file to revert, e.g. 'skills/muika-self/SKILL.md'.")
+    path: str = Field(..., description="The file to revert, e.g. 'configs/skills/muika-self/SKILL.md'.")
     revision: Optional[int] = Field(
         None,
         description="Journal revision id to revert to (the state BEFORE that revision). "
@@ -441,11 +440,6 @@ async def self_revert(path: str, revision: Optional[int] = None) -> str:
     except Exception as e:
         logger.error(f"[SelfEdit] Unexpected error reverting {path!r}: {e}")
         return f"Unexpected error: {e}"
-
-
-# ---------------------------------------------------------------------------
-# 人格模板切换
-# ---------------------------------------------------------------------------
 
 
 def _resolve_template(name: str) -> Path:
@@ -539,7 +533,6 @@ async def persona_list() -> str:
     lines = ["Available persona templates:"]
     found_any = False
 
-    # 覆盖层优先
     override_dir = Path("./templates").resolve()
     if override_dir.is_dir():
         for p in sorted(override_dir.glob("*.jinja2")):
@@ -547,7 +540,6 @@ async def persona_list() -> str:
             lines.append(f"  [override] {p.name}{marker}")
             found_any = True
 
-    # 内置模板
     builtin_dir = Path(str(SEARCH_PATH[-1])) if len(SEARCH_PATH) > 1 else None
     if builtin_dir and builtin_dir.is_dir():
         for p in sorted(builtin_dir.glob("*.jinja2")):

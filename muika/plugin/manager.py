@@ -12,12 +12,7 @@ from typing import TYPE_CHECKING, Optional
 
 from muika.plugin.exceptions import PluginLoadError
 from muika.plugin.lifecycle import run_unload_hooks
-from muika.plugin.loader import (
-    _plugins,
-    get_plugins,
-    reload_plugin,
-    unload_plugin,
-)
+from muika.plugin.loader import _plugins, get_plugins, reload_plugin, unload_plugin
 from muika.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -57,17 +52,18 @@ class PluginManager:
         return True
 
     def reload(self, package_name: str) -> bool:
-        """重载指定插件并在成功后刷新 Butler 工具列表。"""
+        """重载指定插件并刷新 Butler 工具列表。"""
         if package_name.startswith(_BUILTIN_PREFIX):
             logger.warning(f"[PluginManager] refusing to reload builtin plugin {package_name!r}")
             return False
         try:
             reload_plugin(package_name)
-            self.refresh_butler()
             return True
         except PluginLoadError as exc:
             logger.error(str(exc))
             return False
+        finally:
+            self.refresh_butler()
 
     def reload_all_user_plugins(self) -> list[str]:
         """重载所有用户插件（非 builtin）。返回成功重载的 package_name 列表。"""

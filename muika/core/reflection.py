@@ -22,20 +22,15 @@ from muika.database.crud import SelfModificationCRUD
 from muika.database.db import get_session
 from muika.utils.logger import logger
 
-# 夜间窗口：02:00 ~ 05:00（本地时间）
 NIGHT_START_HOUR = 2
 NIGHT_END_HOUR = 5
 
-# 未自省会话数下限（archives 中 period_end > last_reflection_at 的条数）
 MIN_PENDING_SESSIONS = 5
 
-# 变更叙事过期天数
 CHANGE_MEMORY_TTL_DAYS = 7
 
-# REFLECTION_OUTCOME 行提取正则
 _OUTCOME_RE = re.compile(r"\[REFLECTION_OUTCOME\]\s*(.+)")
 
-# 喂给 REFLECTION_PROMPT 的最大摘要数
 MAX_SUMMARIES = 8
 
 
@@ -131,7 +126,6 @@ class ReflectionAgent:
             topic_stats=topic_stats,
         )
 
-        # 审计快照
         async with get_session() as db_session:
             before_records = await SelfModificationCRUD.list_recent(db_session, limit=1)
             before_id = before_records[0].id if before_records else 0
@@ -140,7 +134,6 @@ class ReflectionAgent:
         report, _ = await self._butler.execute_command(instruction, self._state, self._executor)
         logger.info(f"[Reflection] Butler report ({len(report)} chars)")
 
-        # 审计对比
         async with get_session() as db_session:
             after_records = await SelfModificationCRUD.list_recent(db_session, limit=1)
             after_record = after_records[0] if after_records else None
@@ -149,7 +142,6 @@ class ReflectionAgent:
         changed = after_id > before_id
         now = datetime.now()
 
-        # 恒写冷却锚点（CORE:SELF 层，天然持久化）
         await self._memory.upsert_memory(
             layer=MemoryLayer.CORE,
             category=MemoryCategory.SELF,
@@ -157,7 +149,6 @@ class ReflectionAgent:
             value=now.isoformat(),
         )
 
-        # 有变更 → 写 STATE 层叙事（Resume 时注入，让她自然提起"我最近换了个说法"）
         outcome = _extract_outcome(report)
         if changed and after_record is not None:
             logger.info(
@@ -174,7 +165,6 @@ class ReflectionAgent:
         else:
             logger.debug("[Reflection] no self-modification in this reflection")
 
-        # 在线触发 → 发送 outcome 句；session_end 触发静默
         if notify_user and outcome:
             await self._executor.send_message(outcome)
 

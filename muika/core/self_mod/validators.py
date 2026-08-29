@@ -35,13 +35,10 @@ def validate_content(path: Path, content: str) -> None:
         _validate_yaml_syntax(content)
     elif suffix == ".py":
         validate_python(content)
-    # .md 与其他文本类型直接放行
 
 
 def validate_template(content: str) -> None:
     """校验 Jinja2 人格模板：语法检查 + 用最小数据试渲染。"""
-    # 延迟导入，避免 loader <-> self_mod 模块级循环依赖
-
     from muika.core.state import MuikaState
     from muika.template.loader import SEARCH_PATH
     from muika.template.model import PromptTemplatesData

@@ -19,8 +19,6 @@ from muika.core.reflection import (
     _in_night_window,
 )
 
-# --------------------------------------------------------------------------- helpers
-
 
 class FakeButler:
     """裸 Butler stub；只实现 ReflectionAgent 所需的 execute_command。"""
@@ -72,7 +70,6 @@ def _seed_archive(memory: MemoryManager, days_ago: int, summary: str = "session 
         period_end=now - timedelta(days=days_ago),
     )
     memory.archives.append(archive)
-    # 按 period_end 排序，确保 _pending_session_count 稳定
     memory.archives.sort(key=lambda a: a.period_end)
 
 
@@ -94,9 +91,6 @@ def _patch_datetime_now(monkeypatch, value: datetime) -> None:
     monkeypatch.setattr("muika.core.reflection.datetime", _FakeDatetime)
 
 
-# --------------------------------------------------------------------------- _in_night_window
-
-
 def test_in_night_window_inside():
     assert _in_night_window(datetime(2026, 1, 1, 2, 0)) is True
     assert _in_night_window(datetime(2026, 1, 1, 3, 15)) is True
@@ -116,9 +110,6 @@ def test_night_window_boundary():
     assert _in_night_window(datetime(2026, 1, 1, NIGHT_END_HOUR, 0)) is False
 
 
-# --------------------------------------------------------------------------- _extract_outcome
-
-
 def test_extract_outcome_found():
     report = "... lots of text ...\n[REFLECTION_OUTCOME] I tweaked my morning greeting."
     assert _extract_outcome(report) == "I tweaked my morning greeting."
@@ -133,9 +124,6 @@ def test_extract_outcome_missing():
     report = "I looked through the files and nothing needed changing."
     fallback = _extract_outcome(report)
     assert "think about myself" in fallback
-
-
-# --------------------------------------------------------------------------- gates
 
 
 @pytest.mark.asyncio
@@ -189,7 +177,6 @@ async def test_gate_cooldown_not_elapsed(monkeypatch):
     _patch_datetime_now(monkeypatch, now)
 
     memory = MemoryManager(max_turns=3)
-    # 写入一个 1 小时前的冷却锚点（< 24h）
     memory.records["core:self:self_reflection_last_at"] = MagicMock(value=(now - timedelta(hours=1)).isoformat())
     for i in range(MIN_PENDING_SESSIONS):
         _seed_archive(memory, days_ago=MIN_PENDING_SESSIONS - i)
@@ -206,7 +193,6 @@ async def test_gate_pending_sessions_too_few(monkeypatch):
     _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
 
     agent = _make_agent()
-    # 只塞 3 条 archives，低于 MIN_PENDING_SESSIONS (5)
     for i in range(3):
         _seed_archive(agent._memory, days_ago=3 - i)
 
@@ -219,7 +205,6 @@ async def test_gate_passes_all(monkeypatch, db_session, session_ctx_factory):
     monkeypatch.setattr(mas_config, "enable_self_modification", True)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
     _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
-    # 把 reflection.py 与 memory.py 的延迟 get_session 都重定向到测试 DB
     factory = lambda: session_ctx_factory(db_session)  # noqa: E731
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
@@ -231,18 +216,13 @@ async def test_gate_passes_all(monkeypatch, db_session, session_ctx_factory):
 
     await agent._run_reflection(notify_user=False)
     assert len(butler.calls) == 1
-    # 冷却锚点必然写入
     assert "core:self:self_reflection_last_at" in agent._memory.records
-
-
-# --------------------------------------------------------------------------- force_reflect
 
 
 @pytest.mark.asyncio
 async def test_force_reflect_skips_gates(monkeypatch, db_session, session_ctx_factory):
     monkeypatch.setattr(mas_config, "enable_self_modification", True)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
-    # 白天也强制自省
     _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, 14, 0))
     factory = lambda: session_ctx_factory(db_session)  # noqa: E731
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
@@ -269,12 +249,8 @@ async def test_force_reflect_outcome_not_sent_when_no_marker(monkeypatch, db_ses
     agent = _make_agent(butler=butler, executor=executor)
 
     await agent.force_reflect()
-    # 兜底句也会发出
     assert len(executor.messages) == 1
     assert "think about myself" in executor.messages[0]
-
-
-# --------------------------------------------------------------------------- _gather_context
 
 
 @pytest.mark.asyncio
@@ -285,7 +261,6 @@ async def test_gather_context_caps_at_max_summaries():
 
     agent = _make_agent(memory=memory)
     ctx = await agent._gather_context(last_at=None)
-    # 最多 MAX_SUMMARIES 条
     assert ctx.count("- [") == MAX_SUMMARIES
 
 
@@ -295,7 +270,6 @@ async def test_gather_context_filters_by_last_at():
     for i in range(10):
         _seed_archive(memory, days_ago=10 - i, summary=f"session {i}")
 
-    # last_at = 5 天前 → 只有 days_ago 1..4 的 archive 满足 period_end > last_at（严格 >）
     last_at = datetime.now() - timedelta(days=5)
     agent = _make_agent(memory=memory)
     ctx = await agent._gather_context(last_at=last_at)
@@ -308,9 +282,6 @@ async def test_gather_context_empty():
     agent = _make_agent(memory=memory)
     ctx = await agent._gather_context(last_at=None)
     assert "no recent session summaries" in ctx
-
-
-# --------------------------------------------------------------------------- concurrency guard
 
 
 @pytest.mark.asyncio
@@ -330,15 +301,10 @@ async def test_run_reflection_not_concurrent(monkeypatch, db_session, session_ct
     butler.execute_command = slow_execute  # type: ignore[assignment]
 
     agent = _make_agent(butler=butler)
-    # 并发启动两次；第二次应该被 _running 拦掉
     t1 = asyncio.create_task(agent._run_reflection())
     t2 = asyncio.create_task(agent._run_reflection())
     await asyncio.gather(t1, t2)
-    # slow_execute 不通过 FakeButler.calls 计数；只校验锁已释放
     assert agent._running is False
-
-
-# --------------------------------------------------------------------------- plugin
 
 
 def test_reflect_plugin_module_structure():

@@ -30,8 +30,8 @@ class PluginFileHandler(FileSystemEventHandler):
         self._manager = manager
         self._plugins_dir = plugins_dir.resolve()
         self._base_path = base_path
-        self._cooldown = 1.0  # 秒
-        self._last_triggered: float = 0.0
+        self._cooldown = 1.0
+        self._last_triggered: dict[tuple[str, bool], float] = {}
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -41,14 +41,21 @@ class PluginFileHandler(FileSystemEventHandler):
 
     def _on_any_event(self, event) -> None:
         src = Path(event.src_path).resolve()
-        # 只关心 plugins_dir 下第一级子项（文件 / 子目录）的变化
+        if event.event_type == "moved":
+            self._handle_path(src, is_delete=True)
+            dest_path = getattr(event, "dest_path", None)
+            if dest_path:
+                self._handle_path(Path(dest_path).resolve(), is_delete=False)
+            return
+        self._handle_path(src, is_delete=event.event_type == "deleted")
+
+    def _handle_path(self, src: Path, is_delete: bool) -> None:
         try:
             src.relative_to(self._plugins_dir)
         except ValueError:
             return
 
         rel = src.relative_to(self._plugins_dir)
-        # 忽略管理目录、缓存与临时文件
         if any(p in {"_staging", "_quarantine", "__pycache__"} for p in rel.parts):
             return
         if src.suffix in {".pyc", ".tmp"} or src.name.startswith(".") or src.name.endswith("~"):
@@ -58,15 +65,16 @@ class PluginFileHandler(FileSystemEventHandler):
         if package_name is None or self._manager.is_watcher_suppressed(package_name):
             return
 
-        current = time.time()
+        current = time.monotonic()
+        trigger_key = (package_name, is_delete)
         with self._lock:
-            if current - self._last_triggered < self._cooldown:
+            if current - self._last_triggered.get(trigger_key, 0.0) < self._cooldown:
                 return
-            self._last_triggered = current
+            self._last_triggered[trigger_key] = current
 
-        is_delete = event.event_type == "deleted"
+        action = "deleted" if is_delete else "changed"
         logger.info(
-            f"[PluginWatcher] {event.event_type} on {src.relative_to(self._plugins_dir)} "
+            f"[PluginWatcher] {action} {src.relative_to(self._plugins_dir)} "
             f"→ {'unload' if is_delete else 'reload'} {package_name!r}"
         )
 
@@ -76,7 +84,6 @@ class PluginFileHandler(FileSystemEventHandler):
                 self._dispatch(package_name, is_delete),
             )
         else:
-            # 同步 fallback（不应发生在 Core 运行时；仅供测试）
             self._dispatch_sync(package_name, is_delete)
 
     on_created = _on_any_event
@@ -99,15 +106,17 @@ class PluginFileHandler(FileSystemEventHandler):
 
         top = self._plugins_dir / parts[0]
 
-        # 情况 1：plugins/<name>.py
-        if len(parts) == 1 and top.is_file() and top.suffix == ".py":
+        if len(parts) == 1 and top.suffix == ".py" and top.name != "__init__.py":
             return path_to_module_name(top.with_suffix(""), self._base_path)
 
-        # 情况 2 / 3：plugins/<name>/...
+        if not top.exists():
+            return path_to_module_name(top, self._base_path)
         if not top.is_dir():
             return None
         init = top / "__init__.py"
         if init.exists():
+            return path_to_module_name(top, self._base_path)
+        if src.name == "__init__.py":
             return path_to_module_name(top, self._base_path)
         subdir_name = top.name.lower().replace("-", "_")
         subdir = top / subdir_name

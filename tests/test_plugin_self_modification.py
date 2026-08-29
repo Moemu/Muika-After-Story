@@ -6,9 +6,11 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from muika.builtin_plugins import plugins as plugins_command
 from muika.config import mas_config
 from muika.core.actions.tools import _self_edit
 from muika.core.actions.tools._plugin import plugin_load
@@ -288,6 +290,16 @@ async def test_plugin_load_tool_activates_staged_candidate(deploy_env, monkeypat
     report = await plugin_load("manual")
     assert "Plugin activated" in report
     assert "plugins.manual" in get_plugins()
+
+
+@pytest.mark.asyncio
+async def test_quarantine_restore_response_hides_internal_tool_name(monkeypatch):
+    deployer = SimpleNamespace(restore_quarantine=AsyncMock(return_value="Call plugin_load(name='x')"))
+    monkeypatch.setattr(plugins_command, "get_plugin_deployer", lambda: deployer)
+
+    report = await plugins_command._restore_quarantine("q-20260829000000-12345678")
+
+    assert "plugin_load" not in report
 
 
 def test_feature_switch_rejects_plugin_writes(deploy_env, monkeypatch):

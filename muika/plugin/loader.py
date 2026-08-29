@@ -92,8 +92,6 @@ def load_plugin(module_name: str) -> Plugin:
 
     except Exception as e:
         logger.error(f"加载插件 '{module_name}' 失败: {e}")
-        # 回滚失败加载的部分副作用：避免 _declared_plugins 永久毒化、
-        # 或残留半途注册的 commands / func_calls / hooks（否则修复后无法重新加载）
         _declared_plugins.discard(module_name)
         _plugins.pop(module_name, None)
         _purge_side_effects(module_name)
@@ -107,7 +105,6 @@ def load_plugin(module_name: str) -> Plugin:
 
 def _purge_side_effects(package_name: str) -> None:
     """清理指定插件包注册的全部 commands / func_calls 及 sys.modules 条目。"""
-    # 延迟 import 避免循环依赖
     from .command import remove_commands_for_plugin
     from .func_call.caller import remove_callers_for_plugin
 
@@ -115,7 +112,6 @@ def _purge_side_effects(package_name: str) -> None:
     removed_calls = remove_callers_for_plugin(package_name)
     logger.debug(f"[PluginLoader] purge {package_name!r}: removed {removed_cmds} commands, {removed_calls} func_calls")
 
-    # 清除 sys.modules 中该 package 及其子模块，以便下次加载重新执行模块代码
     for mod_name in [m for m in sys.modules if m == package_name or m.startswith(f"{package_name}.")]:
         del sys.modules[mod_name]
     clear_hooks(package_name)

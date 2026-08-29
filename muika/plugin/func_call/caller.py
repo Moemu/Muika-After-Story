@@ -61,7 +61,6 @@ class Caller:
             module_name = ""
         self.module_name = module_name
 
-        # 读取当前加载的插件包名作为所有权标记
         from ..loader import _loading_plugin
 
         self.plugin_package = _loading_plugin.get()

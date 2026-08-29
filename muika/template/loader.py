@@ -5,6 +5,8 @@ from typing import Optional
 from jinja2 import Environment, FileSystemLoader
 from jinja2.exceptions import TemplateNotFound
 
+from muika.utils.logger import logger
+
 from .model import PromptTemplatesData
 
 _BUILTIN_TEMPLATES_DIR = Path(__file__).parent.parent / "builtin_templates"
@@ -23,8 +25,7 @@ def generate_prompt_from_template(
     :param template_name: 模板文件名
     :param templates_data: 渲染数据
 
-    :raises TemplateNotFound: 模板不存在
-    :raises RuntimeError: 模板渲染失败
+    :return: 渲染后的提示词；模板不可用时返回空字符串
     """
     if not template_name.endswith((".j2", ".jinja2")):
         template_name += ".jinja2"
@@ -36,7 +37,9 @@ def generate_prompt_from_template(
     try:
         prompt = env.get_template(template_name).render(render_data)
     except TemplateNotFound:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"模板 {template_name} 渲染失败: {e}") from e
+        logger.error(f"Template not found: {template_name}")
+        return ""
+    except Exception as exc:
+        logger.error(f"Template render failed for {template_name}: {exc}")
+        return ""
     return re.sub(r"\n{3,}", "\n\n", prompt).strip()

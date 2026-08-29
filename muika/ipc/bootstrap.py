@@ -272,9 +272,7 @@ async def run_core(
     load_plugins(BUILTIN_PLUGINS_PATH, mas_config.plugins_dir)
 
     bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
-    # 绑定 Butler 到 PluginManager，使 reload 后能重建 LLM 工具列表
     get_plugin_manager().bind_butler(bootstrap._muika.butler_agent)
-    # 启动用户插件目录监听（若启用）
     if mas_config.enable_plugin_hot_reload:
         start_plugin_watcher(get_plugin_manager(), Path(mas_config.plugins_dir))
 

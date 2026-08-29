@@ -11,9 +11,9 @@ The override takes priority when both exist. Delete the override to fall back to
 
 ## Workflow
 
-1. Use `read_file("muika/builtin_templates/Muika.md.jinja2")` to read the current built-in template.
-2. Use `write_file("templates/Muika.md.jinja2", <exact copy>)` to create the override. Always start from an exact copy — never write the template from memory.
-3. Use `edit_file("templates/Muika.md.jinja2", ...)` to make targeted changes to specific sections.
+1. Use `self_read("muika/builtin_templates/Muika.md.jinja2")` to read the current built-in template.
+2. Use `self_write("templates/Muika.md.jinja2", <exact copy>, <reason>)` to create the override. Always start from an exact copy — never write the template from memory.
+3. Use `self_edit`, review the preview, and use `self_edit_confirm` to make targeted changes.
 4. The change takes effect on the next conversation turn — no restart needed.
 
 ## Template structure
@@ -54,4 +54,4 @@ Use `{{ variable_name }}` to insert dynamic content. Undefined variables render 
 - **Never remove** the core identity section entirely — without it you won't know who you are.
 - **Keep Jinja2 syntax valid** — broken templates cause fallback to a minimal persona.
 - **Test incrementally** — make one change at a time and observe how it affects your next conversation.
-- **You can always revert** — if a change doesn't feel right, delete `templates/Muika.md.jinja2` to return to the built-in template.
+- **You can always revert** — use `self_revert("templates/Muika.md.jinja2")` to restore the prior version.

@@ -1,9 +1,8 @@
 """话题库管理工具：Muika 以结构化方式查询/新增/修改/删除单条话题种子。
 
-话题库文件（``muika/topics/topics.yml``）本身由这些工具以文本块手术的方式维护：
+话题库文件（``configs/topics.yml``）由这些工具以文本块手术的方式维护：
 LLM 只提供字段值，YAML 结构与其余内容绝不经过 LLM 转写，避免整文件覆写
-造成的内容丢失与格式劣化。变更直接校验 + 原子写入 + 重载，
-不走审计管线（话题是数据而非代码迭代）。
+造成的内容丢失与格式劣化。变更会校验、原子写入、重载并记录审计。
 """
 
 from __future__ import annotations
@@ -19,8 +18,9 @@ from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.self_mod import SelfModError
+from muika.core.self_mod.manager import get_self_mod_manager
 from muika.core.self_mod.validators import validate_topics
-from muika.core.topic_manager import TOPICS_PATH, get_topic_manager
+from muika.core.topic_manager import BUILTIN_TOPICS_PATH, TOPICS_PATH, get_topic_manager
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -49,7 +49,8 @@ _DISABLED_MSG = "Self-modification is disabled by configuration."
 
 def _read_topics_text() -> str:
     """读取话题库原文。"""
-    return TOPICS_PATH.read_text(encoding="utf-8")
+    path = TOPICS_PATH if TOPICS_PATH.is_file() else BUILTIN_TOPICS_PATH
+    return path.read_text(encoding="utf-8")
 
 
 def _parse_topics(text: str) -> list[dict]:
@@ -69,7 +70,6 @@ def _entry_spans(text: str) -> list[tuple[str, int, int]]:
     spans = []
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        # 剥离 YAML 双引号（_yaml_scalar 会将保留词 id 输出为 "..."）
         raw_id = m.group(1).strip().strip('"')
         spans.append((raw_id, m.start(), end))
     return spans
@@ -110,13 +110,14 @@ def _parse_tags(raw: str) -> list[str]:
     return tags
 
 
-async def _apply_topics_change(new_text: str, reason: str) -> str:
-    """校验并原子写入话题库，随后刷新运行中的话题索引。不走审计管线。"""
+async def _apply_topics_change(new_text: str, reason: str, action: str) -> str:
+    """校验并写入用户话题库，随后刷新索引并记录审计。"""
     validate_topics(new_text)
     _atomic_write_topics(new_text)
     topic_manager = get_topic_manager()
     if topic_manager is not None:
         topic_manager.reload_store()
+    await get_self_mod_manager().record_event(str(TOPICS_PATH), action, reason, source="self")
     logger.info(f"[Topics] topics.yml updated: {reason[:80]}")
     return f"Topic library updated. Reason: {reason}"
 
@@ -153,7 +154,6 @@ class TopicListParams(BaseModel):
     params=TopicListParams,
 )
 async def topic_list(category: str = "", keyword: str = "", limit: int = 30) -> str:
-    # topic_list 是只读查询，不受 enable_self_modification 门控
     try:
         entries = _parse_topics(_read_topics_text())
     except SelfModError as e:
@@ -243,7 +243,7 @@ async def topic_add(
         new_text = text.rstrip("\n") + "\n\n" + block
 
         try:
-            await _apply_topics_change(new_text, reason.strip())
+            await _apply_topics_change(new_text, reason.strip(), "topic_add")
         except SelfModError as e:
             return f"The new topic was rejected: {e}"
 
@@ -295,32 +295,32 @@ async def topic_update(
             return f"Topic {topic_id!r} not found. Use topic_list to see available ids."
 
         new_concept = concept.strip() or str(current.get("concept", ""))
-    new_category = (category.strip() or str(current.get("category", "misc"))).lower()
-    new_cooldown = cooldown_days if cooldown_days is not None else int(current.get("cooldown_days", 7))
-    try:
-        new_tags = _parse_tags(tags) if tags.strip() else list(current.get("tags") or [])
-    except SelfModError as e:
-        return str(e)
+        new_category = (category.strip() or str(current.get("category", "misc"))).lower()
+        new_cooldown = cooldown_days if cooldown_days is not None else int(current.get("cooldown_days", 7))
+        try:
+            new_tags = _parse_tags(tags) if tags.strip() else list(current.get("tags") or [])
+        except SelfModError as e:
+            return str(e)
 
-    if not new_concept:
-        return "'concept' cannot end up empty."
-    if not _NAME_RE.match(new_category):
-        return f"Invalid category {new_category!r}: use lowercase letters and '_'."
-    if not 1 <= int(new_cooldown) <= 365:
-        return "cooldown_days must be between 1 and 365."
+        if not new_concept:
+            return "'concept' cannot end up empty."
+        if not _NAME_RE.match(new_category):
+            return f"Invalid category {new_category!r}: use lowercase letters and '_'."
+        if not 1 <= int(new_cooldown) <= 365:
+            return "cooldown_days must be between 1 and 365."
 
-    spans_dict = dict((tid, (start, end)) for tid, start, end in _entry_spans(text))
-    if topic_id not in spans_dict:
-        return _SPAN_LOOKUP_ERROR.format(id=topic_id)
-    start, end = spans_dict[topic_id]
-    block = _format_entry(topic_id, new_category, new_concept, new_tags, new_cooldown)
-    separator = "\n" if end < len(text) else ""
-    new_text = text[:start] + block + separator + text[end:]
+        spans_dict = dict((tid, (start, end)) for tid, start, end in _entry_spans(text))
+        if topic_id not in spans_dict:
+            return _SPAN_LOOKUP_ERROR.format(id=topic_id)
+        start, end = spans_dict[topic_id]
+        block = _format_entry(topic_id, new_category, new_concept, new_tags, new_cooldown)
+        separator = "\n" if end < len(text) else ""
+        new_text = text[:start] + block + separator + text[end:]
 
-    try:
-        await _apply_topics_change(new_text, reason.strip())
-    except SelfModError as e:
-        return f"The change was rejected: {e}"
+        try:
+            await _apply_topics_change(new_text, reason.strip(), "topic_update")
+        except SelfModError as e:
+            return f"The change was rejected: {e}"
 
     logger.info(f"[Topics] Updated topic {topic_id!r}")
     return f"Topic {topic_id!r} updated. The new version is already active.\n{block.rstrip()}"
@@ -355,15 +355,15 @@ async def topic_delete(id: str, reason: str = "") -> str:
             return f"Topic {topic_id!r} not found. Use topic_list to see available ids."
 
         spans_dict = dict((tid, (start, end)) for tid, start, end in _entry_spans(text))
-    if topic_id not in spans_dict:
-        return _SPAN_LOOKUP_ERROR.format(id=topic_id)
-    start, end = spans_dict[topic_id]
-    new_text = (text[:start] + text[end:]).rstrip("\n") + "\n"
+        if topic_id not in spans_dict:
+            return _SPAN_LOOKUP_ERROR.format(id=topic_id)
+        start, end = spans_dict[topic_id]
+        new_text = (text[:start] + text[end:]).rstrip("\n") + "\n"
 
-    try:
-        await _apply_topics_change(new_text, reason.strip())
-    except SelfModError as e:
-        return f"The deletion was rejected: {e}"
+        try:
+            await _apply_topics_change(new_text, reason.strip(), "topic_delete")
+        except SelfModError as e:
+            return f"The deletion was rejected: {e}"
 
     logger.info(f"[Topics] Deleted topic {topic_id!r}")
     return f"Topic {topic_id!r} removed from the library ({len(entries) - 1} topics remaining)."

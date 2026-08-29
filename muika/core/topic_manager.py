@@ -55,8 +55,10 @@ TOPIC_WEIGHTS: dict[str, float] = {
     "meta": 0.05,
 }
 
-TOPICS_PATH = Path(__file__).parent.parent / "topics" / "topics.yml"
-"""话题种子库文件路径"""
+TOPICS_PATH = Path("configs/topics.yml")
+"""用户话题库路径。"""
+BUILTIN_TOPICS_PATH = Path(__file__).parent.parent / "topics" / "topics.yml"
+"""包内默认话题库路径。"""
 
 _RECENT_TYPE_PENALTY: float = 0.25
 _RECENT_TYPE_WINDOW: int = 3
@@ -65,10 +67,16 @@ _RECENT_TYPE_WINDOW: int = 3
 class TopicStore:
     """从 YAML 文件加载并索引静态话题种子"""
 
-    def __init__(self, path: Path = TOPICS_PATH) -> None:
+    def __init__(self, path: Optional[Path] = None) -> None:
         self._path = path
         self._by_category: dict[str, list[StaticTopic]] = {}
         self.reload()
+
+    def _current_path(self) -> Path:
+        """返回当前生效的用户或包内话题库路径。"""
+        if self._path is not None:
+            return self._path
+        return TOPICS_PATH if TOPICS_PATH.is_file() else BUILTIN_TOPICS_PATH
 
     def _load_from(self, path: Path) -> dict[str, list[StaticTopic]]:
         new_map: dict[str, list[StaticTopic]] = {}
@@ -77,7 +85,6 @@ class TopicStore:
         if not isinstance(data, dict):
             raise ValueError("topics.yml must be a mapping containing a 'topics' list")
         for entry in data.get("topics", []):
-            # 兼容旧字段：如果存在 content 则作为 content
             concept = entry.get("concept", entry.get("content", ""))
             topic = StaticTopic(
                 id=entry["id"],
@@ -92,10 +99,11 @@ class TopicStore:
 
     def reload(self) -> None:
         """重新解析话题文件并原子替换索引；解析失败时保留旧话题。"""
+        path = self._current_path()
         try:
-            new_map = self._load_from(self._path)
+            new_map = self._load_from(path)
         except FileNotFoundError:
-            logger.warning(f"[TopicStore] topics.yml not found at {self._path} — static topics disabled")
+            logger.warning(f"[TopicStore] topics.yml not found at {path} — static topics disabled")
             return
         except Exception as e:
             logger.error(f"[TopicStore] Failed to (re)load topics.yml, keeping previous topics: {e}")

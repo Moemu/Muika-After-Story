@@ -6,7 +6,7 @@ from arclet.alconna import Alconna, Args, CommandMeta, Subcommand
 
 from muika.core.self_mod.plugin_deployer import get_plugin_deployer
 from muika.plugin.command import on_alconna
-from muika.plugin.manager import PluginManager, get_plugin_manager
+from muika.plugin.manager import PluginManager
 from muika.plugin.models import PluginMetadata
 
 metadata = PluginMetadata(
@@ -69,8 +69,8 @@ async def _unload(name: str, manager: PluginManager) -> str:
 async def _restore_quarantine(quarantine_id: str) -> str:
     """恢复指定隔离插件。"""
     try:
-        report = await get_plugin_deployer().restore_quarantine(quarantine_id)
-        return report + "\n[System] 该候选尚未激活。请让 Muika 调用 plugin_load。"
+        await get_plugin_deployer().restore_quarantine(quarantine_id)
+        return "[System] 该候选已通过重新验证，但尚未激活。Muika 可以在准备好后启用它。"
     except Exception as exc:
         return f"[System] 隔离插件恢复失败：{exc}"
 
@@ -95,20 +95,3 @@ async def _list(manager: PluginManager) -> str:
             f"- {info['name']} ({package_name}) {tag} " f"— cmds: {info['commands']}, tools: {info['func_calls']}"
         )
     return "\n".join(lines)
-
-
-# 注入 DI 表：CommandDispatcher 需要能注入 PluginManager
-# 插件被加载时（此时 CommandDispatcher 已 setup），立即注册到 DI 表
-def _register_di() -> None:
-    """确保 PluginManager 已注册到 CommandDispatcher DI 表。"""
-    from muika.plugin.command import CommandDispatcher
-
-    try:
-        dispatcher = CommandDispatcher.get()
-    except RuntimeError:
-        return
-    if PluginManager not in dispatcher._injections:
-        dispatcher._injections[PluginManager] = get_plugin_manager()
-
-
-_register_di()

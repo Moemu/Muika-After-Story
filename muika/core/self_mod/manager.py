@@ -10,6 +10,7 @@ from typing import Optional
 from muika.config import mas_config
 from muika.database.crud import SelfModificationCRUD
 from muika.database.db import get_session
+from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
 
 from .policy import SelfModError, display_path, infer_layer, resolve_self_path
@@ -21,10 +22,6 @@ class SelfModManager:
 
     def __init__(self) -> None:
         self._backup_dir = Path(mas_config.self_mod_backup_dir)
-
-    # ------------------------------------------------------------------
-    # 公共 API
-    # ------------------------------------------------------------------
 
     async def apply(
         self,
@@ -66,11 +63,12 @@ class SelfModManager:
             after_path=after_path_rel,
             source=source,
         )
+        refresh_note = self._refresh_runtime(layer)
 
         logger.info(f"[SelfMod] {rel} updated by {source} (revision #{revision_id}): {reason[:80]}")
         return (
             f"Self-modification applied (revision #{revision_id}): {rel}\n"
-            f"Layer: {layer}. The change takes effect immediately.\n"
+            f"Layer: {layer}.{refresh_note}\n"
             f"Reason recorded: {reason}\n"
             f"Use self_revert(path={rel!r}) if you want to undo this."
         )
@@ -101,14 +99,12 @@ class SelfModManager:
 
             before_path_rel: Optional[str] = record.before_path
             target_id = record.id
-            record.status = "reverted"  # 已回滚的写入不再作为缺省 revert 目标
 
         current_text: Optional[str] = None
         if resolved.exists():
             current_text = resolved.read_text(encoding="utf-8", errors="replace")
 
         if before_path_rel is None:
-            # 该版本之前文件不存在——回滚即删除
             if resolved.exists():
                 resolved.unlink()
             report_action = "deleted (restored to built-in / non-existent state)"
@@ -119,6 +115,12 @@ class SelfModManager:
             self._atomic_write(resolved, target_text)
             after_path_rel = self._write_snapshot(resolved, target_text, suffix=".after")
             report_action = f"restored to the state before revision #{target_id}"
+
+        async with get_session() as session:
+            applied_record = await SelfModificationCRUD.get_by_id(session, target_id)
+            if applied_record is None:
+                raise SelfModError(f"Revision #{target_id} disappeared before its status could be updated.")
+            applied_record.status = "reverted"
 
         await self._audit(
             layer=layer,
@@ -131,8 +133,9 @@ class SelfModManager:
             after_path=after_path_rel,
             source="self",
         )
+        refresh_note = self._refresh_runtime(layer)
         logger.info(f"[SelfMod] {rel} reverted (target revision #{target_id})")
-        return f"Reverted {rel}: {report_action}."
+        return f"Reverted {rel}: {report_action}.{refresh_note}"
 
     async def read_revert_target(self, raw_path: str, revision_id: Optional[int] = None) -> Optional[str]:
         """读取回滚目标内容，不修改文件或审计记录。"""
@@ -153,7 +156,6 @@ class SelfModManager:
         """返回审计日志摘要文本。"""
         path_filter: Optional[str] = None
         if raw_path:
-            # 仅用于审计查询（只读）
             resolved = resolve_self_path(raw_path)
             path_filter = display_path(resolved)
 
@@ -182,10 +184,6 @@ class SelfModManager:
             source=source,
         )
 
-    # ------------------------------------------------------------------
-    # 内部实现
-    # ------------------------------------------------------------------
-
     def _write_snapshot(self, resolved: Path, text: str, suffix: str) -> str:
         """将快照写入备份目录，返回相对备份目录的文件名。"""
         self._backup_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +192,18 @@ class SelfModManager:
         filename = f"{ts}__{escaped}{suffix}"
         (self._backup_dir / filename).write_text(text, encoding="utf-8")
         return filename
+
+    @staticmethod
+    def _refresh_runtime(layer: str) -> str:
+        """刷新受文件变更影响的运行时索引。"""
+        if layer != "skill":
+            return " File saved."
+        try:
+            get_skill_manager().reload()
+            return " Skill registry refreshed."
+        except Exception as exc:
+            logger.error(f"[SelfMod] Skill registry refresh failed: {exc}")
+            return f" Skill registry refresh failed: {exc}."
 
     def _write_snapshot_text(self, rel_path: str, text: Optional[str], suffix: str) -> Optional[str]:
         """将文本快照写入备份目录（按相对路径命名），返回文件名；text 为 None 返回 None。"""
