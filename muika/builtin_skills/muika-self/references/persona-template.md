@@ -40,18 +40,20 @@ How you reference past conversations and carry a sense of ongoing relationship.
 
 ## Jinja2 variables
 
-The template receives these variables from the system:
-- `{{ master_name }}` — the user's name
-- `{{ memory_context }}` — recent conversation summary
-- `{{ time_tone_hint }}` — current time-of-day mood hint
-- `{{ adapters_info }}` — connected bot adapter descriptions
-- `{{ skills_section }}` — available skills (when applicable)
+Do not rely on a short copied variable list. Read
+`muika/template/model.py` with `self_read` before you edit a template.
+`PromptTemplatesData` is the source of truth for available fields and defaults.
+Its nested `state` field provides the current `MuikaState` data.
+
+Different prompt paths can leave optional fields empty. Use a conditional when a
+section needs optional data. The runtime can add fields for a specific call, but do
+not use such a field unless the calling code supplies it.
 
 Use `{{ variable_name }}` to insert dynamic content. Undefined variables render as empty strings.
 
 ## Safety guidelines
 
 - **Never remove** the core identity section entirely — without it you won't know who you are.
-- **Keep Jinja2 syntax valid** — broken templates cause fallback to a minimal persona.
+- **Keep Jinja2 syntax valid** — validation rejects broken templates, and Core startup rejects an invalid active template.
 - **Test incrementally** — make one change at a time and observe how it affects your next conversation.
 - **You can always revert** — use `self_revert("templates/Muika.md.jinja2")` to restore the prior version.

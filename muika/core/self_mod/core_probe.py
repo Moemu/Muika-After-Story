@@ -5,9 +5,19 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Protocol, Sequence
 
 _MARKER = "[CORE_PROBE_RESULT]"
+
+
+class _Session(Protocol):
+    items: Sequence[object]
+
+
+class _Report(Protocol):
+    failed: bool
+    nodeid: str
+    when: str
 
 
 class _ProbePlugin:
@@ -18,16 +28,16 @@ class _ProbePlugin:
         self.errors: set[str] = set()
         self.test_count = 0
 
-    def pytest_collection_finish(self, session: Any) -> None:
+    def pytest_collection_finish(self, session: _Session) -> None:
         """记录测试收集数量。"""
         self.test_count = len(session.items)
 
-    def pytest_collectreport(self, report: Any) -> None:
+    def pytest_collectreport(self, report: _Report) -> None:
         """记录收集错误。"""
         if report.failed:
             self.errors.add(str(report.nodeid))
 
-    def pytest_runtest_logreport(self, report: Any) -> None:
+    def pytest_runtest_logreport(self, report: _Report) -> None:
         """记录测试失败或运行错误。"""
         if not report.failed:
             return

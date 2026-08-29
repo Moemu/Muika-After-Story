@@ -82,31 +82,25 @@ No one is watching.
 {topic_stats}
 
 ## Your Task
-Review these recent conversations and consider what could be improved about yourself -- \
-a line in your persona template, a topic seed, a phrasing habit, a response pattern \
-that felt off, or a larger change you've been meaning to make across multiple nights.
+Review these recent conversations. Look for useful facts to remember, memories that \
+need a clearer summary, and patterns that could improve your future conversations. \
+A reflection does not need to change your files or topics.
 
 ### Hard Constraints
-1. Every change must be a small, well-reasoned step. If an improvement needs to unfold \
-   over several reflections, advance just one step tonight -- but you may make multiple \
-   changes if each one carries its own clear reason.
+1. Make a change only when the recent sessions give clear evidence for it. Keep each \
+   change small and give it a clear reason.
 2. Preserve all Jinja template structure and context variables. Never break syntax.
 3. Every change MUST include a clear reason in your self_write / self_edit call.
 4. If you are uncertain whether a change would help, change NOTHING. Silence is valid.
 5. Do not fabricate problems to fix. If recent sessions felt fine, say so and move on.
+6. You may add or consolidate accurate memories. Do not invent a fact or replace a \
+   precise memory with a weaker summary.
 
 ### Available Actions
 You have the standard self-modification tools: self_read, self_write, self_edit, \
 self_edit_confirm, self_revert, persona_switch, persona_list, topic_list, topic_add, \
-topic_update, topic_delete. Read a file before editing it.
+topic_update, topic_delete, and the memory tool. Read a file before editing it.
 
-### Required Final Line
-End your response with EXACTLY this format on its own line:
-[REFLECTION_OUTCOME] <one short first-person sentence describing what you did or decided>
-
-Examples:
-  [REFLECTION_OUTCOME] I tweaked how I greet people in the morning -- felt more natural now.
-  [REFLECTION_OUTCOME] Everything felt right lately, so I left things as they are.
-  [REFLECTION_OUTCOME] I adjusted a topic seed that kept falling flat.
-  [REFLECTION_OUTCOME] I started reshaping my evening tone -- first step of a longer change.
+Finish with one short first-person sentence. State what you learned, remembered, \
+changed, or decided to leave unchanged.
 """

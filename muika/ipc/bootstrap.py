@@ -38,6 +38,7 @@ from muika.models import Message, Resource
 from muika.plugin import CommandDispatcher, load_plugins
 from muika.plugin.manager import get_plugin_manager
 from muika.plugin.watcher import start_plugin_watcher, stop_plugin_watcher
+from muika.template.loader import validate_template_configuration
 from muika.utils.logger import init_logger, logger
 from muika.utils.utils import get_version
 
@@ -104,6 +105,8 @@ class CoreBootstrap:
     async def start(self) -> None:
         """Boot all components."""
         logger.info("Muika Core is booting...")
+
+        validate_template_configuration((mas_config.persona_template, mas_config.agent_template))
 
         self._register_handlers()
         self._register_adapter_callbacks()

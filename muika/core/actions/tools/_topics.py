@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.self_mod import SelfModError
-from muika.core.self_mod.manager import get_self_mod_manager
+from muika.core.self_mod.manager import SelfModAction, get_self_mod_manager
 from muika.core.self_mod.validators import validate_topics
 from muika.core.topic_manager import BUILTIN_TOPICS_PATH, TOPICS_PATH, get_topic_manager
 from muika.plugin.func_call import on_function_call
@@ -110,7 +110,7 @@ def _parse_tags(raw: str) -> list[str]:
     return tags
 
 
-async def _apply_topics_change(new_text: str, reason: str, action: str) -> str:
+async def _apply_topics_change(new_text: str, reason: str, action: SelfModAction) -> str:
     """校验并写入用户话题库，随后刷新索引并记录审计。"""
     validate_topics(new_text)
     _atomic_write_topics(new_text)

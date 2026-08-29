@@ -143,9 +143,6 @@ class TopicManager:
 
     async def _get_available_candidates(self) -> dict[str, list[tuple[StaticTopic, float]]]:
         """获取所有度过冷却期的话题，并根据历史互动率计算独立权重。"""
-        from muika.database.crud import TopicHistoryCRUD
-        from muika.database.db import get_session
-
         candidates: dict[str, list[tuple[StaticTopic, float]]] = {}
         try:
             async with get_session() as db_session:

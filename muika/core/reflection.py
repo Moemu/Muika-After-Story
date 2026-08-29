@@ -1,13 +1,8 @@
-"""自省代理：凌晨 2-5 点的 session 结束时刻、或由用户用 ``.reflect`` 命令主动驱动 Muika 安静地回顾自己。
-
-复用 Butler 内循环完成自我修改——"用户命令改"与"她自己决定改"
-走同一机制，只有指令来源不同。后续将演进为"做梦"机制并接入新的记忆系统，
-当前保持轻量、模块化。
-"""
+"""自省代理：每日定时回顾或由 ``.reflect`` 命令主动触发。"""
 
 from __future__ import annotations
 
-import re
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -22,38 +17,36 @@ from muika.database.crud import SelfModificationCRUD
 from muika.database.db import get_session
 from muika.utils.logger import logger
 
-NIGHT_START_HOUR = 2
-NIGHT_END_HOUR = 5
+REFLECTION_HOUR = 5
 
 MIN_PENDING_SESSIONS = 5
 
 CHANGE_MEMORY_TTL_DAYS = 7
 
-_OUTCOME_RE = re.compile(r"\[REFLECTION_OUTCOME\]\s*(.+)")
-
 MAX_SUMMARIES = 8
 
 
-def _in_night_window(now: datetime) -> bool:
-    """判断当前小时是否落在夜间窗口内（简单区间 ``[start, end)``）。"""
-    h = now.hour
-    return NIGHT_START_HOUR <= h < NIGHT_END_HOUR
+def seconds_until_reflection(now: datetime) -> float:
+    """返回距下一次每日反思的秒数。
+
+    :param now: 当前本地时间
+    :return: 非负等待秒数
+    """
+    target = now.replace(hour=REFLECTION_HOUR, minute=0, second=0, microsecond=0)
+    if target < now:
+        target += timedelta(days=1)
+    return max(0.0, (target - now).total_seconds())
 
 
 def _extract_outcome(report: str) -> str:
-    """从 Butler report 中提取 ``[REFLECTION_OUTCOME]`` 行；缺失时返回兜底句。"""
-    match = _OUTCOME_RE.search(report)
-    if match:
-        return match.group(1).strip()
+    """返回反思报告，空报告使用中性说明。"""
+    if report.strip():
+        return report.strip()
     return "I took some time to think about myself. Everything feels okay."
 
 
 class ReflectionAgent:
-    """自省代理：夜间 session 结束或 ``.reflect`` 命令触发。
-
-    门控按序短路：enable → 夜间窗口 → 冷却 → 未自省会话数 ≥ 5。
-    复用 :class:`ButlerAgent` 内循环执行修改，复用既有 self_* 工具。
-    """
+    """定时或按命令执行自省。"""
 
     def __init__(
         self,
@@ -169,16 +162,12 @@ class ReflectionAgent:
             await self._executor.send_message(outcome)
 
     async def maybe_reflect(self) -> None:
-        """门控按序短路：enable → 夜间窗口 → 冷却 → 未自省会话数。"""
+        """在开关、冷却和待处理会话满足时执行反思。"""
         if not (mas_config.enable_self_modification and mas_config.enable_auto_reflection):
             logger.debug("[Reflection] skipped: self-mod or auto-reflection disabled")
             return
 
         now = datetime.now()
-        if not _in_night_window(now):
-            logger.debug(f"[Reflection] skipped: not in night window ({now:%H:%M})")
-            return
-
         cooldown = timedelta(hours=mas_config.reflection_cooldown_hours)
         last_at = self._last_reflection_at()
         if last_at is not None and (now - last_at) < cooldown:
@@ -191,6 +180,14 @@ class ReflectionAgent:
             return
 
         await self._run_reflection(notify_user=False)
+
+    async def run_daily(self) -> None:
+        """每天本地时间 05:00 尝试一次自动反思。"""
+        while True:
+            delay = seconds_until_reflection(datetime.now())
+            logger.debug(f"[Reflection] next daily check in {delay:.0f} seconds")
+            await asyncio.sleep(delay)
+            await self.maybe_reflect()
 
     async def force_reflect(self) -> None:
         """跳过全部门控，供 ``.reflect`` 命令使用。"""

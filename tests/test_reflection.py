@@ -12,11 +12,10 @@ from muika.core.memory import ArchiveEntry, MemoryManager
 from muika.core.reflection import (
     MAX_SUMMARIES,
     MIN_PENDING_SESSIONS,
-    NIGHT_END_HOUR,
-    NIGHT_START_HOUR,
+    REFLECTION_HOUR,
     ReflectionAgent,
     _extract_outcome,
-    _in_night_window,
+    seconds_until_reflection,
 )
 
 
@@ -91,46 +90,33 @@ def _patch_datetime_now(monkeypatch, value: datetime) -> None:
     monkeypatch.setattr("muika.core.reflection.datetime", _FakeDatetime)
 
 
-def test_in_night_window_inside():
-    assert _in_night_window(datetime(2026, 1, 1, 2, 0)) is True
-    assert _in_night_window(datetime(2026, 1, 1, 3, 15)) is True
-    assert _in_night_window(datetime(2026, 1, 1, 4, 59)) is True
+def test_seconds_until_reflection_before_daily_time():
+    now = datetime(2026, 1, 1, REFLECTION_HOUR - 1, 0)
+
+    assert seconds_until_reflection(now) == 3600
 
 
-def test_outside_night_window_daytime():
-    assert _in_night_window(datetime(2026, 1, 1, 14, 0)) is False
+def test_seconds_until_reflection_after_daily_time():
+    now = datetime(2026, 1, 1, REFLECTION_HOUR + 1, 0)
+
+    assert seconds_until_reflection(now) == 23 * 3600
 
 
-def test_outside_night_window_early_morning():
-    assert _in_night_window(datetime(2026, 1, 1, 1, 59)) is False
+def test_extract_outcome_uses_plain_report():
+    report = "  I left my persona unchanged because recent conversations felt natural.  \n"
+    assert _extract_outcome(report) == "I left my persona unchanged because recent conversations felt natural."
 
 
-def test_night_window_boundary():
-    assert _in_night_window(datetime(2026, 1, 1, NIGHT_START_HOUR, 0)) is True
-    assert _in_night_window(datetime(2026, 1, 1, NIGHT_END_HOUR, 0)) is False
-
-
-def test_extract_outcome_found():
-    report = "... lots of text ...\n[REFLECTION_OUTCOME] I tweaked my morning greeting."
-    assert _extract_outcome(report) == "I tweaked my morning greeting."
-
-
-def test_extract_outcome_with_surrounding_whitespace():
-    report = "[REFLECTION_OUTCOME]   I changed a topic seed.  \n\n"
-    assert _extract_outcome(report) == "I changed a topic seed."
-
-
-def test_extract_outcome_missing():
+def test_extract_outcome_does_not_require_marker():
     report = "I looked through the files and nothing needed changing."
-    fallback = _extract_outcome(report)
-    assert "think about myself" in fallback
+    assert _extract_outcome(report) == report
 
 
 @pytest.mark.asyncio
 async def test_gate_self_mod_disabled(monkeypatch):
     monkeypatch.setattr(mas_config, "enable_self_modification", False)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
-    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
+    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, REFLECTION_HOUR, 0))
 
     agent = _make_agent()
     for i in range(MIN_PENDING_SESSIONS):
@@ -144,21 +130,7 @@ async def test_gate_self_mod_disabled(monkeypatch):
 async def test_gate_auto_reflection_disabled(monkeypatch):
     monkeypatch.setattr(mas_config, "enable_self_modification", True)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", False)
-    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
-
-    agent = _make_agent()
-    for i in range(MIN_PENDING_SESSIONS):
-        _seed_archive(agent._memory, days_ago=MIN_PENDING_SESSIONS - i)
-
-    await agent.maybe_reflect()
-    assert agent._butler.calls == []  # type: ignore[attr-defined]
-
-
-@pytest.mark.asyncio
-async def test_gate_outside_night_window(monkeypatch):
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
-    monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
-    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, 14, 0))
+    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, REFLECTION_HOUR, 0))
 
     agent = _make_agent()
     for i in range(MIN_PENDING_SESSIONS):
@@ -173,7 +145,7 @@ async def test_gate_cooldown_not_elapsed(monkeypatch):
     monkeypatch.setattr(mas_config, "enable_self_modification", True)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
     monkeypatch.setattr(mas_config, "reflection_cooldown_hours", 24)
-    now = datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0)
+    now = datetime(2026, 1, 1, REFLECTION_HOUR, 0)
     _patch_datetime_now(monkeypatch, now)
 
     memory = MemoryManager(max_turns=3)
@@ -190,7 +162,7 @@ async def test_gate_cooldown_not_elapsed(monkeypatch):
 async def test_gate_pending_sessions_too_few(monkeypatch):
     monkeypatch.setattr(mas_config, "enable_self_modification", True)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
-    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
+    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, REFLECTION_HOUR, 0))
 
     agent = _make_agent()
     for i in range(3):
@@ -204,12 +176,12 @@ async def test_gate_pending_sessions_too_few(monkeypatch):
 async def test_gate_passes_all(monkeypatch, db_session, session_ctx_factory):
     monkeypatch.setattr(mas_config, "enable_self_modification", True)
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
-    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
+    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, REFLECTION_HOUR, 0))
     factory = lambda: session_ctx_factory(db_session)  # noqa: E731
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
 
-    butler = FakeButler(report="[REFLECTION_OUTCOME] I tweaked a line.")
+    butler = FakeButler(report="I left my persona unchanged.")
     agent = _make_agent(butler=butler)
     for i in range(MIN_PENDING_SESSIONS):
         _seed_archive(agent._memory, days_ago=MIN_PENDING_SESSIONS - i)
@@ -228,7 +200,7 @@ async def test_force_reflect_skips_gates(monkeypatch, db_session, session_ctx_fa
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
 
-    butler = FakeButler(report="[REFLECTION_OUTCOME] Forced reflection done.")
+    butler = FakeButler(report="Forced reflection done.")
     executor = FakeExecutor()
     agent = _make_agent(butler=butler, executor=executor)
 
@@ -238,7 +210,7 @@ async def test_force_reflect_skips_gates(monkeypatch, db_session, session_ctx_fa
 
 
 @pytest.mark.asyncio
-async def test_force_reflect_outcome_not_sent_when_no_marker(monkeypatch, db_session, session_ctx_factory):
+async def test_force_reflect_sends_plain_report(monkeypatch, db_session, session_ctx_factory):
     _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, 14, 0))
     factory = lambda: session_ctx_factory(db_session)  # noqa: E731
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
@@ -250,7 +222,7 @@ async def test_force_reflect_outcome_not_sent_when_no_marker(monkeypatch, db_ses
 
     await agent.force_reflect()
     assert len(executor.messages) == 1
-    assert "think about myself" in executor.messages[0]
+    assert executor.messages[0] == "Just some text without the outcome marker."
 
 
 @pytest.mark.asyncio
@@ -286,11 +258,11 @@ async def test_gather_context_empty():
 
 @pytest.mark.asyncio
 async def test_run_reflection_not_concurrent(monkeypatch, db_session, session_ctx_factory):
-    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, NIGHT_START_HOUR + 1, 0))
+    _patch_datetime_now(monkeypatch, datetime(2026, 1, 1, REFLECTION_HOUR, 0))
     factory = lambda: session_ctx_factory(db_session)  # noqa: E731
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
-    butler = FakeButler(report="[REFLECTION_OUTCOME] done")
+    butler = FakeButler(report="done")
 
     import asyncio
 

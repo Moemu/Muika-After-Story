@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Optional, cast
 
 from arclet.alconna import Alconna, Args, Arparma, CommandMeta, Option, Subcommand
 
-from muika.core.self_mod.proposals import CoreProposalError, get_core_proposal_manager
+from muika.core.self_mod.proposals import (
+    CoreProposalError,
+    ProposalStatus,
+    get_core_proposal_manager,
+)
 from muika.plugin.command import on_alconna
 from muika.plugin.models import PluginMetadata
 
@@ -39,7 +44,20 @@ patch_cmd = on_alconna(alc)
 async def _list(status: str = "") -> str:
     """列出 Core 提案。"""
     try:
-        proposals = get_core_proposal_manager().list_proposals(status.strip())
+        raw_status = status.strip()
+        valid_statuses = {
+            "pending",
+            "applying",
+            "approved",
+            "denied",
+            "rolling_back",
+            "rolled_back",
+            "failed",
+        }
+        if raw_status and raw_status not in valid_statuses:
+            raise CoreProposalError(f"Unknown proposal status: {raw_status!r}.")
+        status_filter = cast(Optional[ProposalStatus], raw_status or None)
+        proposals = get_core_proposal_manager().list_proposals(status_filter)
     except CoreProposalError as exc:
         return f"[System] 无法列出提案：{exc}"
     if not proposals:

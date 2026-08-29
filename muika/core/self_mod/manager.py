@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from muika.config import mas_config
 from muika.database.crud import SelfModificationCRUD
@@ -13,8 +13,17 @@ from muika.database.db import get_session
 from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
 
-from .policy import SelfModError, display_path, infer_layer, resolve_self_path
+from .policy import (
+    SelfModError,
+    SelfModLayer,
+    display_path,
+    infer_layer,
+    resolve_self_path,
+)
 from .validators import validate_content
+
+SelfModSource = Literal["self", "command", "reflection", "restore", "recovery"]
+SelfModAction = Literal["write", "rollback", "stage", "restore", "topic_add", "topic_update", "topic_delete"]
 
 
 class SelfModManager:
@@ -28,7 +37,7 @@ class SelfModManager:
         raw_path: str,
         content: str,
         reason: str,
-        source: str = "self",
+        source: SelfModSource = "self",
     ) -> str:
         """应用一次自我修改，返回供 LLM 阅读的结果报告。
 
@@ -171,7 +180,13 @@ class SelfModManager:
             lines.append(f"  #{r.id} [{ts}] {r.action} ({r.layer}) {r.path} — {r.reason[:60]}")
         return "\n".join(lines)
 
-    async def record_event(self, raw_path: str, action: str, reason: str, source: str) -> int:
+    async def record_event(
+        self,
+        raw_path: str,
+        action: SelfModAction,
+        reason: str,
+        source: SelfModSource,
+    ) -> int:
         """记录不直接写文件的自我修改事件。"""
         resolved = Path(raw_path).resolve()
         return await self._audit(
@@ -194,7 +209,7 @@ class SelfModManager:
         return filename
 
     @staticmethod
-    def _refresh_runtime(layer: str) -> str:
+    def _refresh_runtime(layer: SelfModLayer) -> str:
         """刷新受文件变更影响的运行时索引。"""
         if layer != "skill":
             return " File saved."
@@ -243,13 +258,13 @@ class SelfModManager:
     @staticmethod
     async def _audit(
         *,
-        layer: str,
+        layer: SelfModLayer,
         path: str,
-        action: str,
+        action: SelfModAction,
         reason: str,
         before_path: Optional[str],
         after_path: Optional[str],
-        source: str,
+        source: SelfModSource,
     ) -> int:
         """写入一条审计记录并返回其 id；DB 不可用时降级为仅日志。"""
         try:

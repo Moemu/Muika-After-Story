@@ -10,7 +10,9 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
+from muika.plugin.command import _commands
 from muika.plugin.exceptions import PluginLoadError
+from muika.plugin.func_call.caller import _caller_data
 from muika.plugin.lifecycle import run_unload_hooks
 from muika.plugin.loader import _plugins, get_plugins, reload_plugin, unload_plugin
 from muika.utils.logger import logger
@@ -111,9 +113,6 @@ class PluginManager:
 
         返回 ``{package_name: {"name": ..., "commands": N, "func_calls": M, "is_builtin": bool}}``。
         """
-        from muika.plugin.command import _commands
-        from muika.plugin.func_call.caller import _caller_data
-
         result: dict[str, dict] = {}
         for package_name, plugin in _plugins.items():
             cmd_count = sum(1 for c in _commands if c.plugin_package == package_name)

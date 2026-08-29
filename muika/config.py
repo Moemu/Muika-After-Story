@@ -85,11 +85,11 @@ class MASConfig(BaseSettings):
     plugins_dir: str = "plugins"
     """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
 
-    enable_self_modification: bool = True
+    enable_self_modification: bool = False
     """开启 Muika 的内容自我修改能力。关闭时 self_* 工具全部禁用。"""
     enable_plugin_self_modification: bool = False
     """开启后允许 Muika 编写和修改自己的单文件插件。"""
-    enable_plugin_hot_reload: bool = True
+    enable_plugin_hot_reload: bool = False
     """开启 plugins/ 目录热重载监听。"""
     plugin_import_blacklist: List[str] = ["subprocess", "socket", "ctypes", "multiprocessing", "shutil"]
     """自写插件静态检查拒绝的顶层 import 模块名。"""

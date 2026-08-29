@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from muika.config import mas_config
 
@@ -25,6 +26,7 @@ _SANDBOX_PATHS: tuple[str, ...] = ("./templates", "./configs/skills")
 _READ_ONLY_ROOTS: tuple[Path, ...] = (
     Path(__file__).resolve().parents[2] / "builtin_templates",
     Path(__file__).resolve().parents[2] / "builtin_skills" / "muika-self",
+    Path(__file__).resolve().parents[2] / "template" / "model.py",
 )
 """自我修改指南可以观察的包内资源。"""
 
@@ -34,6 +36,9 @@ _EXCLUDED_PLUGIN_SUBDIRS = ("_quarantine", "_staging")
 
 class SelfModError(Exception):
     """自我修改被策略或校验拒绝时抛出，消息可直接展示给 LLM。"""
+
+
+SelfModLayer = Literal["template", "skill", "topic", "plugin", "other"]
 
 
 def _project_root() -> Path:
@@ -117,7 +122,7 @@ def display_path(resolved: Path) -> str:
         return str(resolved)
 
 
-def infer_layer(resolved: Path) -> str:
+def infer_layer(resolved: Path) -> SelfModLayer:
     """根据路径推断自我修改所属层级。"""
     rel = display_path(resolved)
     if rel.startswith("templates/"):

@@ -9,6 +9,9 @@ import yaml
 from jinja2 import Environment, FileSystemLoader
 
 from muika.config import mas_config
+from muika.core.state import MuikaState
+from muika.template.loader import SEARCH_PATH
+from muika.template.model import PromptTemplatesData
 
 from .policy import SelfModError
 
@@ -39,10 +42,6 @@ def validate_content(path: Path, content: str) -> None:
 
 def validate_template(content: str) -> None:
     """校验 Jinja2 人格模板：语法检查 + 用最小数据试渲染。"""
-    from muika.core.state import MuikaState
-    from muika.template.loader import SEARCH_PATH
-    from muika.template.model import PromptTemplatesData
-
     env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
 
     try:

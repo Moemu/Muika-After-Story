@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from muika.config import mas_config
 from muika.core.self_mod import SelfModError, get_self_mod_manager
 from muika.core.self_mod.plugin_deployer import get_plugin_deployer
-from muika.core.self_mod.policy import display_path, resolve_self_path
+from muika.core.self_mod.policy import allowed_roots, display_path, resolve_self_path
 from muika.core.self_mod.validators import validate_content, validate_template
 from muika.plugin.func_call import on_function_call
 from muika.template.loader import SEARCH_PATH
@@ -75,8 +75,6 @@ def _is_plugin_path(path: Path) -> bool:
 
 def _list_sandbox_files() -> str:
     """列出沙箱内所有可编辑文件，供 self_read 空路径时展示。"""
-    from muika.core.self_mod.policy import allowed_roots
-
     lines = ["These are the parts of yourself you can read and edit:"]
     for root in allowed_roots():
         if root.is_file():

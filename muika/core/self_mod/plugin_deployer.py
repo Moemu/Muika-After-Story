@@ -23,7 +23,7 @@ from muika.plugin.loader import get_plugins, load_plugin, reload_plugin, unload_
 from muika.plugin.manager import get_plugin_manager
 from muika.utils.logger import logger
 
-from .manager import get_self_mod_manager
+from .manager import SelfModSource, get_self_mod_manager
 from .policy import SelfModError, display_path, resolve_self_path
 from .validators import validate_content
 
@@ -58,7 +58,7 @@ class StagingRecord:
     candidate_sha256: str
     expected_base_sha256: Optional[str]
     reason: str
-    source: str
+    source: SelfModSource
 
 
 def _sha256_text(content: str) -> str:
@@ -130,12 +130,12 @@ class PluginDeployer:
             return False, message
         return True, message
 
-    async def deploy(self, path: str, content: str, reason: str, source: str = "self") -> str:
+    async def deploy(self, path: str, content: str, reason: str, source: SelfModSource = "self") -> str:
         """验证并部署单文件插件。"""
         async with _deploy_lock:
             return await self._deploy(path, content, reason, source)
 
-    async def deploy_new(self, path: str, content: str, reason: str, source: str = "self") -> str:
+    async def deploy_new(self, path: str, content: str, reason: str, source: SelfModSource = "self") -> str:
         """仅在正式插件仍不存在时部署。"""
         async with _deploy_lock:
             target, _ = self.resolve_plugin_path(path)
@@ -149,7 +149,7 @@ class PluginDeployer:
         content: str,
         reason: str,
         expected_sha256: str,
-        source: str = "self",
+        source: SelfModSource = "self",
     ) -> str:
         """仅在正式插件仍匹配预览哈希时部署。"""
         async with _deploy_lock:
@@ -158,7 +158,7 @@ class PluginDeployer:
                 raise SelfModError("The plugin changed after the preview. Create a new preview.")
             return await self._deploy(path, content, reason, source)
 
-    async def _deploy(self, path: str, content: str, reason: str, source: str) -> str:
+    async def _deploy(self, path: str, content: str, reason: str, source: SelfModSource) -> str:
         """在调用方持有部署锁时验证并暂存候选插件。"""
         target, module_name = self.resolve_plugin_path(path)
         validate_content(target, content)

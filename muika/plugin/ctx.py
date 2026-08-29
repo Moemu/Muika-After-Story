@@ -1,23 +1,20 @@
-"""插件生命周期装饰器门面：``ctx`` 单例。
+"""插件用于注册生命周期钩子和保存热重载状态的 ``ctx`` 单例。
 
 用法::
 
     from muika.plugin.ctx import ctx
 
-    state = ctx.state          # import 期绑定本插件的持久 dict（模块顶层绑定一次）
+    state = ctx.state
 
     @ctx.load
     def setup():
-        state.setdefault("db", create_engine(...))   # 热重载后取回同一对象
+        state.setdefault("client", create_client())
 
     @ctx.unload
     def teardown():
-        ...                       # 只释放代码侧资源，不动 state
+        close_resources()
 
-约定：
-- 钩子仅支持同步函数；``@ctx.load`` 为裸装饰器（不支持 ``@ctx.load()``）
-- ``state`` 必须在模块顶层绑定一次：钩子执行时加载上下文已复位，
-  运行期再访问 ``ctx.state`` 会抛 RuntimeError
+钩子必须是同步函数。请在模块顶层保存 ``ctx.state``。卸载不会删除该状态。
 """
 
 from __future__ import annotations
@@ -27,6 +24,7 @@ from typing import Any, Callable, TypeVar
 from muika.utils.logger import logger
 
 from .lifecycle import register_load_hook, register_unload_hook
+from .loader import _loading_plugin
 from .state import get_state
 
 _F = TypeVar("_F", bound=Callable[[], object])
@@ -38,15 +36,10 @@ def _hook_name(fn: Callable[[], object]) -> str:
 
 
 class _PluginCtx:
-    """插件生命周期装饰器门面。详见模块文档。"""
+    """为当前加载中的插件提供生命周期接口。"""
 
     def load(self, fn: _F) -> _F:
-        """注册 load 钩子：加载成功（模块导入完成）后按注册顺序执行。
-
-        所有权由装饰时刻的加载上下文判定；上下文缺失时警告并原样返回。
-        """
-        from .loader import _loading_plugin
-
+        """注册插件加载成功后按声明顺序执行的同步钩子。"""
         package_name = _loading_plugin.get()
         if package_name is None:
             logger.warning(f"[PluginCtx] @ctx.load used outside plugin loading: {_hook_name(fn)!r} not registered")
@@ -55,12 +48,7 @@ class _PluginCtx:
         return fn
 
     def unload(self, fn: _F) -> _F:
-        """注册 unload 钩子：卸载前按注册逆序（LIFO）执行。
-
-        所有权由装饰时刻的加载上下文判定；上下文缺失时警告并原样返回。
-        """
-        from .loader import _loading_plugin
-
+        """注册插件卸载前按声明逆序执行的同步钩子。"""
         package_name = _loading_plugin.get()
         if package_name is None:
             logger.warning(f"[PluginCtx] @ctx.unload used outside plugin loading: {_hook_name(fn)!r} not registered")
@@ -70,13 +58,11 @@ class _PluginCtx:
 
     @property
     def state(self) -> dict[str, Any]:
-        """当前插件的持久状态 dict（进程生命周期，热重载后存活）。
+        """返回当前插件在本次进程内跨热重载保留的状态。
 
-        必须在模块顶层绑定一次：``state = ctx.state``。
-        :raises RuntimeError: 在加载上下文之外访问（防止静默写丢状态）。
+        :return: 当前插件的状态字典
+        :raises RuntimeError: 当前不在插件加载过程
         """
-        from .loader import _loading_plugin
-
         package_name = _loading_plugin.get()
         if package_name is None:
             raise RuntimeError(
@@ -86,4 +72,3 @@ class _PluginCtx:
 
 
 ctx = _PluginCtx()
-"""插件侧使用的生命周期门面单例。"""

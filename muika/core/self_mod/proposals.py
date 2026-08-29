@@ -17,7 +17,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Literal, Mapping, Optional, Sequence, TypedDict, cast
 
 from muika.config import mas_config
 from muika.database.crud import SelfModificationCRUD
@@ -51,6 +51,103 @@ CORE_VALIDATE_OUTPUT_CAP_BYTES = 65536
 CORE_PATCH_SHOW_PAGE_LINES = 120
 
 _RUNTIME_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+
+ChangeAction = Literal["modify", "create", "delete"]
+ProposalStatus = Literal[
+    "pending",
+    "applying",
+    "approved",
+    "denied",
+    "rolling_back",
+    "rolled_back",
+    "failed",
+]
+ValidationStatus = Literal["passed", "failed", "unavailable"]
+ProbeStatus = Literal["completed", "failed", "unavailable"]
+SnapshotState = Literal["before", "after"]
+CoreAuditAction = Literal["core_approve", "core_rollback"]
+CoreProposalSource = Literal["self", "command", "reflection"]
+
+
+class PreparedChange(TypedDict):
+    action: ChangeAction
+    path: str
+    before_text: Optional[str]
+    after_text: Optional[str]
+
+
+class ProposalChange(TypedDict):
+    action: ChangeAction
+    path: str
+    sha256_before: Optional[str]
+    sha256_after: Optional[str]
+    before_snapshot: Optional[str]
+    after_snapshot: Optional[str]
+
+
+class ValidationSummary(TypedDict):
+    status: ValidationStatus
+    fingerprint: str
+    created_at: str
+    warnings: list[str]
+
+
+class ProbeReportBase(TypedDict):
+    status: ProbeStatus
+    reason: str
+    timed_out: bool
+    output: str
+    failures: list[str]
+    errors: list[str]
+    test_count: int
+
+
+class ProbeReport(ProbeReportBase, total=False):
+    fingerprint: str
+    measured_at: str
+
+
+class ValidationReport(TypedDict):
+    patch_id: str
+    fingerprint: str
+    created_at: str
+    status: ValidationStatus
+    reason: str
+    baseline: ProbeReport
+    candidate: ProbeReport
+    new_failures: list[str]
+    new_errors: list[str]
+    warnings: list[str]
+
+
+class CoreProposalBase(TypedDict):
+    schema_version: int
+    patch_id: str
+    status: ProposalStatus
+    reason: str
+    source: CoreProposalSource
+    source_root: str
+    created_at: str
+    workspace_fingerprint: str
+    changes: list[ProposalChange]
+    validation: Optional[ValidationSummary]
+    audit_errors: list[str]
+    warnings: list[str]
+
+
+class CoreProposal(CoreProposalBase, total=False):
+    applying_at: str
+    approved_at: str
+    approved_boot_id: str
+    denied_at: str
+    denial_reason: str
+    rolling_back_at: str
+    rolled_back_at: str
+    unvalidated_approval: bool
+    failure: str
+    recovery_errors: list[str]
+    recovery_note: str
+    recovered_at: str
 
 
 def is_core_maintenance_active() -> bool:
@@ -100,7 +197,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     os.replace(temporary, path)
 
 
-def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+def _atomic_write_json(path: Path, value: object) -> None:
     """原子写入 JSON 数据。"""
     _atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
@@ -183,7 +280,12 @@ class CoreProposalManager:
             digest.update(b"\0")
         return digest.hexdigest()
 
-    def create(self, changes: list[dict[str, Any]], reason: str, source: str = "self") -> str:
+    def create(
+        self,
+        changes: Sequence[Mapping[str, object]],
+        reason: str,
+        source: CoreProposalSource = "self",
+    ) -> str:
         """创建一个多文件 Core 提案。"""
         self._require_enabled()
         reason = reason.strip()
@@ -194,7 +296,7 @@ class CoreProposalManager:
         if len(changes) > CORE_PROPOSAL_MAX_FILES:
             raise CoreProposalError(f"Proposal exceeds the {CORE_PROPOSAL_MAX_FILES}-file limit.")
 
-        prepared: list[dict[str, Any]] = []
+        prepared: list[PreparedChange] = []
         seen: set[str] = set()
         total_bytes = 0
         for index, change in enumerate(changes):
@@ -214,7 +316,7 @@ class CoreProposalManager:
         before_dir = work_dir / "before"
         after_dir = work_dir / "after"
         diff_parts: list[str] = []
-        records: list[dict[str, Any]] = []
+        records: list[ProposalChange] = []
         for item in prepared:
             rel = item["path"]
             before_text = item.get("before_text")
@@ -240,7 +342,7 @@ class CoreProposalManager:
                 }
             )
 
-        proposal = {
+        proposal: CoreProposal = {
             "schema_version": 1,
             "patch_id": patch_id,
             "status": "pending",
@@ -259,12 +361,13 @@ class CoreProposalManager:
         os.replace(work_dir, patch_dir)
         return patch_id
 
-    def _prepare_change(self, change: dict[str, Any], index: int) -> dict[str, Any]:
+    def _prepare_change(self, change: Mapping[str, object], index: int) -> PreparedChange:
         """检查并展开一个文件变更。"""
-        action = str(change.get("action", "")).strip()
+        raw_action = str(change.get("action", "")).strip()
         raw_path = str(change.get("path", "")).strip()
-        if action not in {"modify", "create", "delete"}:
-            raise CoreProposalError(f"Change {index} has invalid action {action!r}.")
+        if raw_action not in {"modify", "create", "delete"}:
+            raise CoreProposalError(f"Change {index} has invalid action {raw_action!r}.")
+        action = cast(ChangeAction, raw_action)
         target = self.resolve_core_path(raw_path, for_write=True)
         rel = target.relative_to(self.project_root).as_posix()
         exists = target.is_file()
@@ -295,7 +398,7 @@ class CoreProposalManager:
         return {"action": action, "path": rel, "before_text": before_text, "after_text": after_text}
 
     @staticmethod
-    def _apply_replacements(text: str, replacements: Any, rel: str) -> str:
+    def _apply_replacements(text: str, replacements: object, rel: str) -> str:
         """按顺序应用唯一文本替换。"""
         if not isinstance(replacements, list) or not replacements:
             raise CoreProposalError(f"Modify change for {rel} requires replacements.")
@@ -325,7 +428,7 @@ class CoreProposalManager:
         path.write_text(content, encoding="utf-8")
         return path.relative_to(root.parent).as_posix()
 
-    def load(self, patch_id: str) -> dict[str, Any]:
+    def load(self, patch_id: str) -> CoreProposal:
         """读取一个提案记录。"""
         if not _PATCH_ID_RE.fullmatch(patch_id):
             raise CoreProposalError(f"Invalid patch id: {patch_id!r}.")
@@ -338,14 +441,14 @@ class CoreProposalManager:
             raise CoreProposalError(f"Proposal record is invalid: {patch_id}: {exc}") from exc
         if not isinstance(value, dict) or value.get("patch_id") != patch_id:
             raise CoreProposalError(f"Proposal record is invalid: {patch_id}.")
-        return value
+        return cast(CoreProposal, value)
 
-    def list_proposals(self, status: str = "") -> list[dict[str, Any]]:
+    def list_proposals(self, status: Optional[ProposalStatus] = None) -> list[CoreProposal]:
         """按创建时间倒序列出提案。"""
         self._require_enabled()
         if not self.proposals_root.is_dir():
             return []
-        proposals: list[dict[str, Any]] = []
+        proposals: list[CoreProposal] = []
         for path in self.proposals_root.iterdir():
             if not path.is_dir() or not _PATCH_ID_RE.fullmatch(path.name):
                 continue
@@ -353,11 +456,11 @@ class CoreProposalManager:
                 proposal = self.load(path.name)
             except CoreProposalError:
                 continue
-            if not status or proposal.get("status") == status:
+            if status is None or proposal.get("status") == status:
                 proposals.append(proposal)
         return sorted(proposals, key=lambda item: str(item.get("created_at", "")), reverse=True)
 
-    def is_stale(self, proposal: dict[str, Any]) -> bool:
+    def is_stale(self, proposal: CoreProposal) -> bool:
         """判断提案是否与当前工作区发生漂移。"""
         if proposal.get("status") != "pending":
             return False
@@ -403,7 +506,7 @@ class CoreProposalManager:
         ]
         return "\n".join(header + selected)
 
-    def _save(self, proposal: dict[str, Any]) -> None:
+    def _save(self, proposal: CoreProposal) -> None:
         """保存提案记录。"""
         _atomic_write_json(self.proposals_root / proposal["patch_id"] / "proposal.json", proposal)
 
@@ -427,7 +530,7 @@ class CoreProposalManager:
         )
         shutil.copytree(self.project_root, destination, ignore=ignored, dirs_exist_ok=True)
 
-    def _apply_candidate_to_copy(self, proposal: dict[str, Any], destination: Path) -> None:
+    def _apply_candidate_to_copy(self, proposal: CoreProposal, destination: Path) -> None:
         """把提案 after 快照应用到临时副本。"""
         patch_id = str(proposal["patch_id"])
         for change in proposal["changes"]:
@@ -451,7 +554,7 @@ class CoreProposalManager:
             return "pytest is not installed in the current Python environment."
         return None
 
-    def _run_probe(self, workspace: Path) -> dict[str, Any]:
+    def _run_probe(self, workspace: Path) -> ProbeReport:
         """在子进程中运行候选测试探针。"""
         probe_path = Path(__file__).with_name("core_probe.py")
         command = [sys.executable, str(probe_path)]
@@ -488,7 +591,7 @@ class CoreProposalManager:
                 "test_count": 0,
             }
         try:
-            result = json.loads(marker_line[len(_PROBE_MARKER) :])
+            decoded = json.loads(marker_line[len(_PROBE_MARKER) :])
         except json.JSONDecodeError as exc:
             return {
                 "status": "unavailable",
@@ -499,25 +602,27 @@ class CoreProposalManager:
                 "errors": [],
                 "test_count": 0,
             }
-        if not isinstance(result, dict):
+        if not isinstance(decoded, dict):
             raise CoreProposalError("Validation probe returned a non-object result.")
+        result = cast(ProbeReport, decoded)
         result["output"] = output
         return result
 
-    def _baseline_report(self, fingerprint: str) -> dict[str, Any]:
+    def _baseline_report(self, fingerprint: str) -> ProbeReport:
         """读取或动态测量工作区基线。"""
         cache_path = self.proposals_root / "_baseline" / f"{fingerprint}.json"
         if cache_path.is_file():
             try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                decoded = json.loads(cache_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
-                cached = None
+                decoded = None
+            cached = cast(ProbeReport, decoded) if isinstance(decoded, dict) else None
             if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
                 if cached.get("status") != "unavailable" or self._validation_environment_error() is not None:
                     return cached
         environment_error = self._validation_environment_error()
         if environment_error:
-            report = {
+            report: ProbeReport = {
                 "status": "unavailable",
                 "reason": environment_error,
                 "timed_out": False,
@@ -539,7 +644,7 @@ class CoreProposalManager:
         _atomic_write_json(cache_path, report)
         return report
 
-    def validate(self, patch_id: str, *, force: bool = False) -> dict[str, Any]:
+    def validate(self, patch_id: str, *, force: bool = False) -> ValidationReport:
         """验证一个候选提案并保存结构化报告。"""
         self._require_enabled()
         proposal = self.load(patch_id)
@@ -556,9 +661,9 @@ class CoreProposalManager:
             and current.get("fingerprint") == fingerprint
             and validation_path.is_file()
         ):
-            report = json.loads(validation_path.read_text(encoding="utf-8"))
-            if isinstance(report, dict):
-                return report
+            decoded = json.loads(validation_path.read_text(encoding="utf-8"))
+            if isinstance(decoded, dict):
+                return cast(ValidationReport, decoded)
 
         baseline = self._baseline_report(fingerprint)
         with tempfile.TemporaryDirectory(prefix="muika-core-candidate-") as tmp:
@@ -570,6 +675,7 @@ class CoreProposalManager:
         warnings: list[str] = []
         baseline_status = baseline.get("status")
         candidate_status = candidate.get("status")
+        status: ValidationStatus
         if baseline_status == "unavailable":
             status = "unavailable"
             reason = baseline.get("reason") or "The baseline test environment is unavailable."
@@ -602,7 +708,7 @@ class CoreProposalManager:
                     f"Test count decreased from {baseline.get('test_count', 0)} to {candidate.get('test_count', 0)}."
                 )
 
-        report = {
+        report: ValidationReport = {
             "patch_id": patch_id,
             "fingerprint": fingerprint,
             "created_at": datetime.now().isoformat(),
@@ -615,12 +721,13 @@ class CoreProposalManager:
             "warnings": warnings,
         }
         _atomic_write_json(validation_path, report)
-        proposal["validation"] = {
+        validation_summary: ValidationSummary = {
             "status": status,
             "fingerprint": fingerprint,
             "created_at": report["created_at"],
             "warnings": warnings,
         }
+        proposal["validation"] = validation_summary
         proposal["warnings"] = warnings
         self._save(proposal)
         return report
@@ -781,11 +888,11 @@ class CoreProposalManager:
             recovered.append(patch_id)
         return recovered
 
-    def list_proposals_unchecked(self) -> list[dict[str, Any]]:
+    def list_proposals_unchecked(self) -> list[CoreProposal]:
         """列出提案，不检查功能开关。"""
         if not self.proposals_root.is_dir():
             return []
-        proposals: list[dict[str, Any]] = []
+        proposals: list[CoreProposal] = []
         for path in self.proposals_root.iterdir():
             if path.is_dir() and _PATCH_ID_RE.fullmatch(path.name):
                 try:
@@ -794,7 +901,7 @@ class CoreProposalManager:
                     continue
         return proposals
 
-    def _matches_state(self, proposal: dict[str, Any], state: str) -> bool:
+    def _matches_state(self, proposal: CoreProposal, state: SnapshotState) -> bool:
         """判断全部正式文件是否匹配 before 或 after hash。"""
         hash_key = f"sha256_{state}"
         for change in proposal["changes"]:
@@ -804,7 +911,7 @@ class CoreProposalManager:
                 return False
         return True
 
-    def _apply_formal(self, proposal: dict[str, Any]) -> None:
+    def _apply_formal(self, proposal: CoreProposal) -> None:
         """应用提案的全部 after 状态。"""
         patch_id = str(proposal["patch_id"])
         deleted_root = self.proposals_root / patch_id / "deleted"
@@ -818,7 +925,7 @@ class CoreProposalManager:
             else:
                 _atomic_write_text(target, after_text)
 
-    def _restore_before(self, proposal: dict[str, Any]) -> list[str]:
+    def _restore_before(self, proposal: CoreProposal) -> list[str]:
         """把全部正式文件恢复到 before 状态。"""
         errors: list[str] = []
         patch_id = str(proposal["patch_id"])
@@ -837,9 +944,9 @@ class CoreProposalManager:
 
     async def _audit_change(
         self,
-        proposal: dict[str, Any],
-        change: dict[str, Any],
-        action: str,
+        proposal: CoreProposal,
+        change: ProposalChange,
+        action: CoreAuditAction,
     ) -> Optional[str]:
         """尽力写入一条 Core 文件审计记录。"""
         try:
