@@ -144,4 +144,7 @@ class Echo(BaseLLM):
         if stream:
             return self._ask_stream(messages, request.tools, response_format=request.format)
 
-        return await self._ask_sync(messages, request.tools, response_format=request.format)
+        return await self._complete_response(
+            lambda: self._ask_sync(messages, request.tools, response_format=request.format),
+            lambda: self._ask_stream(messages, request.tools, response_format=request.format),
+        )

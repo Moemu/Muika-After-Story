@@ -26,6 +26,14 @@ class ModelConfig(BaseModel):
     """模型的重复惩罚"""
     stream: bool = False
     """是否使用流式输出"""
+    retry_attempts: int = 3
+    """普通传输错误的总尝试次数"""
+    congestion_retry_attempts: int = 10
+    """拥堵错误的总尝试次数"""
+    request_timeout_seconds: float = 90.0
+    """单次模型请求的超时时间"""
+    stream_fallback_on_timeout: bool = True
+    """非流式请求超时后是否改用流式传输"""
     online_search: bool = False
     """是否启用联网搜索（原生实现）"""
     content_security: bool = False
@@ -98,3 +106,24 @@ class ModelConfig(BaseModel):
             raise ValueError(f"指定的模型加载器 '{provider}' 不存在于 llm 目录中")
 
         return provider
+
+    @field_validator("retry_attempts")
+    @classmethod
+    def check_retry_attempts(cls, value: int) -> int:
+        if not 1 <= value <= 10:
+            raise ValueError("retry_attempts must be between 1 and 10")
+        return value
+
+    @field_validator("congestion_retry_attempts")
+    @classmethod
+    def check_congestion_retry_attempts(cls, value: int) -> int:
+        if not 1 <= value <= 10:
+            raise ValueError("congestion_retry_attempts must be between 1 and 10")
+        return value
+
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def check_request_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("request_timeout_seconds must be greater than zero")
+        return value

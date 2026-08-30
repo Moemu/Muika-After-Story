@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
@@ -14,6 +15,7 @@ from typing import (
 )
 
 from ._config import ModelConfig
+from ._retry import LLMRequestError
 from ._schema import ModelCompletions, ModelRequest, ModelStreamCompletions, Usage
 
 if TYPE_CHECKING:
@@ -145,6 +147,38 @@ class BaseLLM(ABC):
         流式输出
         """
         raise NotImplementedError
+
+    async def _collect_stream(
+        self,
+        stream: AsyncGenerator["ModelStreamCompletions", None],
+    ) -> "ModelCompletions":
+        """将内部流式响应聚合为完整响应。"""
+        completion = ModelCompletions()
+        async for chunk in stream:
+            if not chunk.succeed:
+                completion.succeed = False
+                completion.text = chunk.chunk
+                return completion
+            completion.text += chunk.chunk
+            completion.usage = chunk.usage
+            if chunk.resources:
+                completion.resources.extend(chunk.resources)
+        return completion
+
+    async def _complete_response(
+        self,
+        sync_call: Callable[[], Awaitable["ModelCompletions"]],
+        stream_call: Callable[[], AsyncGenerator["ModelStreamCompletions", None]],
+    ) -> "ModelCompletions":
+        """按模型配置选择完整响应的传输方式。"""
+        if self.config.stream:
+            return await self._collect_stream(stream_call())
+        try:
+            return await sync_call()
+        except LLMRequestError as exc:
+            if exc.kind != "timeout" or not self.config.stream_fallback_on_timeout:
+                raise
+            return await self._collect_stream(stream_call())
 
     @overload
     async def ask(self, request: "ModelRequest", *, stream: Literal[False] = False) -> "ModelCompletions": ...
