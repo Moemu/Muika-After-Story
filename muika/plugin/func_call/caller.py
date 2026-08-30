@@ -22,6 +22,10 @@ _caller_data: dict[str, "Caller"] = {}
 """函数注册表，存储所有注册的函数"""
 
 
+class FunctionCallValidationError(ValueError):
+    pass
+
+
 class Caller:
     def __init__(self, description: str, params: Optional[Type[BaseModel]] = None):
         self._name: str = ""
@@ -95,12 +99,23 @@ class Caller:
 
         return inject_args
 
-    async def run(self, **kwargs) -> Any:
+    async def run(self, **kwargs: Any) -> Any:
         """
         执行 function call
         """
         if self.function is None:
             raise ValueError("未注册函数对象")
+
+        if self._parameters_model:
+            unknown = sorted(set(kwargs) - set(self._parameters_model.model_fields))
+            if unknown:
+                names = ", ".join(unknown)
+                raise FunctionCallValidationError(f"Unexpected argument(s): {names}")
+            try:
+                validated = self._parameters_model.model_validate(kwargs)
+            except ValueError as exc:
+                raise FunctionCallValidationError(str(exc)) from exc
+            kwargs = {name: getattr(validated, name) for name in self._parameters_model.model_fields}
 
         inject_args = await self._inject_dependencies(kwargs)
 
