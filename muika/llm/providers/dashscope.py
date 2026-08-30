@@ -208,16 +208,20 @@ class Dashscope(BaseLLM):
             total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens", 0)
         completions.usage = total_usage
 
+        message = response.output.choices[0].message
+        if getattr(message, "tool_calls", None):
+            return await self._tool_calls_handle_sync(messages, tools, response_format, response, total_usage)
+
         if response.output.text:
             completions.text = response.output.text
             return completions
 
-        message_content = response.output.choices[0].message.content
+        message_content = message.content
         if message_content:
             completions.text = message_content if isinstance(message_content, str) else message_content[0].get("text")
             return completions
 
-        return await self._tool_calls_handle_sync(messages, tools, response_format, response, total_usage)
+        return completions
 
     async def _Generator_handle(
         self,
