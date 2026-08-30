@@ -628,17 +628,21 @@ wheels = [
 
 [[package]]
 name = "dashscope"
-version = "1.25.9"
+version = "1.26.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "certifi" },
     { name = "cryptography" },
+    { name = "httpx" },
+    { name = "httpx-sse" },
     { name = "requests" },
+    { name = "rich" },
+    { name = "typer" },
     { name = "websocket-client" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/bf/503587663b909427c1906b3b75fc2982bf9e42161d8b687f6e38ad12d042/dashscope-1.25.9-py3-none-any.whl", hash = "sha256:03b587bcb58a2f0a76fa5102925c16609b50af176198af0aeb0fd85aa44d6cfe", size = 1335755, upload-time = "2026-01-21T06:58:14.496Z" },
+    { url = "https://files.pythonhosted.org/packages/55/af/6f65d1d46f67206c80a0d24a236b0930cdffc540badba3d9d57fa4fce34b/dashscope-1.26.7-py3-none-any.whl", hash = "sha256:e7797ff99c5335589ecd0b97391611dd68dc3da6a28681dab5c522759b22922d", size = 1537542, upload-time = "2026-08-12T13:03:59.002Z" },
 ]
 
 [[package]]
@@ -1581,7 +1585,7 @@ requires-dist = [
     { name = "arclet-alconna", specifier = ">=1.8.0" },
     { name = "azure-ai-inference", marker = "extra == 'standard'", specifier = ">=1.0.0b9" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=25.1.0" },
-    { name = "dashscope", marker = "extra == 'standard'", specifier = ">=1.22.1" },
+    { name = "dashscope", marker = "extra == 'standard'", specifier = ">=1.26.7" },
     { name = "dateparser", specifier = ">=1.2.2" },
     { name = "feedparser", specifier = ">=6.0.12" },
     { name = "fleep", specifier = ">=1.0.1" },

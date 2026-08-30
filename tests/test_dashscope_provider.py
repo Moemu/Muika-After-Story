@@ -5,7 +5,8 @@ import pytest
 
 pytest.importorskip("dashscope")
 
-from muika.llm import ModelCompletions  # noqa: E402
+from muika.llm import ModelCompletions, ModelConfig  # noqa: E402
+from muika.llm._retry import LLMRequestError  # noqa: E402
 from muika.llm.providers.dashscope import Dashscope  # noqa: E402
 
 
@@ -25,3 +26,56 @@ async def test_non_stream_response_prioritizes_tool_calls(monkeypatch):
 
     assert result is expected
     handler.assert_awaited_once()
+
+
+async def test_dashscope_uses_async_sdk_and_normalizes_status(monkeypatch):
+    from dashscope.api_entities.dashscope_response import GenerationResponse
+
+    config = ModelConfig(
+        provider="dashscope",
+        model_name="qwen-test",
+        api_key="test-key",
+        congestion_retry_attempts=1,
+    )
+    provider = Dashscope(config)
+    call = AsyncMock(return_value=GenerationResponse(status_code=529, code="overloaded", message="busy"))
+    monkeypatch.setattr("dashscope.AioGeneration.call", call)
+
+    with pytest.raises(LLMRequestError) as exc_info:
+        await provider._ask([], [], None, False)
+
+    assert exc_info.value.kind == "congestion"
+    call.assert_awaited_once()
+
+
+async def test_dashscope_retries_stream_error_before_content(monkeypatch):
+    from dashscope.api_entities.dashscope_response import GenerationResponse
+
+    config = ModelConfig(
+        provider="dashscope",
+        model_name="qwen-test",
+        api_key="test-key",
+        stream=True,
+        congestion_retry_attempts=3,
+    )
+    provider = Dashscope(config)
+    attempts = 0
+
+    async def call(**kwargs):
+        nonlocal attempts
+        attempts += 1
+
+        async def response():
+            yield GenerationResponse(status_code=529, code="overloaded", message="busy")
+
+        return response()
+
+    monkeypatch.setattr("dashscope.AioGeneration.call", call)
+    monkeypatch.setattr("muika.llm._retry._retry_delay", lambda error, attempt: 0.0)
+
+    stream = await provider._ask([], [], None, True)
+    with pytest.raises(LLMRequestError):
+        async for _ in stream:
+            pass
+
+    assert attempts == 3

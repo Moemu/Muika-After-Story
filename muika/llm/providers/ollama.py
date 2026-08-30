@@ -15,6 +15,7 @@ from .. import (
     Usage,
     register,
 )
+from .._retry import RequestRetry
 from ..utils.images import get_file_base64
 from ..utils.tools import function_call_handler
 
@@ -96,21 +97,25 @@ class Ollama(BaseLLM):
         completions = ModelCompletions()
 
         try:
-            response = await self.client.chat(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                stream=False,
-                format=response_format,
-                options={
-                    "temperature": self.temperature,
-                    "top_k": self.top_k,
-                    "top_p": self.top_p,
-                    "repeat_penalty": self.repeat_penalty,
-                    "presence_penalty": self.presence_penalty,
-                    "frequency_penalty": self.frequency_penalty,
-                },
-            )
+
+            async def send_request():
+                return await self.client.chat(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    stream=False,
+                    format=response_format,
+                    options={
+                        "temperature": self.temperature,
+                        "top_k": self.top_k,
+                        "top_p": self.top_p,
+                        "repeat_penalty": self.repeat_penalty,
+                        "presence_penalty": self.presence_penalty,
+                        "frequency_penalty": self.frequency_penalty,
+                    },
+                )
+
+            response: Any = await RequestRetry(self.config).run(send_request)
 
             tool_calls = response.message.tool_calls
 
@@ -149,23 +154,25 @@ class Ollama(BaseLLM):
         if total_usage is None:
             total_usage = Usage()
         try:
-            response = await self.client.chat(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                stream=True,
-                format=response_format,
-                options={
-                    "temperature": self.temperature,
-                    "top_k": self.top_k,
-                    "top_p": self.top_p,
-                    "repeat_penalty": self.repeat_penalty,
-                    "presence_penalty": self.presence_penalty,
-                    "frequency_penalty": self.frequency_penalty,
-                },
-            )
 
-            async for chunk in response:
+            async def send_request():
+                return await self.client.chat(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    stream=True,
+                    format=response_format,
+                    options={
+                        "temperature": self.temperature,
+                        "top_k": self.top_k,
+                        "top_p": self.top_p,
+                        "repeat_penalty": self.repeat_penalty,
+                        "presence_penalty": self.presence_penalty,
+                        "frequency_penalty": self.frequency_penalty,
+                    },
+                )
+
+            async for chunk in RequestRetry[Any](self.config).stream(send_request):
                 stream_completions = ModelStreamCompletions()
 
                 tool_calls = chunk.message.tool_calls
@@ -223,4 +230,7 @@ class Ollama(BaseLLM):
         if stream:
             return self._ask_stream(messages, tools, format)
 
-        return await self._ask_sync(messages, tools, format)
+        return await self._complete_response(
+            lambda: self._ask_sync(messages, tools, format),
+            lambda: self._ask_stream(messages, tools, format),
+        )

@@ -36,7 +36,7 @@ authors = [
 [project.optional-dependencies]
 standard = [
     "azure-ai-inference>=1.0.0b9",
-    "dashscope>=1.22.1",
+    "dashscope>=1.26.7",
     "google-genai>=1.8.0",
     "ollama>=0.4.7",
     "soundfile>=0.13.1",

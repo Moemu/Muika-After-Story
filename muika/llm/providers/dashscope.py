@@ -1,7 +1,5 @@
-import asyncio
 import json
 from dataclasses import dataclass
-from functools import partial
 from typing import (
     Any,
     AsyncGenerator,
@@ -31,6 +29,7 @@ from .. import (
     Usage,
     register,
 )
+from .._retry import LLMRequestError, RequestRetry, error_from_status
 from ..utils.tools import function_call_handler
 
 
@@ -99,6 +98,13 @@ StreamResponse = Union[
 CallResponse = Union[SyncResponse, StreamResponse]
 
 
+async def _validate_stream(response: Any) -> AsyncGenerator[Any, None]:
+    async for chunk in response:
+        if chunk.status_code != 200:
+            raise error_from_status(chunk.status_code, str(chunk.message), code=str(chunk.code))
+        yield chunk
+
+
 @register("dashscope")
 class Dashscope(BaseLLM):
     def __init__(self, model_config: ModelConfig) -> None:
@@ -115,11 +121,9 @@ class Dashscope(BaseLLM):
         self.thinking_budget = self.config.thinking_budget
         self.incremental_output = self.config.incremental_output
 
-        self.extra_headers = (
-            {"X-DashScope-DataInspection": '{"input":"cip","output":"cip"}'} if self.config.content_security else {}
-        )
-
-        self.stream = False
+        self.extra_headers = {"X-DashScope-Wait-Timeout": "30"}
+        if self.config.content_security:
+            self.extra_headers["X-DashScope-DataInspection"] = '{"input":"cip","output":"cip"}'
 
     def __build_multi_messages(self, request: ModelRequest) -> dict:
         """
@@ -228,7 +232,7 @@ class Dashscope(BaseLLM):
         messages: list,
         tools: List[dict],
         response_format: Optional[dict],
-        response: Generator[GenerationResponse, None, None] | Generator[MultiModalConversationResponse, None, None],
+        response_factory: Any,
         total_usage: Usage | None = None,
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         """
@@ -245,18 +249,9 @@ class Dashscope(BaseLLM):
         func_stream = FunctionCallStream()
         thought_stream = ThoughtStream()
 
-        for chunk in response:
+        async for chunk in RequestRetry[Any](self.config).stream(response_factory):
             logger.debug(chunk)
             stream_completions = ModelStreamCompletions()
-
-            if chunk.status_code != 200:
-                logger.error(f"模型调用失败: {chunk.status_code}({chunk.code})")
-                logger.error(f"{chunk.message}")
-                stream_completions.chunk = f"模型调用失败: {chunk.status_code}({chunk.code})"
-                stream_completions.succeed = False
-
-                yield stream_completions
-                return
 
             # 更新 token 消耗
             total_usage.input_tokens = chunk.usage.input_tokens
@@ -319,7 +314,10 @@ class Dashscope(BaseLLM):
         messages.append(response.output.choices[0].message)
         messages.append({"role": "tool", "content": function_return, "tool_call_id": tool_call_id})
 
-        return await self._ask(messages, tools, response_format, total_usage)  # type: ignore
+        return cast(
+            ModelCompletions,
+            await self._ask(messages, tools, response_format, False, total_usage),
+        )
 
     async def _tool_calls_handle_stream(
         self,
@@ -363,12 +361,19 @@ class Dashscope(BaseLLM):
         )
         messages.append({"role": "tool", "content": function_return, "tool_call_id": func_stream.id})
 
-        return await self._ask(messages, tools, response_format, total_usage)  # type: ignore
+        return cast(
+            AsyncGenerator[ModelStreamCompletions, None],
+            await self._ask(messages, tools, response_format, True, total_usage),
+        )
 
     async def _ask(
-        self, messages: list, tools: List[dict], response_format: Optional[dict], total_usage: Usage | None = None
+        self,
+        messages: list,
+        tools: List[dict],
+        response_format: Optional[dict],
+        stream: bool,
+        total_usage: Usage | None = None,
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        # 因为 Dashscope 对于多模态模型的接口不同，所以这里不能统一函数
         if total_usage is None:
             total_usage = Usage()
         if not self.config.multimodal:
@@ -380,7 +385,7 @@ class Dashscope(BaseLLM):
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "repetition_penalty": self.repetition_penalty,
-                "stream": self.stream,
+                "stream": stream,
                 "tools": tools,
                 "parallel_tool_calls": True,
                 "enable_search": self.enable_search,
@@ -399,31 +404,40 @@ class Dashscope(BaseLLM):
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "repetition_penalty": self.repetition_penalty,
-                "stream": self.stream,
+                "stream": stream,
                 "tools": tools,
                 "parallel_tool_calls": True,
                 "enable_search": self.enable_search,
                 "incremental_output": self.incremental_output,
+                "headers": self.extra_headers,
                 "response_format": response_format,
             }
 
-        # 过滤未配置的可选参数（Dashscope 部分参数声明为非可选类型但允许缺省）
         call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
 
-        if self.config.multimodal:
-            response = cast(
-                CallResponse,
-                await asyncio.to_thread(partial(dashscope.MultiModalConversation.call, **call_kwargs)),
-            )
-        else:
-            response = cast(
-                CallResponse,
-                await asyncio.to_thread(partial(dashscope.Generation.call, **call_kwargs)),
-            )
+        async def send_request() -> Any:
+            if self.config.multimodal:
+                result: Any = await dashscope.AioMultiModalConversation.call(**call_kwargs)
+            else:
+                result = await dashscope.AioGeneration.call(**call_kwargs)
+            if isinstance(result, (GenerationResponse, MultiModalConversationResponse)) and result.status_code != 200:
+                raise error_from_status(
+                    result.status_code,
+                    str(result.message),
+                    code=str(result.code),
+                )
+            if stream:
+                return _validate_stream(result)
+            return result
+
+        if stream:
+            return self._Generator_handle(messages, tools, response_format, send_request, total_usage)
+
+        response = cast(CallResponse, await RequestRetry(self.config).run(send_request))
 
         if isinstance(response, GenerationResponse) or isinstance(response, MultiModalConversationResponse):
             return await self._GenerationResponse_handle(messages, tools, response_format, response, total_usage)
-        return self._Generator_handle(messages, tools, response_format, response, total_usage)
+        raise TypeError(f"Unexpected DashScope response: {type(response).__name__}")
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
@@ -436,8 +450,6 @@ class Dashscope(BaseLLM):
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        self.stream = stream if stream is not None else False
-
         tools = request.tools if request.tools else []
         messages = self._build_messages(request)
         if request.format == "json" and request.json_schema:
@@ -446,4 +458,27 @@ class Dashscope(BaseLLM):
         else:
             response_format = None
 
-        return await self._ask(messages, tools, response_format)
+        if stream:
+            return cast(
+                AsyncGenerator[ModelStreamCompletions, None],
+                await self._ask(messages, tools, response_format, True),
+            )
+        if self.config.stream:
+            response = cast(
+                AsyncGenerator[ModelStreamCompletions, None],
+                await self._ask(messages, tools, response_format, True),
+            )
+            return await self._collect_stream(response)
+        try:
+            return cast(
+                ModelCompletions,
+                await self._ask(messages, tools, response_format, False),
+            )
+        except LLMRequestError as exc:
+            if exc.kind != "timeout" or not self.config.stream_fallback_on_timeout:
+                raise
+            response = cast(
+                AsyncGenerator[ModelStreamCompletions, None],
+                await self._ask(messages, tools, response_format, True),
+            )
+            return await self._collect_stream(response)

@@ -24,6 +24,7 @@ from .. import (
     Usage,
     register,
 )
+from .._retry import RequestRetry
 from ..utils.images import get_file_base64
 from ..utils.tools import function_call_handler
 
@@ -49,7 +50,12 @@ class Openai(BaseLLM):
         self.audio = self.config.audio if (self.modalities and self.config.audio) else NOT_GIVEN
         self.extra_body = self.config.extra_body
 
-        self.client = openai.AsyncOpenAI(api_key=self.api_key, base_url=self.api_base, timeout=30)
+        self.client = openai.AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            timeout=self.config.request_timeout_seconds,
+            max_retries=0,
+        )
 
     def _sampling_kwargs(self) -> dict:
         """
@@ -154,19 +160,23 @@ class Openai(BaseLLM):
         completions = ModelCompletions()
 
         try:
-            response = await self.client.chat.completions.create(
-                audio=self.audio,  # type: ignore
-                model=self.model,
-                modalities=self.modalities,  # type: ignore
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                stream=False,
-                tools=tools,  # type: ignore
-                extra_body=self.extra_body,
-                response_format=response_format,  # type: ignore
-                **self._sampling_kwargs(),
-            )
+
+            async def send_request():
+                return await self.client.chat.completions.create(
+                    audio=self.audio,  # type: ignore
+                    model=self.model,
+                    modalities=self.modalities,  # type: ignore
+                    messages=messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    stream=False,
+                    tools=tools,  # type: ignore
+                    extra_body=self.extra_body,
+                    response_format=response_format,  # type: ignore
+                    **self._sampling_kwargs(),
+                )
+
+            response: Any = await RequestRetry(self.config).run(send_request)
 
             logger.debug(f"OpenAI response: id={response.id}, choices={response.choices}, usage={response.usage}")
 
@@ -245,22 +255,24 @@ class Openai(BaseLLM):
         audio_string = ""
 
         try:
-            response = await self.client.chat.completions.create(
-                audio=self.audio,  # type: ignore
-                model=self.model,
-                modalities=self.modalities,  # type: ignore
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                stream=True,
-                stream_options={"include_usage": True},
-                tools=tools,  # type: ignore
-                extra_body=self.extra_body,
-                response_format=response_format,  # type: ignore
-                **self._sampling_kwargs(),
-            )
 
-            async for chunk in response:
+            async def send_request():
+                return await self.client.chat.completions.create(
+                    audio=self.audio,  # type: ignore
+                    model=self.model,
+                    modalities=self.modalities,  # type: ignore
+                    messages=messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    tools=tools,  # type: ignore
+                    extra_body=self.extra_body,
+                    response_format=response_format,  # type: ignore
+                    **self._sampling_kwargs(),
+                )
+
+            async for chunk in RequestRetry[Any](self.config).stream(send_request):
                 stream_completions = ModelStreamCompletions()
 
                 logger.debug(f"OpenAI response: id={chunk.id}, choices={chunk.choices}, usage={chunk.usage}")
@@ -415,4 +427,7 @@ class Openai(BaseLLM):
         if stream:
             return self._ask_stream(messages, tools, response_format)  # type: ignore
 
-        return await self._ask_sync(messages, tools, response_format)  # type: ignore
+        return await self._complete_response(
+            lambda: self._ask_sync(messages, tools, response_format),
+            lambda: self._ask_stream(messages, tools, response_format),
+        )

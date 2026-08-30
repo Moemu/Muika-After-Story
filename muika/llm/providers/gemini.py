@@ -1,4 +1,5 @@
 from typing import (
+    Any,
     AsyncGenerator,
     Awaitable,
     List,
@@ -37,6 +38,7 @@ from .. import (
     Usage,
     register,
 )
+from .._retry import RequestRetry
 from ..utils.images import get_file_base64
 from ..utils.tools import function_call_handler
 
@@ -170,7 +172,11 @@ class Gemini(BaseLLM):
         try:
             chat = self.client.aio.chats.create(model=self.model_name, config=gemini_config, history=messages[:-1])
             message = messages[-1].parts  # type: ignore
-            response = await chat.send_message(message=message)  # type: ignore
+
+            async def send_request():
+                return await chat.send_message(message=message)  # type: ignore
+
+            response: Any = await RequestRetry(self.config).run(send_request)
             if response.usage_metadata:
                 total_usage.input_tokens += response.usage_metadata.prompt_token_count or 0
                 total_usage.output_tokens += response.usage_metadata.candidates_token_count or 0
@@ -240,11 +246,14 @@ class Gemini(BaseLLM):
             current_input = 0
             current_output = 0
             current_cached = 0
-            stream = await self.client.aio.models.generate_content_stream(
-                model=self.model_name, contents=messages, config=gemini_config
-            )
-            stream = await stream if isinstance(stream, Awaitable) else stream
-            async for chunk in stream:
+
+            async def send_request():
+                response = await self.client.aio.models.generate_content_stream(
+                    model=self.model_name, contents=messages, config=gemini_config
+                )
+                return await response if isinstance(response, Awaitable) else response
+
+            async for chunk in RequestRetry[Any](self.config).stream(send_request):
                 stream_completions = ModelStreamCompletions()
 
                 if chunk.text:
@@ -335,4 +344,7 @@ class Gemini(BaseLLM):
         if stream:
             return self._ask_stream(messages, request.tools, response_format)
 
-        return await self._ask_sync(messages, request.tools, response_format)
+        return await self._complete_response(
+            lambda: self._ask_sync(messages, request.tools, response_format),
+            lambda: self._ask_stream(messages, request.tools, response_format),
+        )

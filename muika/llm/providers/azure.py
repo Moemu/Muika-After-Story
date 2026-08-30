@@ -1,6 +1,6 @@
 import json
 import os
-from typing import AsyncGenerator, List, Literal, Optional, Union, overload
+from typing import Any, AsyncGenerator, List, Literal, Optional, Union, overload
 
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import (
@@ -38,6 +38,7 @@ from .. import (
     Usage,
     register,
 )
+from .._retry import RequestRetry
 from ..utils.tools import function_call_handler
 
 
@@ -152,23 +153,31 @@ class Azure(BaseLLM):
     ) -> ModelCompletions:
         if total_usage is None:
             total_usage = Usage()
-        client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token))
+        client = ChatCompletionsClient(
+            endpoint=self.endpoint,
+            credential=AzureKeyCredential(self.token),
+            retry_total=0,
+        )
 
         completions = ModelCompletions()
 
         try:
-            response = await client.complete(
-                messages=messages,
-                model=self.model_name,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-                stream=False,
-                tools=tools,
-                response_format=response_format,
-            )
+
+            async def send_request():
+                return await client.complete(
+                    messages=messages,
+                    model=self.model_name,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    frequency_penalty=self.frequency_penalty,
+                    presence_penalty=self.presence_penalty,
+                    stream=False,
+                    tools=tools,
+                    response_format=response_format,
+                )
+
+            response: Any = await RequestRetry(self.config).run(send_request)
             finish_reason = response.choices[0].finish_reason
             if response.usage:
                 total_usage.input_tokens += response.usage.prompt_tokens or 0
@@ -219,7 +228,7 @@ class Azure(BaseLLM):
         finally:
             await client.close()
             completions.usage = total_usage
-            return completions
+        return completions
 
     async def _ask_stream(
         self,
@@ -230,28 +239,34 @@ class Azure(BaseLLM):
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
         if total_usage is None:
             total_usage = Usage()
-        client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token))
+        client = ChatCompletionsClient(
+            endpoint=self.endpoint,
+            credential=AzureKeyCredential(self.token),
+            retry_total=0,
+        )
 
         try:
-            response = await client.complete(
-                messages=messages,
-                model=self.model_name,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-                stream=True,
-                tools=tools,
-                model_extras={"stream_options": {"include_usage": True}},  # 需要显式声明获取用量
-                response_format=response_format,
-            )
+
+            async def send_request():
+                return await client.complete(
+                    messages=messages,
+                    model=self.model_name,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    frequency_penalty=self.frequency_penalty,
+                    presence_penalty=self.presence_penalty,
+                    stream=True,
+                    tools=tools,
+                    model_extras={"stream_options": {"include_usage": True}},
+                    response_format=response_format,
+                )
 
             tool_call_id: str = ""
             function_name: str = ""
             function_args: str = ""
 
-            async for chunk in response:
+            async for chunk in RequestRetry[Any](self.config).stream(send_request):
                 stream_completions = ModelStreamCompletions()
 
                 if chunk.usage:  # chunk.usage 只会在最后一个包中被提供，此时choices为空
@@ -357,4 +372,7 @@ class Azure(BaseLLM):
         if stream:
             return self._ask_stream(messages, tools, response_format)
 
-        return await self._ask_sync(messages, tools, response_format)
+        return await self._complete_response(
+            lambda: self._ask_sync(messages, tools, response_format),
+            lambda: self._ask_stream(messages, tools, response_format),
+        )
