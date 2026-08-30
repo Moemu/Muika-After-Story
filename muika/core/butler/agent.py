@@ -17,6 +17,7 @@ External plugins register tools via @on_function_call decorator.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from muika.config import get_model_config, mas_config
@@ -45,6 +46,20 @@ from muika.template.loader import generate_prompt_from_template
 from muika.utils.logger import logger
 
 ENABLE_MCP = Path("./configs/mcp.json").exists()
+AGENT_RESULT_PATTERN = re.compile(
+    r"<agent_result\s+status=[\"'](completed|blocked)[\"']>(.*?)</agent_result>",
+    re.DOTALL,
+)
+
+
+def _parse_agent_report(text: str) -> str:
+    match = AGENT_RESULT_PATTERN.fullmatch(text.strip())
+    if match:
+        report = match.group(2).strip()
+        return report if match.group(1) == "completed" else f"Agent blocked: {report}"
+    last_output = text.strip() or "(empty response)"
+    return f"Agent stopped before reporting completion. Last output: {last_output}"
+
 
 # ---------------------------------------------------------------------------
 # ButlerAgent
@@ -188,9 +203,13 @@ class ButlerAgent:
         try:
             completion = await self.model.ask(request=request, stream=False)
             data = json.loads(completion.text)
+            if not data.get("should_store", True):
+                logger.info(f"[Butler/Memory] Classifier declined storage: {data.get('reason', 'no reason')}")
+                return
             layer = MemoryLayer(data["layer"])
             category = MemoryCategory(data["category"])
             key = data["key"]
+            value = str(data["value"]).strip()
         except Exception as e:
             logger.warning(f"[Butler/Memory] Classification LLM failed: {e}, retrying...")
             if max_retry > 0:
@@ -203,13 +222,17 @@ class ButlerAgent:
             logger.warning("[Butler/Memory] MemoryManager not on state -- cannot store.")
             return
 
+        if not value:
+            logger.warning("[Butler/Memory] Classifier returned an empty value -- skipping.")
+            return
+
         await state.memory.upsert_memory(
             layer=layer,
             category=category,
             key=key,
-            value=content,
+            value=value,
         )
-        logger.info(f"[Butler/Memory] Stored: [{layer.value}/{category.value}] " f"{key} = {content[:60]!r}...")
+        logger.info(f"[Butler/Memory] Stored: [{layer.value}/{category.value}] " f"{key} = {value[:60]!r}...")
 
     async def execute_command(
         self,
@@ -248,7 +271,7 @@ class ButlerAgent:
 
             try:
                 completion = await self.model.ask(request=request, stream=False)
-                report = completion.text.strip()
+                report = _parse_agent_report(completion.text)
             except Exception as e:
                 logger.error(f"[Butler] LLM error: {e}")
                 return (f"I encountered an error while executing the command: {e}", [])

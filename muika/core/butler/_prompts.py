@@ -67,7 +67,11 @@ Given a raw memory note written by Muika in first person, analyze it and determi
 
 3. A semantic key (short, lowercase, underscore_separated) that uniquely identifies this fact. Examples: "favorite_drink"
 
-Return a JSON object: {"layer": "...", "category": "...", "key": "...", "reason": "..."}
+Classify one fact only. Set "should_store" to false for a task, plan, request, or note with several unrelated facts.
+Do not replace a stable identity fact with a longer note that has a different meaning.
+Set "value" to the concise fact that should be stored. Do not copy the full note into "value".
+
+Return a JSON object: {"should_store": true, "layer": "...", "category": "...", "key": "...", "value": "...", "reason": "..."}
 Return ONLY valid JSON — no markdown, no commentary.
 """
 

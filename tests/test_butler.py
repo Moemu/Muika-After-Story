@@ -104,7 +104,11 @@ async def test_classify_empty_content(fake_llm_factory):
 
 
 async def test_classify_state_memory_none(fake_llm_factory):
-    fake = fake_llm_factory(response=ModelCompletions(text='{"layer":"core","category":"user","key":"fav_drink"}'))
+    fake = fake_llm_factory(
+        response=ModelCompletions(
+            text='{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
+        )
+    )
     agent = _butler(fake)
     state = MuikaState()  # memory 未注入
     await agent.classify_and_store_memory("likes tea", state)
@@ -112,12 +116,26 @@ async def test_classify_state_memory_none(fake_llm_factory):
 
 
 async def test_classify_stores_record(fake_llm_factory):
-    fake = fake_llm_factory(response=ModelCompletions(text='{"layer":"core","category":"user","key":"fav_drink"}'))
+    fake = fake_llm_factory(
+        response=ModelCompletions(
+            text='{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
+        )
+    )
     agent = _butler(fake)
     state = MuikaState(memory=MemoryManager())
     await agent.classify_and_store_memory("likes tea", state)
     assert "core:user:fav_drink" in state.memory.records
-    assert state.memory.records["core:user:fav_drink"].value == "likes tea"
+    assert state.memory.records["core:user:fav_drink"].value == "tea"
+
+
+async def test_classify_can_decline_task_storage(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text='{"should_store":false,"reason":"task plan"}'))
+    agent = _butler(fake)
+    memory = MemoryManager()
+
+    await agent.classify_and_store_memory("请实现一个插件", MuikaState(memory=memory))
+
+    assert memory.records == {}
 
 
 async def test_classify_retries_then_gives_up(fake_llm_factory):
@@ -142,7 +160,7 @@ def _cmd_patches():
 
 
 async def test_execute_command_report_and_resources(fake_llm_factory):
-    fake = fake_llm_factory(response=ModelCompletions(text="Done."))
+    fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">Done.</agent_result>'))
     agent = _butler(fake)
     with _cmd_patches()[0], _cmd_patches()[1]:
         report, resources = await agent.execute_command("test", MuikaState(), executor=None)
@@ -154,7 +172,7 @@ async def test_execute_command_report_and_resources(fake_llm_factory):
 
 
 async def test_execute_command_system_assembly(fake_llm_factory):
-    fake = fake_llm_factory(response=ModelCompletions(text="Done."))
+    fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">Done.</agent_result>'))
     agent = _butler(fake)
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: "SKILLS"))
     with _cmd_patches()[0], _cmd_patches()[1]:
@@ -174,8 +192,24 @@ async def test_execute_command_llm_error(fake_llm_factory):
 async def test_execute_command_clears_context(fake_llm_factory):
     from muika.plugin.func_call._context import get_state
 
-    fake = fake_llm_factory(response=ModelCompletions(text="Done."))
+    fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">Done.</agent_result>'))
     agent = _butler(fake)
     with _cmd_patches()[0], _cmd_patches()[1]:
         await agent.execute_command("cmd", MuikaState(), executor=None)
     assert get_state() is None
+
+
+async def test_execute_command_rejects_acknowledgement_as_result(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text="好的，我先读取源码。"))
+    agent = _butler(fake)
+    with _cmd_patches()[0], _cmd_patches()[1]:
+        report, _ = await agent.execute_command("cmd", MuikaState(), executor=None)
+    assert report.startswith("Agent stopped before reporting completion.")
+
+
+async def test_execute_command_reports_blocked_status(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="blocked">No access.</agent_result>'))
+    agent = _butler(fake)
+    with _cmd_patches()[0], _cmd_patches()[1]:
+        report, _ = await agent.execute_command("cmd", MuikaState(), executor=None)
+    assert report == "Agent blocked: No access."
