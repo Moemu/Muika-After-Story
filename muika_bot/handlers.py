@@ -32,7 +32,7 @@ from muika.config import mas_config
 from muika.models import Resource
 from muika.utils.logger import logger
 
-from .first_run import user_agreement
+from .first_run import require_user_agreement
 from .ipc_client import IpcClient
 from .session import SessionManager
 from .utils.utils import download_file, get_file_via_adapter
@@ -225,7 +225,7 @@ async def _get_ipc_client() -> IpcClient:
 async def startup() -> None:
     """Bot startup: connect to Core, load plugins."""
     logger.info("Loading MAS framework...")
-    user_agreement.check_first_run()
+    require_user_agreement()
 
     logger.info(f"Connecting to Core ({mas_config.core_ws_url})...")
     client = _init_ipc_client()

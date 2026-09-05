@@ -201,13 +201,19 @@ butler:
   temperature: 0.2
 ```
 
-Step 3: 所有系统全部启动启动启动
+Step 3: 在项目目录中确认用户协议。
+
+```powershell
+uv run python -m muika.agreement confirm
+```
+
+Step 4: 启动所有服务。
 
 ```powershell
 .\scripts\start_all.ps1
 ```
 
-Step 4: 同意用户许可协议后开始运行。
+首次使用或协议更新时需要确认。未确认时，Bot 会停止启动并提示确认命令。
 
 </details>
 
@@ -222,6 +228,15 @@ Step 4: 同意用户许可协议后开始运行。
 同意记录仍保存在 `DATA_DIR/user_agreement.json`（默认 `./data/user_agreement.json`）。
 本次迁移保留协议版本 `2026-02-01`；已有有效同意记录无需重新确认。
 如果提示包内协议缺失或损坏，请重新安装 Muika-After-Story。
+
+手动启动前，请在实例目录、使用同一个 Python 环境运行 `python -m muika.agreement confirm`。
+`python -m muika.agreement status` 以 JSON 返回正文、同意记录和是否需要确认，不会询问或写入。
+命令按运行环境的 `DATA_DIR`、实例 `.env`、默认 `./data` 的顺序选择数据目录。
+Bot 启动只检查状态，不等待终端输入。启动器仍会在启动前展示协议并询问。
+
+升级时先更新支持包内协议及共享接口的 mas-launcher，再更新 MAS。
+旧启动器只读取 `configs/user_agreement.json`，不能直接搭配本次正文迁移。
+新启动器使用实例 Python 查询和保存协议；仅当旧 MAS 没有共享接口时，才使用兼容路径。
 
 创建 `.env` 文件：
 

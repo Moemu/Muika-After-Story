@@ -1,20 +1,23 @@
+"""共享协议正文、同意状态和版本校验。"""
+
 import json
-from dataclasses import dataclass, field
+import os
+import tempfile
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from importlib.resources import files
-from time import sleep
-
-from muika.config import mas_config
-from muika.utils.logger import logger
-
-DATA_FILE = mas_config.data_dir / "user_agreement.json"
+from pathlib import Path
 
 
-def _load_agreement_content() -> tuple[str, str, str]:
-    """读取包内协议正文及版本，资源缺失或损坏时报告安装错误。
+@dataclass(frozen=True)
+class AgreementContent:
+    title: str
+    text: str
+    updated: str
 
-    :raises RuntimeError: 包内协议资源无法读取或字段无效。
-    """
+
+def load_agreement_content() -> AgreementContent:
+    """读取包内协议正文及版本，资源缺失或损坏时报告安装错误。"""
     try:
         data = json.loads(files("muika").joinpath("user_agreement.json").read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -23,89 +26,78 @@ def _load_agreement_content() -> tuple[str, str, str]:
         if not all(isinstance(value, str) and value.strip() for value in (title, text, updated)):
             raise ValueError("Agreement fields must be non-empty strings")
         datetime.fromisoformat(updated)
-        return title, text, updated
+        return AgreementContent(title, text, updated)
     except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
         raise RuntimeError("Bundled user agreement is missing or invalid. Reinstall Muika-After-Story.") from error
 
 
-AGREEMENT_TITLE, AGREEMENT_TEXT, AGREEMENT_UPDATED = _load_agreement_content()
-
-
 def _version_requires_update(stored: str, current: str) -> bool:
-    """存储的协议版本是否落后于当前版本（空值或无法解析视为需要重新签署）"""
-    if not stored or not current:
-        return True
+    """判断存储版本是否过期，无法比较的版本需要重新确认。"""
     try:
         return datetime.fromisoformat(stored) < datetime.fromisoformat(current)
-    except ValueError:
+    except (ValueError, TypeError):
         return True
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgreementState:
     has_agreed: bool = False
-    timestamp: datetime = field(default_factory=datetime.now)
-    version: str = AGREEMENT_UPDATED
+    timestamp: str = ""
+    version: str = ""
+
+
+@dataclass(frozen=True)
+class AgreementStatus:
+    content: AgreementContent
+    state: AgreementState = field(default_factory=AgreementState)
+    state_error: str = ""
+
+    @property
+    def needs_acceptance(self) -> bool:
+        """判断当前协议是否需要确认。"""
+        return not self.state.has_agreed or _version_requires_update(self.state.version, self.content.updated)
 
 
 class UserAgreement:
-    def __init__(self):
-        self.agreement_state = AgreementState()
-        self.storage_path = DATA_FILE
+    def __init__(self, storage_path: Path):
+        self.storage_path = storage_path
 
-    def load_agreement(self):
-        """加载用户的同意状态"""
-        if not self.storage_path.exists():
-            return
+    def status(self) -> AgreementStatus:
+        """读取协议和同意记录，损坏记录视为未确认，读写权限错误向上传递。"""
+        content = load_agreement_content()
         try:
-            with open(self.storage_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                self.agreement_state.has_agreed = data.get("has_agreed", False)
-                self.agreement_state.timestamp = datetime.fromisoformat(data.get("timestamp", ""))
-                self.agreement_state.version = data.get("version", "")
-        except Exception as e:
-            logger.error(f"加载用户协议失败: {e}，重新签署协议...")
+            data = json.loads(self.storage_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or type(data.get("has_agreed")) is not bool:
+                raise ValueError("Agreement state must contain a boolean has_agreed")
+            timestamp, version = data.get("timestamp", ""), data.get("version", "")
+            if not isinstance(timestamp, str) or not isinstance(version, str):
+                raise ValueError("Agreement timestamp and version must be strings")
+            datetime.fromisoformat(timestamp)
+            state = AgreementState(data["has_agreed"], timestamp, version)
+        except FileNotFoundError:
+            return AgreementStatus(content)
+        except (ValueError, UnicodeError) as error:
+            return AgreementStatus(content, state_error=f"Invalid agreement state: {error}")
+        return AgreementStatus(content, state)
 
-    def save_agreement(self) -> None:
-        """保存用户的同意状态"""
-        data = {
-            "has_agreed": self.agreement_state.has_agreed,
-            "timestamp": self.agreement_state.timestamp.isoformat(),
-            "version": self.agreement_state.version,
-        }
+    def accept(self, version: str) -> AgreementState:
+        """保存用户确认的版本，正文已更新时拒绝签署，写入失败时保留旧记录。
+
+        :raises ValueError: 确认版本与当前正文版本不同。
+        :raises OSError: 同意记录无法保存。
+        """
+        if version != load_agreement_content().updated:
+            raise ValueError("Agreement version changed. Read and confirm the current agreement again.")
+        state = AgreementState(True, datetime.now().isoformat(), version)
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.storage_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
-    def prompt_for_agreement(self):
-        """展示协议并等待用户同意"""
-        print(AGREEMENT_TITLE)
-        sleep(1)
-        print(AGREEMENT_TEXT)
-        sleep(5)
-        print(f"以上条款更新于: {AGREEMENT_UPDATED}。您必须同意以上条款和阅读许可证声明后才可继续使用 MAS")
-
-        user_input = input("同意吗？(是/否): ")
-
-        if user_input.lower() in ["是", "y"]:
-            self.agreement_state.has_agreed = True
-            self.agreement_state.timestamp = datetime.now()
-            self.agreement_state.version = AGREEMENT_UPDATED
-            self.save_agreement()
-            print("感谢您的同意，MAS 将开始运行")
-        else:
-            print("您未同意协议，MAS 无法继续运行。")
-            exit(0)
-
-    def check_first_run(self):
-        self.load_agreement()
-
-        if not self.agreement_state.has_agreed:
-            self.prompt_for_agreement()
-
-        elif _version_requires_update(self.agreement_state.version, AGREEMENT_UPDATED):
-            logger.info("检测到协议更新")
-            self.prompt_for_agreement()
-
-
-user_agreement = UserAgreement()
+        stream = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.storage_path.parent, delete=False)
+        temporary_path = Path(stream.name)
+        try:
+            with stream:
+                json.dump(asdict(state), stream, indent=2, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary_path.replace(self.storage_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return state
