@@ -15,8 +15,8 @@ from pydantic import BaseModel
 
 from ..dependencies import resolve_arguments
 from ..utils import is_coroutine_callable
-from ._context import get_dependencies
 from ._types import ASYNC_FUNCTION_CALL_FUNC, F
+from .context import get_dependencies
 from .parameter import FunctionCallJsonSchema, Parameter
 from .utils import async_wrap
 

@@ -34,9 +34,10 @@ from muika.core.self_mod.proposals import (
     is_maintenance_command_allowed,
 )
 from muika.database.db import close_db, init_db
-from muika.models import Message, Resource
+from muika.models import AdapterInfo, Message, Resource
 from muika.plugin import CommandDispatcher, load_plugins
 from muika.plugin.manager import get_plugin_manager
+from muika.plugin.mcp import cleanup_servers, initialize_servers
 from muika.plugin.watcher import start_plugin_watcher, stop_plugin_watcher
 from muika.template.loader import validate_template_configuration
 from muika.utils.logger import init_logger, logger
@@ -48,7 +49,7 @@ from .protocol import CommandResult, ErrorMessage, SendMessage
 from .protocol import SessionBootstrapEvent as IpcSessionBootstrapEvent
 from .protocol import SessionEndEvent as IpcSessionEndEvent
 from .protocol import UserMessageEvent as IpcUserMessageEvent
-from .server import DEFAULT_HOST, DEFAULT_PORT, AdapterInfo, CoreWsServer
+from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
 
 MCP_CONFIG_PATH = Path("./configs/mcp.json")
 BUILTIN_PLUGINS_PATH = Path("muika/builtin_plugins")
@@ -103,7 +104,7 @@ class CoreBootstrap:
         CommandDispatcher.setup(self._muika, _send_command_result)
 
     async def start(self) -> None:
-        """Boot all components."""
+        """加载记忆后启动连接服务和核心循环。"""
         logger.info("Muika Core is booting...")
 
         validate_template_configuration((mas_config.persona_template, mas_config.agent_template))
@@ -121,19 +122,21 @@ class CoreBootstrap:
         )
 
     async def stop(self) -> None:
-        """Gracefully shut down all components."""
+        """停止接入和后台活动，再关闭数据库。"""
         if self._shutdown_event.is_set():
             return
 
         logger.info("Muika Core is shutting down...")
 
         self._shutdown_event.set()
-        stop_plugin_watcher()
-        get_plugin_manager().shutdown_all()
-        self._muika.stop()
-        await self._executor.scheduler.close()
-        await self._ws_server.stop()
-        await close_db()
+        try:
+            await self._ws_server.stop()
+        finally:
+            stop_plugin_watcher()
+            get_plugin_manager().shutdown_all()
+            await self._muika.stop()
+            await self._executor.scheduler.close()
+            await close_db()
 
         logger.success("Muika Core stopped")
 
@@ -250,56 +253,64 @@ async def run_core(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
 ) -> None:
-    """Async entry point for the Core process."""
+    """初始化核心进程，并在退出或启动失败后清理资源。"""
     init_logger()
 
-    logger.info(f"Muika-After-Story 版本: {get_version()}")
-    logger.info(f"Muika-After-Story 数据目录: {mas_config.data_dir.resolve()}")
+    logger.info(f"Muika-After-Story version: {get_version()}")
+    logger.info(f"Muika-After-Story data directory: {mas_config.data_dir.resolve()}")
 
     logger.debug("Loading Database...")
     await init_db()
 
-    recovered = get_core_proposal_manager().recover_incomplete()
-    if recovered:
-        logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
-    if mas_config.enable_core_proposals and (mas_config.enable_code_execution or mas_config.enable_shell_execution):
-        logger.warning(
-            "[CoreProposal] Code or shell execution is enabled. These trusted tools can bypass Core proposal controls."
-        )
-
-    if MCP_CONFIG_PATH.exists():
-        logger.info("Loading MCP Server config")
-        from muika.plugin.mcp import initialize_servers
-
-        await initialize_servers()
-
-    logger.info("Loading plugins...")
-    load_plugins(BUILTIN_PLUGINS_PATH, mas_config.plugins_dir)
-
-    bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
-    if mas_config.enable_plugin_hot_reload:
-        start_plugin_watcher(get_plugin_manager(), Path(mas_config.plugins_dir))
-
-    await bootstrap.start()
-
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:
-            pass
-
+    bootstrap: Optional[CoreBootstrap] = None
     try:
+        recovered = get_core_proposal_manager().recover_incomplete()
+        if recovered:
+            logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
+        if mas_config.enable_core_proposals and (mas_config.enable_code_execution or mas_config.enable_shell_execution):
+            logger.warning(
+                "[CoreProposal] Code or shell execution is enabled. "
+                "These trusted tools can bypass Core proposal controls."
+            )
+
+        if MCP_CONFIG_PATH.exists():
+            logger.info("Loading MCP Server config")
+
+            await initialize_servers()
+
+        logger.info("Loading plugins...")
+        load_plugins(BUILTIN_PLUGINS_PATH, mas_config.plugins_dir)
+
+        bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
+        if mas_config.enable_plugin_hot_reload:
+            start_plugin_watcher(get_plugin_manager(), Path(mas_config.plugins_dir))
+
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except NotImplementedError:
+                pass
+
+        await bootstrap.start()
         await stop_event.wait()
     except KeyboardInterrupt:
         logger.info("[Core] Interrupted by user")
-
-    await bootstrap.stop()
+    finally:
+        try:
+            if bootstrap is not None:
+                await bootstrap.stop()
+            else:
+                stop_plugin_watcher()
+                get_plugin_manager().shutdown_all()
+                await close_db()
+        finally:
+            await cleanup_servers()
 
 
 def main(argv: Optional[list[str]] = None) -> None:
-    """CLI entry point for the Core process."""
+    """解析命令行参数并运行核心进程。"""
     args = _parse_args(argv)
     asyncio.run(run_core(host=args.host, port=args.port))
 

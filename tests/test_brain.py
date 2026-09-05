@@ -352,3 +352,28 @@ async def test_mcp_tools_remain_in_consecutive_requests_and_clear_on_cleanup(fak
         assert "remote_probe" not in {t["function"]["name"] for t in fake.requests[-1].tools}
     finally:
         await client.cleanup_servers()
+
+
+async def test_mcp_cleanup_exits_scopes_in_original_task_and_reverse_order(monkeypatch):
+    from contextlib import AsyncExitStack
+    from types import SimpleNamespace
+
+    from anyio import CancelScope
+
+    from muika.plugin.mcp import client
+
+    closed = []
+    servers = []
+    for name in ("first", "second"):
+        stack = AsyncExitStack()
+        stack.enter_context(CancelScope())
+
+        async def cleanup(stack=stack, name=name):
+            await stack.aclose()
+            closed.append(name)
+
+        servers.append(SimpleNamespace(cleanup=cleanup))
+    monkeypatch.setattr(client, "_servers", servers)
+    monkeypatch.setattr(client, "_tools", [])
+    await client.cleanup_servers()
+    assert closed == ["second", "first"]

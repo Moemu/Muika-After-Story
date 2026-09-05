@@ -11,14 +11,13 @@ from muika.core.scheduler import Scheduler
 from muika.core.state import MuikaState
 from muika.llm.utils.tools import function_call_handler
 from muika.plugin.func_call import get_function_calls
-from muika.plugin.func_call._context import clear_butler_context, set_butler_context
+from muika.plugin.func_call.context import tool_context
 
 
 async def test_registered_tool_delivers_one_event():
     queue = asyncio.Queue()
     executor = Executor(queue, AsyncMock())
-    set_butler_context(MuikaState(), executor)
-    try:
+    with tool_context(MuikaState(), executor):
         report = await get_function_calls()["plan_future_event"].run(event="drink water", trigger_in_seconds=0)
         assert "scheduled" in report
         event = await asyncio.wait_for(queue.get(), 1)
@@ -26,9 +25,7 @@ async def test_registered_tool_delivers_one_event():
         assert event.payload.what == "drink water"
         await executor.scheduler.close()
         assert queue.empty()
-    finally:
-        clear_butler_context()
-        await executor.scheduler.close()
+    await executor.scheduler.close()
 
 
 @pytest.mark.parametrize(
@@ -55,20 +52,16 @@ async def test_invalid_schedule_creates_no_event(kwargs):
 
 
 async def test_tool_reports_failure_without_scheduling():
-    clear_butler_context()
     assert "Executor" in await function_call_handler("plan_future_event", {"event": "test", "trigger_in_seconds": 0})
     executor = Executor(asyncio.Queue(), AsyncMock())
-    set_butler_context(MuikaState(), executor)
-    try:
+    with tool_context(MuikaState(), executor):
         assert "Cannot schedule" in await get_function_calls()["plan_future_event"].run(event=" ", trigger_in_seconds=0)
         await executor.scheduler.close()
         assert "Cannot schedule" in await get_function_calls()["plan_future_event"].run(
             event="test", trigger_in_seconds=0
         )
         assert executor.scheduler.event_queue.empty()
-    finally:
-        clear_butler_context()
-        await executor.scheduler.close()
+    await executor.scheduler.close()
 
 
 async def test_repeating_event_stops_on_close():

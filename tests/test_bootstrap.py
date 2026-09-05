@@ -4,9 +4,10 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from muika.core.memory import MemoryCategory, MemoryLayer, MemoryRecord
 from muika.ipc.bootstrap import CoreBootstrap
-from muika.plugin.func_call._context import clear_butler_context
 
 
 async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkeypatch):
@@ -51,4 +52,19 @@ async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkey
         release.set()
         await startup
         await bootstrap._executor.scheduler.close()
-        clear_butler_context()
+
+
+async def test_memory_load_failure_prevents_startup(monkeypatch):
+    for name in ("MuikaBrain", "ButlerAgent", "TopicManager", "DigestAgent", "ReflectionAgent"):
+        monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
+    server = MagicMock(start=AsyncMock())
+    monkeypatch.setattr("muika.ipc.bootstrap.CoreWsServer", MagicMock(return_value=server))
+    monkeypatch.setattr("muika.ipc.bootstrap.CommandDispatcher.setup", MagicMock())
+    monkeypatch.setattr("muika.ipc.bootstrap.validate_template_configuration", MagicMock())
+    bootstrap = CoreBootstrap(ipc_secret="test")
+    bootstrap._muika.memory.load = AsyncMock(side_effect=RuntimeError("history unavailable"))
+    bootstrap._muika.start = MagicMock()
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        await bootstrap.start()
+    server.start.assert_not_awaited()
+    bootstrap._muika.start.assert_not_called()

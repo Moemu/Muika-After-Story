@@ -11,8 +11,8 @@ from muika.core.memory import MemoryManager
 from muika.core.state import MuikaState
 from muika.llm.utils.tools import function_call_handler
 from muika.plugin.command import CommandDispatcher
-from muika.plugin.func_call._context import clear_butler_context, set_butler_context
 from muika.plugin.func_call.caller import Caller, FunctionCallValidationError
+from muika.plugin.func_call.context import ToolContext, get_dependencies, tool_context
 
 
 class _CountParams(BaseModel):
@@ -76,13 +76,10 @@ async def test_tool_dependencies_follow_each_concurrent_context():
         memory = MemoryManager()
         state = MuikaState(memory=memory)
         executor = Executor(asyncio.Queue(), AsyncMock())
-        set_butler_context(state, executor)
-        try:
+        with tool_context(state, executor):
             result = await caller.run(count=str(count))
             assert result == (count, executor, state, memory)
-        finally:
-            clear_butler_context()
-            await executor.scheduler.close()
+        await executor.scheduler.close()
 
     await asyncio.gather(invoke(1), invoke(2))
 
@@ -98,7 +95,6 @@ async def test_model_cannot_supply_dependency_and_missing_context_does_not_run(p
         return count
 
     caller.function = target
-    clear_butler_context()
     with pytest.raises(FunctionCallValidationError, match="Dependencies cannot be supplied"):
         await caller.run(count=1, executor="forged")
     with pytest.raises(TypeError, match="Executor.*unavailable"):
@@ -114,15 +110,12 @@ async def test_tool_without_parameter_model_keeps_defaults_and_rejects_unknown_a
 
     caller.function = target
     executor = Executor(asyncio.Queue(), AsyncMock())
-    set_butler_context(MuikaState(), executor)
-    try:
+    with tool_context(MuikaState(), executor):
         assert "executor" not in caller.data()["function"]["parameters"]["properties"]
         assert await caller.run() == (executor, 3)
         with pytest.raises(FunctionCallValidationError, match="unknown"):
             await caller.run(unknown=1)
-    finally:
-        clear_butler_context()
-        await executor.scheduler.close()
+    await executor.scheduler.close()
 
 
 async def test_command_injection_preserves_result_arguments_defaults_and_reply():
@@ -140,3 +133,16 @@ async def test_command_injection_preserves_result_arguments_defaults_and_reply()
     await dispatcher._invoke(handler, registry, parsed)
     assert received == [(executor, parsed, 7, "ok")]
     registry.finish.assert_awaited_once_with("done")
+
+
+def test_nested_tool_context_restores_outer_request_after_error():
+    state = MuikaState()
+    executor = MagicMock()
+    with tool_context(state, executor) as outer:
+        with pytest.raises(RuntimeError, match="failed"):
+            with tool_context(MuikaState(), executor) as inner:
+                assert get_dependencies()[ToolContext] is inner
+                raise RuntimeError("failed")
+        assert get_dependencies()[ToolContext] is outer
+        assert get_dependencies()[MuikaState] is state
+    assert get_dependencies()[ToolContext] is None

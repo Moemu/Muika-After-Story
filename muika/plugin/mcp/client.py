@@ -1,4 +1,3 @@
-import asyncio
 from typing import Any, Optional
 
 from muika.utils.logger import logger
@@ -65,10 +64,12 @@ async def cleanup_servers() -> None:
     servers = list(_servers)
     _servers.clear()
     _tools.clear()
-    results = await asyncio.gather(*(server.cleanup() for server in servers), return_exceptions=True)
-    for result in results:
-        if isinstance(result, BaseException):
-            logger.warning(f"MCP server cleanup failed: {result}")
+    # MCP 传输的取消作用域必须在创建任务中按逆序退出。
+    for server in reversed(servers):
+        try:
+            await server.cleanup()
+        except Exception as error:
+            logger.warning(f"MCP server cleanup failed: {error}")
 
 
 def transform_json(tool: Tool) -> dict[str, Any]:

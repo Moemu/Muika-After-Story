@@ -1,18 +1,4 @@
-"""
-Butler Agent — maps freeform natural-language commands (from Muika's <agent>...</agent> tags) to
-tool-augmented LLM calls, then returns the final text response to the Brain.
-
-The butler operates by passing all registered tools to the LLM via ModelRequest.tools.
-The LLM provider (DashScope / OpenAI / etc.) handles tool call dispatch internally:
-  1. LLM decides which tool(s) to call → provider executes via function_call_handler.
-  2. Provider feeds tool results back to LLM → LLM produces final text.
-  3. Butler returns that text as the butler report.
-
-This means execute_command() always returns a human-readable string, and Muika (the Brain)
-never receives raw tool data — just a polished butler report.
-
-External plugins register tools via @on_function_call decorator.
-"""
+"""执行 Muika 的行动意图，并提供记忆检索、分类和摘要。"""
 
 from __future__ import annotations
 
@@ -21,7 +7,7 @@ import re
 
 from muika.config import get_model_config, mas_config
 
-# Import tool modules so @on_function_call registrations happen at import time.
+# 导入工具模块以完成注册。
 from muika.core.actions import tools as _tools  # noqa: F401
 from muika.core.butler._prompts import (
     MEMORY_CLASSIFICATION_PROMPT,
@@ -35,11 +21,7 @@ from muika.llm import ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
 from muika.plugin.func_call import get_tool_list
-from muika.plugin.func_call._context import (
-    clear_butler_context,
-    pop_resources,
-    set_butler_context,
-)
+from muika.plugin.func_call.context import tool_context
 from muika.plugin.skills import get_skill_manager
 from muika.template.loader import generate_prompt_from_template
 from muika.utils.logger import logger
@@ -57,11 +39,6 @@ def _parse_agent_report(text: str) -> str:
         return report if match.group(1) == "completed" else f"Agent blocked: {report}"
     last_output = text.strip() or "(empty response)"
     return f"Agent stopped before reporting completion. Last output: {last_output}"
-
-
-# ---------------------------------------------------------------------------
-# ButlerAgent
-# ---------------------------------------------------------------------------
 
 
 class ButlerAgent:
@@ -228,16 +205,10 @@ class ButlerAgent:
         state: MuikaState,
         executor: Executor,
     ) -> tuple[str, list[Resource]]:
-        """
-        Execute *command* by passing it to the LLM with all registered tools.
-
-        The LLM provider handles tool call dispatch internally. Returns (report, resources).
-        """
+        """调用模型执行行动意图，返回执行报告和工具资源。"""
         logger.info(f"[Butler] Executing command: {command!r}")
 
-        # 注入 Butler 上下文，让工具函数能访问 state 和 executor
-        set_butler_context(state, executor)
-        try:
+        with tool_context(state, executor) as context:
             # 组装系统提示（Muika 的行动半身模板），注入可用技能列表
             system = generate_prompt_from_template(mas_config.agent_template)
 
@@ -259,7 +230,7 @@ class ButlerAgent:
                 return (f"I encountered an error while executing the command: {e}", [])
 
             # 收集工具执行过程中产生的资源（图片等）
-            resources = pop_resources()
+            resources = context.resources
 
             if report:
                 logger.info(f"[Butler] Report ready ({len(report)} chars): {report[:120]!r}")
@@ -267,5 +238,3 @@ class ButlerAgent:
                 logger.debug("[Butler] Empty report (silent operation).")
 
             return (report, resources)
-        finally:
-            clear_butler_context()

@@ -34,11 +34,6 @@ def _preference() -> MemoryRecord:
     return MemoryRecord(layer=MemoryLayer.PREFERENCE, category=MemoryCategory.USER, key="fav_drink", value="tea")
 
 
-# ---------------------------------------------------------------------------
-# fetch_relevant_preferences
-# ---------------------------------------------------------------------------
-
-
 async def test_fetch_preferences_empty_shortcircuit(fake_llm_factory):
     agent = _butler(fake_llm_factory())
     result = await agent.fetch_relevant_preferences("hi", [])
@@ -60,11 +55,6 @@ async def test_fetch_preferences_llm_failure_empty(fake_llm_factory):
     agent = _butler(fake)
     result = await agent.fetch_relevant_preferences("hi", [_preference()])
     assert result == []
-
-
-# ---------------------------------------------------------------------------
-# summarize_session
-# ---------------------------------------------------------------------------
 
 
 async def test_summarize_session_empty(fake_llm_factory):
@@ -89,11 +79,6 @@ async def test_summarize_session_llm_failure(fake_llm_factory):
     agent = _butler(fake_llm_factory(), fake_summarize=summarize)
     with pytest.raises(RuntimeError, match="boom"):
         await agent.summarize_session([SessionTurn(role="user", content="x")])
-
-
-# ---------------------------------------------------------------------------
-# classify_and_store_memory
-# ---------------------------------------------------------------------------
 
 
 async def test_classify_empty_content(fake_llm_factory):
@@ -146,11 +131,6 @@ async def test_classify_retries_then_gives_up(fake_llm_factory):
     assert len(state.memory.records) == 0
 
 
-# ---------------------------------------------------------------------------
-# execute_command
-# ---------------------------------------------------------------------------
-
-
 def _cmd_patches():
     return (
         patch("muika.core.butler.agent.get_tool_list", return_value=[{"name": "read_file"}]),
@@ -189,13 +169,13 @@ async def test_execute_command_llm_error(fake_llm_factory):
 
 
 async def test_execute_command_clears_context(fake_llm_factory):
-    from muika.plugin.func_call._context import get_state
+    from muika.plugin.func_call.context import get_dependencies
 
     fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">Done.</agent_result>'))
     agent = _butler(fake)
     with _cmd_patches()[0], _cmd_patches()[1]:
         await agent.execute_command("cmd", MuikaState(), executor=None)
-    assert get_state() is None
+    assert get_dependencies()[MuikaState] is None
 
 
 async def test_execute_command_rejects_acknowledgement_as_result(fake_llm_factory):
