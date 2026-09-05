@@ -1,6 +1,6 @@
 """
 Butler Agent 上下文变量，用于在 function_call 执行链中传递 state、executor 和 resources。
-工具函数通过 get_state() / get_executor() 获取上下文，通过 add_resource() 收集资源。
+工具处理器可按类型注入上下文依赖；旧工具仍可使用访问函数。资源通过 add_resource() 收集。
 """
 
 from __future__ import annotations
@@ -49,3 +49,13 @@ def set_butler_context(state: MuikaState, executor: Executor) -> None:
 def clear_butler_context() -> None:
     """清除 Butler 上下文"""
     _butler_context.set(None)
+
+
+def get_dependencies() -> dict[type, Any]:
+    """返回当前调用的依赖表，不访问命令派发器的全局实例。"""
+    from muika.core.executor import Executor
+    from muika.core.memory import MemoryManager
+    from muika.core.state import MuikaState
+
+    state = get_state()
+    return {MuikaState: state, Executor: get_executor(), MemoryManager: state.memory if state is not None else None}

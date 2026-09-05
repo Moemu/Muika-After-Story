@@ -13,7 +13,9 @@ from typing import Any, Optional, Type, get_type_hints
 
 from pydantic import BaseModel
 
+from ..dependencies import resolve_arguments
 from ..utils import is_coroutine_callable
+from ._context import get_dependencies
 from ._types import ASYNC_FUNCTION_CALL_FUNC, F
 from .parameter import FunctionCallJsonSchema, Parameter
 from .utils import async_wrap
@@ -73,38 +75,20 @@ class Caller:
         # logger.debug(f"Function Call 函数 {self.module_name}.{self._name} 已成功加载")
         return func
 
-    async def _inject_dependencies(self, kwargs: dict) -> dict:
-        """
-        自动解析参数并进行依赖注入
-        """
-        sig = inspect.signature(self.function)
-        hints = get_type_hints(self.function)
-
-        inject_args = kwargs.copy()
-
-        for name, param in sig.parameters.items():
-            param_type = hints.get(name, None)
-
-            # 依赖注入发生段，留空作备用
-            if param_type and isinstance(param_type, type):
-                pass
-
-            # 填充默认值
-            elif param.default != inspect.Parameter.empty:
-                inject_args[name] = kwargs.get(name, param.default)
-
-            # 如果参数未提供，则检查是否有默认值
-            elif name not in inject_args:
-                raise ValueError(f"缺少必要参数: {name}")
-
-        return inject_args
-
     async def run(self, **kwargs: Any) -> Any:
         """
         执行 function call
         """
         if self.function is None:
             raise ValueError("未注册函数对象")
+
+        dependencies = get_dependencies()
+        hints = get_type_hints(self.function)
+        supplied_dependencies = sorted(name for name in kwargs if hints.get(name) in dependencies)
+        if supplied_dependencies:
+            raise FunctionCallValidationError(
+                f"Dependencies cannot be supplied as tool arguments: {', '.join(supplied_dependencies)}"
+            )
 
         if self._parameters_model:
             unknown = sorted(set(kwargs) - set(self._parameters_model.model_fields))
@@ -117,7 +101,12 @@ class Caller:
                 raise FunctionCallValidationError(str(exc)) from exc
             kwargs = {name: getattr(validated, name) for name in self._parameters_model.model_fields}
 
-        inject_args = await self._inject_dependencies(kwargs)
+        else:
+            unknown = sorted(set(kwargs) - set(inspect.signature(self.function).parameters))
+            if unknown:
+                raise FunctionCallValidationError(f"Unexpected argument(s): {', '.join(unknown)}")
+
+        inject_args = resolve_arguments(self.function, kwargs, dependencies)
 
         return await self.function(**inject_args)
 

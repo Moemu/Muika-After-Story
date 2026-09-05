@@ -2,8 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from muika.core.executor import Executor
 from muika.plugin.func_call import on_function_call
-from muika.plugin.func_call._context import get_executor
 
 
 class PlanFutureEventParams(BaseModel):
@@ -21,14 +21,12 @@ class PlanFutureEventParams(BaseModel):
 )
 async def plan_future_event(
     event: str,
+    executor: Executor,
     trigger_in_seconds: float | None = None,
     trigger_at: str | None = None,
     repeat_interval_seconds: float | None = None,
 ) -> str:
     """通过当前执行器创建提醒，只在成功调度后报告完成。"""
-    executor = get_executor()
-    if executor is None:
-        return "Cannot schedule an event without an active executor."
     try:
         await executor.scheduler.schedule(
             event,

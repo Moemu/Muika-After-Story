@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from muika.core.actions.tools._scheduler import plan_future_event
 from muika.core.executor import Executor
 from muika.core.scheduler import Scheduler
 from muika.core.state import MuikaState
+from muika.llm.utils.tools import function_call_handler
 from muika.plugin.func_call import get_function_calls
 from muika.plugin.func_call._context import clear_butler_context, set_butler_context
 
@@ -56,13 +56,15 @@ async def test_invalid_schedule_creates_no_event(kwargs):
 
 async def test_tool_reports_failure_without_scheduling():
     clear_butler_context()
-    assert "without an active executor" in await plan_future_event("test", trigger_in_seconds=0)
+    assert "Executor" in await function_call_handler("plan_future_event", {"event": "test", "trigger_in_seconds": 0})
     executor = Executor(asyncio.Queue(), AsyncMock())
     set_butler_context(MuikaState(), executor)
     try:
-        assert "Cannot schedule" in await plan_future_event(" ", trigger_in_seconds=0)
+        assert "Cannot schedule" in await get_function_calls()["plan_future_event"].run(event=" ", trigger_in_seconds=0)
         await executor.scheduler.close()
-        assert "Cannot schedule" in await plan_future_event("test", trigger_in_seconds=0)
+        assert "Cannot schedule" in await get_function_calls()["plan_future_event"].run(
+            event="test", trigger_in_seconds=0
+        )
         assert executor.scheduler.event_queue.empty()
     finally:
         clear_butler_context()

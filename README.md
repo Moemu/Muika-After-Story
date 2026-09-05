@@ -105,6 +105,30 @@ Brain 和 Butler 每次请求调用 `get_tool_list()`，读取当前函数注册
 插件管理器不再绑定 Butler，也不再调用 `refresh_tools()` 或 `refresh_butler()`。
 MCP 初始化时获取工具列表，清理时清空；`get_mcp_list()` 现在是同步读取接口。
 
+### 工具依赖注入
+
+命令和工具共用参数绑定函数。工具处理器可通过具体类型声明 `Executor`、`MuikaState` 或 `MemoryManager` 依赖。
+运行时从当前调用上下文注入这些实例，不读取命令派发器的全局实例。
+
+```python
+from pydantic import BaseModel
+from muika.core.executor import Executor
+from muika.plugin.func_call import on_function_call
+
+class ReminderParams(BaseModel):
+    event: str
+
+@on_function_call("Schedule a reminder", params=ReminderParams)
+async def remind(event: str, executor: Executor):
+    await executor.scheduler.schedule(event, trigger_in_seconds=60)
+    return "Reminder scheduled."
+```
+
+参数模型只声明模型提供的业务参数，依赖只声明在处理器签名中。
+模型不能提供依赖参数；缺少当前依赖时，调用失败且不执行处理器。
+调用顺序为类型依赖、同名业务参数、函数默认值。依赖按具体类型匹配，不解析 `Optional` 或联合类型。
+直接调用 Python 函数时须自行传入依赖；通过 `Caller.run()` 调用时才进行注入。
+
 ## Quick Start🚀
 
 ### 通过 mas-launcher 安装（推荐）
