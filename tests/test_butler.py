@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
+
 from muika.core.butler.agent import ButlerAgent
 from muika.core.memory import (
     MemoryCategory,
@@ -85,8 +87,8 @@ async def test_summarize_session_returns_stripped(fake_llm_factory):
 async def test_summarize_session_llm_failure(fake_llm_factory):
     summarize = fake_llm_factory(error=RuntimeError("boom"))
     agent = _butler(fake_llm_factory(), fake_summarize=summarize)
-    result = await agent.summarize_session([SessionTurn(role="user", content="x")])
-    assert result.startswith("[Summary failed:")
+    with pytest.raises(RuntimeError, match="boom"):
+        await agent.summarize_session([SessionTurn(role="user", content="x")])
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +114,7 @@ async def test_classify_state_memory_none(fake_llm_factory):
     assert agent.model.call_count == 1  # 解析成功但 state.memory 为 None 时不写
 
 
-async def test_classify_stores_record(fake_llm_factory):
+async def test_classify_stores_record(fake_llm_factory, redirect_get_session):
     fake = fake_llm_factory(
         response=ModelCompletions(
             text='{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'

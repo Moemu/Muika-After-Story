@@ -1,11 +1,7 @@
-"""``MemoryManager`` 纯内存记录与 prompt 构建测试，以及 DB 持久化（重定向 get_session）。
-
-注意：``upsert_memory`` 等持久化方法在函数体内 ``from muika.database.db import get_session``
-（运行时重新绑定），因此必须 patch ``muika.database.db.get_session`` 而不是
-``muika.core.memory.get_session``。
-"""
+"""验证记忆记录、提示词构建和数据库持久化。"""
 
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -22,11 +18,6 @@ def _manager(max_turns: int = 3) -> MemoryManager:
     return MemoryManager(max_turns=max_turns)
 
 
-# ---------------------------------------------------------------------------
-# 内存记录管理
-# ---------------------------------------------------------------------------
-
-
 def test_add_context_and_maxlen_eviction():
     m = _manager()
     for i in range(5):
@@ -36,7 +27,7 @@ def test_add_context_and_maxlen_eviction():
 
 
 @pytest.mark.asyncio
-async def test_upsert_memory_in_memory():
+async def test_upsert_memory_in_memory(redirect_get_session):
     m = _manager()
     await m.upsert_memory(MemoryLayer.CORE, MemoryCategory.USER, "name", "Alice")
     assert "core:user:name" in m.records
@@ -47,7 +38,7 @@ async def test_upsert_memory_in_memory():
 
 
 @pytest.mark.asyncio
-async def test_forget_memory_in_memory():
+async def test_forget_memory_in_memory(redirect_get_session):
     m = _manager()
     await m.upsert_memory(MemoryLayer.STATE, MemoryCategory.RELATION, "k", "v")
     await m.forget_memory(MemoryLayer.STATE, MemoryCategory.RELATION, "k")
@@ -66,11 +57,6 @@ def test_new_session_first_vs_resume():
     m.new_session()
     assert m.session.is_first_session is False
     assert len(m.recent_turns) == 0
-
-
-# ---------------------------------------------------------------------------
-# prompt 构建
-# ---------------------------------------------------------------------------
 
 
 def test_get_core_prompt_empty():
@@ -204,11 +190,6 @@ def test_get_archives():
     assert m.get_archives() is m.archives
 
 
-# ---------------------------------------------------------------------------
-# DB 持久化（重定向 muika.database.db.get_session）
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_upsert_memory_persists_to_db(redirect_get_session):
     from muika.database.crud import MemoryRecordCRUD
@@ -236,3 +217,44 @@ async def test_add_archive_and_update_persist(redirect_get_session):
     rows = await ArchiveCRUD.list_all(redirect_get_session)
     assert len(rows) == 1
     assert rows[0].summary == "summary2"
+
+
+async def test_load_failure_preserves_existing_memory(redirect_get_session, monkeypatch):
+    manager = _manager()
+    await manager.upsert_memory(MemoryLayer.CORE, MemoryCategory.USER, "name", "Alice")
+    original_records = manager.records
+    original_archives = manager.archives
+    manager.session.is_first_session = False
+    monkeypatch.setattr("muika.core.memory.ArchiveCRUD.list_all", AsyncMock(side_effect=RuntimeError("offline")))
+    with pytest.raises(RuntimeError, match="offline"):
+        await manager.load()
+    assert manager.records is original_records
+    assert manager.archives is original_archives
+    assert not manager.session.is_first_session
+
+
+async def test_load_restores_history_without_duplicates(redirect_get_session):
+    manager = _manager()
+    await manager.upsert_memory(MemoryLayer.CORE, MemoryCategory.USER, "name", "Alice")
+    await manager.add_archive("We met.", datetime(2026, 1, 1), datetime(2026, 1, 2))
+    restored = _manager()
+    await restored.load()
+    await restored.load()
+    assert not restored.session.is_first_session
+    assert restored.records["core:user:name"].value == "Alice"
+    assert len(restored.archives) == 1
+
+
+async def test_archive_write_failure_leaves_memory_unchanged(redirect_get_session, monkeypatch):
+    manager = _manager()
+    start, end = datetime(2026, 1, 1), datetime(2026, 1, 2)
+    monkeypatch.setattr("muika.core.memory.ArchiveCRUD.add", AsyncMock(side_effect=RuntimeError("offline")))
+    with pytest.raises(RuntimeError, match="offline"):
+        await manager.add_archive("new", start, end)
+    assert manager.archives == []
+    entry = ArchiveEntry(session_id=manager.session.session_id, summary="old", period_start=start, period_end=end)
+    manager.archives.append(entry)
+    monkeypatch.setattr("muika.core.memory.ArchiveCRUD.updated", AsyncMock(side_effect=RuntimeError("offline")))
+    with pytest.raises(RuntimeError, match="offline"):
+        await manager.update_archive("new", start, end)
+    assert entry.summary == "old"

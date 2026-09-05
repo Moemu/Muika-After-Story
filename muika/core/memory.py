@@ -10,7 +10,7 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
-from muika.database.crud import ArchiveCRUD
+from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
 from muika.database.db import get_session
 from muika.models import Resource
 from muika.utils.logger import logger
@@ -102,58 +102,38 @@ class MemoryManager:
 
         self.session: SessionState = SessionState()
 
-    async def load(self):  # pragma: no cover
-        """从数据库加载全量记忆，若有历史数据则进入 Resume 模式。"""
-        from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
-        from muika.database.db import get_session
-
-        try:
-            async with get_session() as session:
-                db_records = await MemoryRecordCRUD.get_all(session)
-                for r in db_records:
-                    storage_key = f"{r.layer}:{r.category}:{r.key}"
-                    self.records[storage_key] = MemoryRecord(
-                        id=r.id,
-                        layer=MemoryLayer(r.layer),
-                        category=MemoryCategory(r.category),
-                        key=r.key,
-                        value=r.value,
-                        created_at=datetime.fromisoformat(r.created_at),
-                        updated_at=datetime.fromisoformat(r.updated_at),
-                        expires_at=datetime.fromisoformat(r.expires_at) if r.expires_at else None,
-                    )
-
-                db_archives = await ArchiveCRUD.list_all(session)
-                for a in db_archives:
-                    self.archives.append(
-                        ArchiveEntry(
-                            id=a.id,
-                            session_id=a.session_id,
-                            summary=a.summary,
-                            period_start=datetime.fromisoformat(a.period_start),
-                            period_end=datetime.fromisoformat(a.period_end),
-                            created_at=datetime.fromisoformat(a.created_at),
-                        )
-                    )
-
-                if not self.records and not self.archives:
-                    logger.debug("[Memory] No data in DB — starting fresh (first session).")
-                    return
-
-                self.session.is_first_session = False
-
-                logger.info(
-                    f"[Memory] Loaded from DB — records={len(self.records)} "
-                    f"archives={len(self.archives)} "
-                    f"mode=resume"
+    async def load(self) -> None:
+        """完整加载历史记忆，加载失败时保留原状态并向调用者报告异常。"""
+        records: dict[str, MemoryRecord] = {}
+        archives: list[ArchiveEntry] = []
+        async with get_session() as session:
+            for record in await MemoryRecordCRUD.get_all(session):
+                storage_key = f"{record.layer}:{record.category}:{record.key}"
+                records[storage_key] = MemoryRecord(
+                    id=record.id,
+                    layer=MemoryLayer(record.layer),
+                    category=MemoryCategory(record.category),
+                    key=record.key,
+                    value=record.value,
+                    created_at=datetime.fromisoformat(record.created_at),
+                    updated_at=datetime.fromisoformat(record.updated_at),
+                    expires_at=datetime.fromisoformat(record.expires_at) if record.expires_at else None,
                 )
-                by_layer: dict[str, int] = {}
-                for r in self.records.values():
-                    by_layer[r.layer.value] = by_layer.get(r.layer.value, 0) + 1
-                logger.debug(f"[Memory] Layer breakdown: {by_layer}")
-
-        except Exception as e:
-            logger.error(f"[Memory] Failed to load from DB: {e}")
+            for archive in await ArchiveCRUD.list_all(session):
+                archives.append(
+                    ArchiveEntry(
+                        id=archive.id,
+                        session_id=archive.session_id,
+                        summary=archive.summary,
+                        period_start=datetime.fromisoformat(archive.period_start),
+                        period_end=datetime.fromisoformat(archive.period_end),
+                        created_at=datetime.fromisoformat(archive.created_at),
+                    )
+                )
+        self.records = records
+        self.archives = archives
+        self.session.is_first_session = not (records or archives)
+        logger.info(f"[Memory] Loaded records={len(records)} archives={len(archives)}")
 
     def new_session(self):
         """
@@ -190,6 +170,20 @@ class MemoryManager:
         storage_key = self._record_key(layer, category, key)
         existing = self.records.get(storage_key)
 
+        try:
+            async with get_session() as db_session:
+                await MemoryRecordCRUD.upsert(
+                    db_session,
+                    layer=layer.value,
+                    category=category.value,
+                    key=key,
+                    value=value,
+                    expires_at=expires_at.isoformat() if expires_at else None,
+                )
+        except Exception as e:
+            logger.error(f"[Memory] DB upsert failed for {storage_key!r}: {e}")
+            raise
+
         if existing:
             logger.warning(f"Memory '{storage_key}' overwritten: {existing.value!r} → {value!r}")
             existing.value = value
@@ -204,23 +198,6 @@ class MemoryManager:
                 expires_at=expires_at,
             )
 
-        # 持久化到 DB
-        from muika.database.crud import MemoryRecordCRUD
-        from muika.database.db import get_session
-
-        try:
-            async with get_session() as db_session:
-                await MemoryRecordCRUD.upsert(
-                    db_session,
-                    layer=layer.value,
-                    category=category.value,
-                    key=key,
-                    value=value,
-                    expires_at=expires_at.isoformat() if expires_at else None,
-                )
-        except Exception as e:
-            logger.error(f"[Memory] DB upsert failed for {storage_key!r}: {e}")
-
         logger.debug(f"[Memory] Upserted: {storage_key} = {value!r}")
 
     async def forget_memory(
@@ -232,17 +209,13 @@ class MemoryManager:
         """删除一条记忆。"""
         storage_key = self._record_key(layer, category, key)
         if storage_key in self.records:
-            del self.records[storage_key]
-            logger.debug(f"[Memory] Forgotten: {storage_key}")
-            # 持久化删除到 DB
-            from muika.database.crud import MemoryRecordCRUD
-            from muika.database.db import get_session
-
             try:
                 async with get_session() as db_session:
                     await MemoryRecordCRUD.delete(db_session, layer=layer.value, key=key)
             except Exception as e:
                 logger.error(f"[Memory] DB delete failed for {storage_key!r}: {e}")
+                raise
+            del self.records[storage_key]
         else:
             logger.warning(f"[Memory] forget_memory: key not found — {storage_key}")
 
@@ -259,8 +232,6 @@ class MemoryManager:
             period_start=period_start,
             period_end=period_end,
         )
-        self.archives.append(entry)
-        logger.debug(f"[Memory] Archive added for session {self.session.session_id}")
 
         try:
             async with get_session() as db_session:
@@ -273,6 +244,8 @@ class MemoryManager:
                 )
         except Exception as e:
             logger.error(f"[Memory] DB archive insert failed: {e}")
+            raise
+        self.archives.append(entry)
 
     async def update_archive(
         self,
@@ -282,13 +255,9 @@ class MemoryManager:
     ) -> None:
         """更新一条历史 Session 摘要（ARCHIVE 层）。"""
         archive_entry = next((a for a in self.archives if a.session_id == self.session.session_id), None)
-        if archive_entry:
-            archive_entry.summary = summary
-            archive_entry.period_start = period_start
-            archive_entry.period_end = period_end
-            logger.debug(f"[Memory] Archive updated for session {self.session.session_id}")
-        else:
-            return await self.add_archive(summary, period_start, period_end)
+        if archive_entry is None:
+            await self.add_archive(summary, period_start, period_end)
+            return
 
         try:
             async with get_session() as db_session:
@@ -301,8 +270,10 @@ class MemoryManager:
                 )
         except Exception as e:
             logger.error(f"[Memory] DB archive update failed: {e}")
-
-    # ──────────────────────────── Prompt 构建 ────────────────────────────
+            raise
+        archive_entry.summary = summary
+        archive_entry.period_start = period_start
+        archive_entry.period_end = period_end
 
     def _iter_layer(self, layer: MemoryLayer):
         """遍历指定层的有效记忆（自动跳过已过期的 STATE 条目）。"""

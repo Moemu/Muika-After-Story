@@ -153,15 +153,19 @@ class ButlerAgent:
         )
         try:
             completions = await self.summarize_model.ask(request=request, stream=False)
+            if not completions.succeed:
+                raise RuntimeError(f"Session summary failed: {completions.text}")
             _, summary = general_processor(completions.text)
             summary = summary.strip()
+            if not summary:
+                raise ValueError("Session summary is empty")
             logger.info(
                 f"[Butler/Summary] Done — {len(summary)} chars: {summary[:120]!r}{'...' if len(summary) > 120 else ''}"
             )
             return summary
         except Exception as e:
             logger.error(f"[Butler/Summary] Summarization LLM failed: {e}")
-            return f"[Summary failed: {e}]"
+            raise
 
     async def classify_and_store_memory(
         self,
