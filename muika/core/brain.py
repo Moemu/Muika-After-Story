@@ -3,10 +3,9 @@ from datetime import datetime
 from typing import List, Optional, TypeVar
 
 from muika.config import get_model_config_manager, mas_config
-from muika.ipc.server import AdapterInfo
 from muika.llm import ModelConfig, ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
-from muika.models import Resource
+from muika.models import AdapterInfo, Resource
 from muika.plugin.func_call import get_tool_list
 from muika.template import (
     PromptTemplatesData,

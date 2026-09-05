@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from aiohttp import WSMsgType, web
 
 from muika.config import mas_config
+from muika.models import AdapterInfo
 from muika.utils.logger import logger
 
 from .protocol import CoreToBotMessage, ErrorMessage
@@ -30,21 +31,12 @@ ADAPTER_CALLBACK_FUNC = Callable[["AdapterInfo"], Coroutine[Any, Any, None]]
 """适配器事件回调函数: 适配器名作为传入参数"""
 
 
-@dataclass
-class AdapterInfo:
-    """单个适配器连接的元数据。"""
+@dataclass(kw_only=True)
+class AdapterConnection(AdapterInfo):
+    """保存 IPC 连接和会话启动状态。"""
 
     ws: web.WebSocketResponse
-    client_name: str
-    connected_at: datetime = field(default_factory=datetime.now)
-    last_active_at: datetime = field(default_factory=datetime.now)
     bootstrapped: bool = False
-
-    def __repr__(self) -> str:
-        return self.client_name
-
-    def __str__(self) -> str:
-        return self.client_name
 
 
 class CoreWsServer:
@@ -68,7 +60,7 @@ class CoreWsServer:
         self._runner: Optional[web.AppRunner] = None
 
         # 适配器连接注册表: client_name → AdapterInfo
-        self._connections: Dict[str, AdapterInfo] = {}
+        self._connections: Dict[str, AdapterConnection] = {}
 
         # Bot 未连接时暂存的消息
         self._pending: deque[CoreToBotMessage] = deque(maxlen=_MAX_PENDING_MESSAGES)
@@ -82,8 +74,6 @@ class CoreWsServer:
         # 适配器连接 / 断开回调（由 CoreBootstrap 注册）
         self._on_adapter_connected: Optional[ADAPTER_CALLBACK_FUNC] = None
         self._on_adapter_disconnected: Optional[ADAPTER_CALLBACK_FUNC] = None
-
-    # ── 公共 API ──────────────────────────────────────────────────────────
 
     def register_handler(self, message_type: str, handler: EVENT_HANDLER) -> None:
         """
@@ -229,8 +219,6 @@ class CoreWsServer:
         if client_name in self._connections:
             self._connections[client_name].bootstrapped = True
 
-    # ── HTTP 端点 ─────────────────────────────────────────────────────────
-
     def get_adapter_names(self) -> List[str]:
         """返回当前已连接的所有适配器名称。"""
         return list(self._connections.keys())
@@ -279,7 +267,7 @@ class CoreWsServer:
         await ws.prepare(request)
 
         # 注册连接
-        adapter = AdapterInfo(
+        adapter = AdapterConnection(
             ws=ws,
             client_name=client_name,
         )
@@ -325,9 +313,7 @@ class CoreWsServer:
 
         return ws
 
-    # ── 消息分发 ──────────────────────────────────────────────────────────
-
-    async def _dispatch(self, raw: str, adapter: AdapterInfo) -> None:
+    async def _dispatch(self, raw: str, adapter: AdapterConnection) -> None:
         """解析 JSON 并分发给注册的处理器。"""
         client_name = adapter.client_name
         try:

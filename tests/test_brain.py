@@ -20,9 +20,8 @@ from muika.core.events import (
 from muika.core.memory import MemoryCategory, MemoryLayer, MemoryManager, MemoryRecord
 from muika.core.state import MuikaState
 from muika.core.topic_manager import EventTopic, StaticTopic, TopicSource
-from muika.ipc.server import AdapterInfo
 from muika.llm import ModelCompletions
-from muika.models import Message
+from muika.models import AdapterInfo, Message
 
 
 def _user_event(msg: str = "hello") -> UserMessageEvent:
@@ -61,12 +60,12 @@ def model_config_manager():
 def test_adapters_info_none_or_small_none():
     assert MuikaBrain.generate_adapters_info(None) is None
     assert MuikaBrain.generate_adapters_info([]) is None
-    assert MuikaBrain.generate_adapters_info([AdapterInfo(ws=None, client_name="qq")]) is None
+    assert MuikaBrain.generate_adapters_info([AdapterInfo(client_name="qq")]) is None
 
 
 def test_adapters_info_two_adapters():
-    a1 = AdapterInfo(ws=None, client_name="qq", last_active_at=datetime.now() - timedelta(seconds=30))
-    a2 = AdapterInfo(ws=None, client_name="telegram", last_active_at=datetime.now() - timedelta(hours=2))
+    a1 = AdapterInfo(client_name="qq", last_active_at=datetime.now() - timedelta(seconds=30))
+    a2 = AdapterInfo(client_name="telegram", last_active_at=datetime.now() - timedelta(hours=2))
     info = MuikaBrain.generate_adapters_info([a1, a2])
     assert "qq(Last active at just now)" in info
     assert "telegram(Last active at 2 hours ago)" in info
@@ -80,7 +79,7 @@ def test_adapters_info_ago_buckets():
         (timedelta(days=2), "2 days ago"),
     ]
     for delta, expected in cases:
-        adapter = AdapterInfo(ws=None, client_name="x", last_active_at=datetime.now() - delta)
+        adapter = AdapterInfo(client_name="x", last_active_at=datetime.now() - delta)
         info = MuikaBrain.generate_adapters_info([adapter, adapter])
         assert f"x(Last active at {expected})" in info
 

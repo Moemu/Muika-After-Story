@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 if TYPE_CHECKING:
-    from nonebot.plugin import PluginMetadata as NonebotPluginMetadata
     from pydantic import BaseModel
 
 
@@ -24,7 +23,7 @@ class PluginMetadata:
     config: Optional[Type["BaseModel"]] = None
     """插件配置项类，如无需配置可不填写"""
     extra: dict[Any, Any] = field(default_factory=dict)
-    """不知道干嘛的 extra 信息，我至今都没搞懂，喜欢的可以填"""
+    """插件自定义元数据"""
 
 
 @dataclass
@@ -37,14 +36,14 @@ class Plugin:
     """插件模块对象"""
     package_name: str
     """模块包名"""
-    meta: Optional[Union[PluginMetadata, "NonebotPluginMetadata"]] = None
+    meta: Optional[PluginMetadata] = None
     """插件元数据"""
 
     def __hash__(self) -> int:
         return hash(self.package_name)
 
     def __eq__(self, other: Any) -> bool:
-        return self.package_name == other.package_name if hasattr(other, "package_name") else False
+        return isinstance(other, Plugin) and self.package_name == other.package_name
 
     def __str__(self) -> str:
         return self.package_name
