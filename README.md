@@ -217,6 +217,12 @@ Step 4: 同意用户许可协议后开始运行。
 
 ## Configuration⚙️
 
+协议正文随安装包发布，无需创建 `configs/user_agreement.json`，也不受启动目录影响。
+旧路径的协议文件不再作为正文来源，程序不会删除用户目录中的遗留文件。
+同意记录仍保存在 `DATA_DIR/user_agreement.json`（默认 `./data/user_agreement.json`）。
+本次迁移保留协议版本 `2026-02-01`；已有有效同意记录无需重新确认。
+如果提示包内协议缺失或损坏，请重新安装 Muika-After-Story。
+
 创建 `.env` 文件：
 
 | 配置项                  | 类型(默认值)                              | 说明                                                         |

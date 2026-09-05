@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from importlib.resources import files
 from time import sleep
 
 from muika.config import mas_config
@@ -9,34 +9,23 @@ from muika.utils.logger import logger
 
 DATA_FILE = mas_config.data_dir / "user_agreement.json"
 
-# 共享协议内容文件：launcher 与核心端读取同一份文案与版本号
-AGREEMENT_FILE = Path("configs/user_agreement.json")
-
-_FALLBACK_TITLE = (
-    "感谢你选择 Muika-After-Story（以下简称 MAS）。请仔细阅读以下条款，在你开始使用 MAS 之前，你必须同意以下许可协议："
-)
-
-_FALLBACK_TEXT = """
-1. MAS 作为一款 AI 伴侣插件，可能会访问你计算机上的部分文件系统（如读取和存储用户输入、程序设置等）。所有操作将仅限于提供更加个性化的用户体验。
-2. MAS 可能会记录用户输入的对话内容和其他交互信息，但所有数据仅用于改善和优化 MAS 的行为与响应，不会用于第三方数据分享和上传到任何遥测服务器，所有数据仅在本地保存。
-3. MAS 会在后台运行，并可能访问互联网以获取更新，或者通过解析指定的信息源（如RSS）来提供实时内容更新。
-4. MAS 是一款允许“自我行动”的 AI，她可以访问本地文件系统、浏览器、甚至进行系统级操作，如定时提醒、文件读取等。请确保在使用过程中了解并接受此类行为。
-5. 你可以随时终止 MAS 的使用，并在设置中选择清除历史记录和个人数据。
-"""
-
-_FALLBACK_UPDATED = "2026-02-01"
-
 
 def _load_agreement_content() -> tuple[str, str, str]:
-    """从共享协议文件加载文案与版本号；文件缺失或损坏时回退到内置默认值"""
+    """读取包内协议正文及版本，资源缺失或损坏时报告安装错误。
+
+    :raises RuntimeError: 包内协议资源无法读取或字段无效。
+    """
     try:
-        data = json.loads(AGREEMENT_FILE.read_text(encoding="utf-8"))
+        data = json.loads(files("muika").joinpath("user_agreement.json").read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Agreement content must be an object")
         title, text, updated = data["title"], data["text"], data["updated"]
-        if title and text and updated:
-            return title, text, updated
-    except Exception as e:
-        logger.warning(f"读取共享协议内容失败({AGREEMENT_FILE}): {e}，使用内置回退文本")
-    return _FALLBACK_TITLE, _FALLBACK_TEXT, _FALLBACK_UPDATED
+        if not all(isinstance(value, str) and value.strip() for value in (title, text, updated)):
+            raise ValueError("Agreement fields must be non-empty strings")
+        datetime.fromisoformat(updated)
+        return title, text, updated
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+        raise RuntimeError("Bundled user agreement is missing or invalid. Reinstall Muika-After-Story.") from error
 
 
 AGREEMENT_TITLE, AGREEMENT_TEXT, AGREEMENT_UPDATED = _load_agreement_content()
@@ -77,13 +66,14 @@ class UserAgreement:
         except Exception as e:
             logger.error(f"加载用户协议失败: {e}，重新签署协议...")
 
-    def save_agreement(self):
+    def save_agreement(self) -> None:
         """保存用户的同意状态"""
         data = {
             "has_agreed": self.agreement_state.has_agreed,
             "timestamp": self.agreement_state.timestamp.isoformat(),
             "version": self.agreement_state.version,
         }
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.storage_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
