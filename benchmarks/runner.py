@@ -141,7 +141,6 @@ def build_brain(model: Any) -> MuikaBrain:
     """Construct a Brain without provider loading or watcher threads."""
     brain = MuikaBrain.__new__(MuikaBrain)
     brain.model = model
-    brain._mcp_tools = []
     return brain
 
 
