@@ -7,6 +7,21 @@ from typing import List, Literal, Optional, Union
 
 
 @dataclass
+class AdapterInfo:
+    """核心可见的适配器身份和活动时间。"""
+
+    client_name: str
+    connected_at: datetime = field(default_factory=datetime.now)
+    last_active_at: datetime = field(default_factory=datetime.now)
+
+    def __repr__(self) -> str:
+        return self.client_name
+
+    def __str__(self) -> str:
+        return self.client_name
+
+
+@dataclass
 class Resource:
     """多模态消息"""
 

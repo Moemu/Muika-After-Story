@@ -4,9 +4,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from muika.core.memory import MemoryCategory, MemoryLayer
+from muika.core.memory import MemoryCategory, MemoryLayer, MemoryManager
 from muika.plugin.func_call import on_function_call
-from muika.plugin.func_call._context import get_state
 from muika.utils.logger import logger
 
 
@@ -58,27 +57,24 @@ class MemoryParams(BaseModel):
 
 
 @on_function_call(
-    "Read, write, or forget a fact in Muika's long-term memory. "
-    "(Unless explicitly specified, do not enable this tool without authorization, "
-    "as it will directly interrupt the proxy loop without returning any data)",
+    "Read, write, or forget a fact in Muika's long-term memory.",
     params=MemoryParams,
 )
 async def memory(
     type: str,
+    memory: MemoryManager,
     category: str = "user",
     layer: str = "preference",
     key: Optional[str] = None,
     value: Optional[str] = None,
-):
-    state = get_state()
-    if state is None or state.memory is None:
-        return "MemoryManager not available."
+) -> str:
+    """读取、保存或删除指定层的长期记忆。"""
 
     mem_category = MemoryCategory(category)
     mem_layer = MemoryLayer(layer)
 
     if type == "read":
-        mem = state.memory.records
+        mem = memory.records
         if not mem:
             return "No memories stored yet."
         lines = [
@@ -91,7 +87,7 @@ async def memory(
     if type == "remember":
         if not key or value is None:
             return "'key' and 'value' are required for 'remember'."
-        await state.memory.upsert_memory(
+        await memory.upsert_memory(
             layer=mem_layer,
             category=mem_category,
             key=key,
@@ -103,7 +99,7 @@ async def memory(
     if type == "forget":
         if not key:
             return "'key' is required for 'forget'."
-        await state.memory.forget_memory(layer=mem_layer, category=mem_category, key=key)
+        await memory.forget_memory(layer=mem_layer, category=mem_category, key=key)
         logger.info(f"[Memory] Forgot [{mem_layer.value}/{mem_category.value}] {key}")
         return ""
 

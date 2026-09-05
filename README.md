@@ -46,7 +46,7 @@
 
 - [X] Muika 第四面墙窗口: Butler 管家 Agent，支持访问&写入硬盘文件；截取当前屏幕
 
-- [X] Muika 主动对话系统：从 `configs/topics.yaml` 抽取话题源或在线访问 RSS 获取筛选后的新闻流。
+- [X] Muika 主动对话系统：从 `configs/topics.yml` 抽取话题源或在线访问 RSS 获取筛选后的新闻流。
 
 - [X] 多模型 SDK 支持: 如[OpenAI](https://platform.openai.com/docs/overview) 和 [Ollama](https://ollama.com/) ，可加载市面上大多数的模型服务或本地模型，支持多模态（图片识别）。
 
@@ -62,17 +62,72 @@
 
 ### 大小姐——管家模型
 
-Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言生成，管家模型(Butler Agent)负责工具调用、记忆读写与信息检索。两者通过内联标签 `<Butler: 指令>` 通信，Ojou-sama 在回复中嵌入指令，Butler 静默执行后将结果回填上下文，驱动下一轮推理。
+Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言生成，管家模型(Butler Agent)负责工具调用、记忆读写与信息检索。两者通过内联标签 `<agent>指令</agent>` 通信，Ojou-sama 在回复中嵌入指令，Butler 静默执行后将结果回填上下文，驱动下一轮推理。
 
 ### 事件循环
 
-1. **启动阶段**：加载配置（模型 / MCP 等），初始化 LLM Provider、记忆层与数据库（SQLAlchemy），加载插件与 Actions；`bot_connected` 时先从 DB 完整加载历史记忆，再创建新 Session，最后投递 `SessionBootstrapEvent`。
+1. **启动阶段**：加载配置（模型 / MCP 等），初始化 LLM Provider、记忆层与数据库（SQLAlchemy），加载插件和注册工具。开放连接前完成历史记忆加载；首次适配器连接后创建 Session，并投递 `SessionBootstrapEvent`。
 2. **消息进入**：Nonebot2 收到平台消息后封装为 `UserMessageEvent` 投入事件队列；Butler 预处理层对用户输入做语义匹配，从 `PreferenceProfile` 层中筛选出相关偏好条目注入本轮推理。
-3. **核心模型内循环推理**：将系统提示、多层记忆摘要、注入偏好及对话历史拼装为请求，调用 LLM 生成回复；解析出 `<Butler: ...>` 指令后交由 Butler 执行。
-4. **管家 Agent 内循环推理**：LLM 将自然语言指令映射为结构化 Action（JSON Schema discriminated union），执行工具 → 分析结果 → 确认完成或请求重试。执行结果经 Agent 消化后返回核心模型进行下一轮循环或者静默返回结束循环。
+3. **核心模型内循环推理**：将系统提示、多层记忆摘要、注入偏好及对话历史拼装为请求，调用 LLM 生成回复；解析出 `<agent>...</agent>` 指令后交由 Butler 执行。
+4. **管家 Agent 内循环推理**：Butler 每次请求读取当前工具注册表及初始化后的 MCP 工具列表。Provider 处理模型的工具调用，执行结果回填模型，最终报告返回核心模型。
 5. **记忆沉淀**：记忆分四层持久化至 SQLAlchemy DB：`CORE`（稳定身份事实，每次均注入）、`STATE`（时效性上下文，Resume 时注入最近 3 条）、`PREFERENCE`（长期软偏好，由 Butler 预处理层按需注入）、`ARCHIVE`（Session 历史摘要，按需检索）。
 6. **Session 生命周期**：用户若干小时后无交流后触发 `SessionEndEvent`；Butler 对本次对话生成文字摘要写入 ARCHIVE，随后静默重置 Session（不主动发送消息），等待用户下次发言时以 Resume 模式响应。
-7. **输出与调度**：最终消息经 Executor 回传至平台；调度器可触发定时事件（RSS 更新、预定提醒等），以外部事件形式再次进入上述闭环。
+7. **输出与调度**：最终消息经 Executor 回传至平台；`plan_future_event` 工具可创建单次或重复提醒。调度器与主循环共用事件队列；提醒只保存在内存中，Core 重启后失效。
+
+## 内部接口迁移
+
+### 定时提醒
+
+`executor.scheduler` 与 Muika 共用事件队列。工具 `plan_future_event` 直接调用此接口。
+
+```python
+await executor.scheduler.schedule(
+    "提醒用户喝水",
+    trigger_in_seconds=600,
+    repeat_interval_seconds=None,
+)
+```
+
+`trigger_in_seconds` 与 `trigger_at` 必须二选一。后者接受 ISO 时间，无时区时使用本地时间。
+相对秒数须有限且非负；重复间隔须有限且大于零。过去的绝对时间立即触发。
+无效参数会抛出异常，不创建提醒。工具将异常转为失败报告。
+提醒只保存在内存中，Core 关闭时取消，重启后不会恢复。
+
+旧 `BaseAction`、`BaseIntent`、`ActionMode`、`ActionOutput`、`PlanFutureEventIntent` 和 `Persistence` 已删除。
+调用方改用上述普通参数，不再调用 `intent.handle()`。
+
+Muika 现在使用 `Muika(executor, event_queue)` 构造。调用方须将同一队列传给 Executor。
+Bootstrap 在开放连接前等待 `memory.load()`；直接创建 Muika 的调用方也须完成这一步。
+
+### 工具列表
+
+Brain 和 Butler 每次请求调用 `get_tool_list()`，读取当前函数注册表和 MCP 工具列表。
+插件管理器不再绑定 Butler，也不再调用 `refresh_tools()` 或 `refresh_butler()`。
+MCP 初始化时获取工具列表，清理时清空；`get_mcp_list()` 现在是同步读取接口。
+
+### 工具依赖注入
+
+命令和工具共用参数绑定函数。工具处理器可通过具体类型声明 `Executor`、`MuikaState` 或 `MemoryManager` 依赖。
+运行时从当前调用上下文注入这些实例，不读取命令派发器的全局实例。
+
+```python
+from pydantic import BaseModel
+from muika.core.executor import Executor
+from muika.plugin.func_call import on_function_call
+
+class ReminderParams(BaseModel):
+    event: str
+
+@on_function_call("Schedule a reminder", params=ReminderParams)
+async def remind(event: str, executor: Executor):
+    await executor.scheduler.schedule(event, trigger_in_seconds=60)
+    return "Reminder scheduled."
+```
+
+参数模型只声明模型提供的业务参数，依赖只声明在处理器签名中。
+模型不能提供依赖参数；缺少当前依赖时，调用失败且不执行处理器。
+调用顺序为类型依赖、同名业务参数、函数默认值。依赖按具体类型匹配，不解析 `Optional` 或联合类型。
+直接调用 Python 函数时须自行传入依赖；通过 `Caller.run()` 调用时才进行注入。
 
 ## Quick Start🚀
 
@@ -146,13 +201,19 @@ butler:
   temperature: 0.2
 ```
 
-Step 3: 所有系统全部启动启动启动
+Step 3: 在项目目录中确认用户协议。
+
+```powershell
+uv run python -m muika.agreement confirm
+```
+
+Step 4: 启动所有服务。
 
 ```powershell
 .\scripts\start_all.ps1
 ```
 
-Step 4: 同意用户许可协议后开始运行。
+首次使用或协议更新时需要确认。未确认时，Bot 会停止启动并提示确认命令。
 
 </details>
 
@@ -161,6 +222,21 @@ Step 4: 同意用户许可协议后开始运行。
 参考 [MuikaAI/astrbot_plugin_mas](https://github.com/MuikaAI/astrbot_plugin_mas)
 
 ## Configuration⚙️
+
+协议正文随安装包发布，无需创建 `configs/user_agreement.json`，也不受启动目录影响。
+旧路径的协议文件不再作为正文来源，程序不会删除用户目录中的遗留文件。
+同意记录仍保存在 `DATA_DIR/user_agreement.json`（默认 `./data/user_agreement.json`）。
+本次迁移保留协议版本 `2026-02-01`；已有有效同意记录无需重新确认。
+如果提示包内协议缺失或损坏，请重新安装 Muika-After-Story。
+
+手动启动前，请在实例目录、使用同一个 Python 环境运行 `python -m muika.agreement confirm`。
+`python -m muika.agreement status` 以 JSON 返回正文、同意记录和是否需要确认，不会询问或写入。
+命令按运行环境的 `DATA_DIR`、实例 `.env`、默认 `./data` 的顺序选择数据目录。
+Bot 启动只检查状态，不等待终端输入。启动器仍会在启动前展示协议并询问。
+
+升级时先更新支持包内协议及共享接口的 mas-launcher，再更新 MAS。
+旧启动器只读取 `configs/user_agreement.json`，不能直接搭配本次正文迁移。
+新启动器使用实例 Python 查询和保存协议；仅当旧 MAS 没有共享接口时，才使用兼容路径。
 
 创建 `.env` 文件：
 

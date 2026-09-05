@@ -1,4 +1,3 @@
-import asyncio
 from typing import Any, Optional
 
 from muika.utils.logger import logger
@@ -6,21 +5,25 @@ from muika.utils.logger import logger
 from .config import get_mcp_server_config
 from .server import Server, Tool
 
-_servers: list[Server] = list()
+_servers: list[Server] = []
+_tools: list[dict[str, dict]] = []
 
 
 async def initialize_servers() -> None:
     """
     初始化全部 MCP 实例
     """
+    if _servers:
+        return
     server_config = get_mcp_server_config()
     _servers.extend([Server(name, srv_config) for name, srv_config in server_config.items()])
     for server in _servers:
-        logger.info(f"初始化 MCP Server: {server.name}")
+        logger.info(f"Initializing MCP server: {server.name}")
         try:
             await server.initialize()
+            _tools.extend(transform_json(tool) for tool in await server.list_tools())
         except Exception as e:
-            logger.error(f"初始化 MCP Server 实例时出现问题: {e}")
+            logger.error(f"MCP server initialization failed: {e}")
             await cleanup_servers()
             raise
 
@@ -58,15 +61,18 @@ async def cleanup_servers() -> None:
     """
     清理 MCP 实例
     """
-    cleanup_tasks = [asyncio.create_task(server.cleanup()) for server in _servers]
-    if cleanup_tasks:
+    servers = list(_servers)
+    _servers.clear()
+    _tools.clear()
+    # MCP 传输的取消作用域必须在创建任务中按逆序退出。
+    for server in reversed(servers):
         try:
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-        except Exception as e:
-            logger.warning(f"清理 MCP 实例时出现错误: {e}")
+            await server.cleanup()
+        except Exception as error:
+            logger.warning(f"MCP server cleanup failed: {error}")
 
 
-async def transform_json(tool: Tool) -> dict[str, Any]:
+def transform_json(tool: Tool) -> dict[str, Any]:
     """
     将 MCP Tool 转换为 OpenAI 所需的 parameters 格式，并删除多余字段
     """
@@ -85,14 +91,6 @@ async def transform_json(tool: Tool) -> dict[str, Any]:
     return output
 
 
-async def get_mcp_list() -> list[dict[str, dict]]:
-    """
-    获得适用于 OpenAI Tool Call 输入格式的 MCP 工具列表
-    """
-    all_tools: list[dict[str, dict]] = []
-
-    for server in _servers:
-        tools = await server.list_tools()
-        all_tools.extend([await transform_json(tool) for tool in tools])
-
-    return all_tools
+def get_mcp_list() -> list[dict[str, dict]]:
+    """返回初始化时获取的 MCP 工具列表副本。"""
+    return list(_tools)

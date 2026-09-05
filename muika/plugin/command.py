@@ -4,7 +4,7 @@
 
 1. 管理全局命令注册表（通过 :func:`on_alconna` 注册 :class:`CommandRegistry`）
 2. 按优先级匹配 Alconna 解析结果，路由到对应的子命令处理器
-3. 镜像 :mod:`muika.plugin.func_call` 的依赖注入风格，
+3. 与工具调用共用参数绑定函数，
    将 ``MuikaState`` / ``MuikaBrain`` / ``Muika`` 等核心实例以类型注解形式
    注入 handler 参数
 4. 通过 :class:`CommandDispatcher` 单例管理注入表和回复通道，
@@ -26,16 +26,17 @@
 
 from __future__ import annotations
 
-import inspect
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional, get_type_hints
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
 
 import aiofiles
 
 from muika.config import mas_config
 from muika.models import Resource
 from muika.utils.logger import logger
+
+from .dependencies import resolve_arguments
 
 if TYPE_CHECKING:
     from arclet.alconna import Alconna
@@ -370,38 +371,7 @@ class CommandDispatcher:
         """
         from arclet.alconna import Arparma as Arparma
 
-        sig = inspect.signature(handler)
-        hints = get_type_hints(handler)
-        kwargs: dict[str, Any] = {}
-
-        for name, param in sig.parameters.items():
-            t = hints.get(name)
-
-            # 类型命中核心注入表
-            if t is not None and t in self._injections:
-                kwargs[name] = self._injections[t]
-                continue
-
-            # Arparma 完整解析结果
-            if t is Arparma:
-                kwargs[name] = res
-                continue
-
-            # 参数名命中 all_matched_args
-            if name in res.all_matched_args:
-                kwargs[name] = res.all_matched_args[name]
-                continue
-
-            # 默认值
-            if param.default is not inspect.Parameter.empty:
-                kwargs[name] = param.default
-                continue
-
-            raise TypeError(
-                f"Cannot inject parameter '{name}: {t}' of handler "
-                f"'{handler.__name__}' — not in all_matched_args and no default value. "
-                f"Parsed args: {list(res.all_matched_args.keys())}"
-            )
+        kwargs = resolve_arguments(handler, res.all_matched_args, {**self._injections, Arparma: res})
 
         try:
             result = await handler(**kwargs)  # type: ignore[func-returns-value]

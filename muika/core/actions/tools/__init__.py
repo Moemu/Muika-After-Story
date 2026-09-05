@@ -6,6 +6,7 @@ from . import (  # noqa: F401
     _info,
     _memory,
     _plugin,
+    _scheduler,
     _self_edit,
     _skill,
     _system,

@@ -1,4 +1,4 @@
-"""插件生命周期测试：ownership 追踪、unload/reload、Butler.refresh_tools、.plugins 命令、PluginWatcher 推导。"""
+"""插件生命周期测试：ownership 追踪、unload/reload、.plugins 命令、PluginWatcher 推导。"""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from muika.plugin.loader import (
     reload_plugin,
     unload_plugin,
 )
-from muika.plugin.manager import _BUILTIN_PREFIX, PluginManager
+from muika.plugin.manager import PluginManager
 
 
 @pytest.fixture(autouse=True)
@@ -178,52 +178,16 @@ def test_unload_nonexistent_returns_false():
     assert unload_plugin("plugins.does.not.exist") is False
 
 
-class FakeButler:
-    def __init__(self) -> None:
-        self.tools: list = []
-        self._mcp_tools: list = []
-        self.refresh_count = 0
-
-    def refresh_tools(self) -> int:
-        self.refresh_count += 1
-        return len(self.tools)
-
-
 def test_plugin_manager_refuses_builtin_unload():
-    mgr = PluginManager(butler=FakeButler())
+    mgr = PluginManager()
     assert mgr.unload("muika.builtin_plugins.reflect") is False
     assert mgr.reload("muika.builtin_plugins.reflect") is False
-
-
-def test_plugin_manager_refresh_butler_calls_butler():
-    butler = FakeButler()
-    mgr = PluginManager(butler=butler)
-    mgr.refresh_butler()
-    assert butler.refresh_count == 1
-
-
-def test_plugin_manager_refresh_butler_no_butler_returns_zero():
-    mgr = PluginManager()
-    assert mgr.refresh_butler() == 0
 
 
 def test_command_dispatcher_injects_plugin_manager():
     dispatcher = CommandDispatcher(MagicMock(), AsyncMock())
 
     assert isinstance(dispatcher._injections[PluginManager], PluginManager)
-
-
-def test_plugin_manager_refreshes_butler_after_failed_reload(monkeypatch):
-    butler = FakeButler()
-    manager = PluginManager(butler=butler)
-
-    def fail_reload(package_name: str):
-        raise PluginImportError(package_name, RuntimeError("broken"))
-
-    monkeypatch.setattr("muika.plugin.manager.reload_plugin", fail_reload)
-
-    assert manager.reload("plugins.broken") is False
-    assert butler.refresh_count == 1
 
 
 def test_plugin_manager_list_loaded_includes_counts():
@@ -388,20 +352,6 @@ def test_reload_plugin_loads_never_loaded_plugin():
     finally:
         unload_plugin("plugins.fresh_probe")
     assert "plugins.fresh_probe" not in sys.modules
-
-
-def test_manager_unload_refreshes_butler():
-    """PluginManager.unload 成功后应刷新 Butler 工具列表，避免 LLM 继续看到死工具。"""
-    butler = FakeButler()
-    mgr = PluginManager(butler=butler)
-    _plugins["plugins.unload_refresh"] = loader_mod.Plugin(
-        name="unload_refresh",
-        module=types.ModuleType("plugins.unload_refresh"),
-        package_name="plugins.unload_refresh",
-        meta=None,
-    )
-    assert mgr.unload("plugins.unload_refresh") is True
-    assert butler.refresh_count == 1
 
 
 def test_load_unload_cycle_returns_to_baseline(tmp_path: Path, monkeypatch):
@@ -699,14 +649,42 @@ def test_watcher_derives_package_name_for_dir_plugin(tmp_path: Path):
     assert "my_pkg" in package
 
 
-def test_plugins_plugin_module_structure():
-    from muika.builtin_plugins import plugins
+async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monkeypatch, fake_llm_factory):
+    from muika.core.butler.agent import ButlerAgent
+    from muika.core.state import MuikaState
+    from muika.llm import ModelCompletions
 
-    assert hasattr(plugins, "metadata")
-    assert plugins.metadata.name == "plugins"
-    assert hasattr(plugins, "plugins_cmd")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_plugin(
+        tmp_path,
+        "visible_probe",
+        "from muika.plugin.func_call import on_function_call\n"
+        "@on_function_call('probe')\ndef visible_probe():\n    return 'ok'\n",
+    )
+    fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">done</agent_result>'))
+    agent = ButlerAgent.__new__(ButlerAgent)
+    agent.model = fake
+    agent._skill_manager = MagicMock()
+    agent._skill_manager.render_prompt_section.return_value = ""
+    monkeypatch.setattr("muika.core.butler.agent.generate_prompt_from_template", lambda *args: "system")
 
+    async def visible():
+        await agent.execute_command("test", MuikaState(), MagicMock())
+        return {t["function"]["name"] for t in fake.requests[-1].tools}
 
-def test_builtin_prefix_constant_matches_actual_builtins():
-    """确保 _BUILTIN_PREFIX 与实际 builtin_plugins 路径一致。"""
-    assert _BUILTIN_PREFIX == "muika.builtin_plugins"
+    assert "visible_probe" not in await visible()
+    load_plugin("visible_probe")
+    try:
+        assert "visible_probe" in await visible()
+        path = tmp_path / "visible_probe" / "__init__.py"
+        code = path.read_text(encoding="utf-8")
+        path.write_text(code + "raise RuntimeError('broken candidate')\n", encoding="utf-8")
+        assert not PluginManager().reload("visible_probe")
+        assert "visible_probe" not in await visible()
+        path.write_text(code, encoding="utf-8")
+        assert PluginManager().reload("visible_probe")
+        assert "visible_probe" in await visible()
+        assert PluginManager().unload("visible_probe")
+        assert "visible_probe" not in await visible()
+    finally:
+        unload_plugin("visible_probe")

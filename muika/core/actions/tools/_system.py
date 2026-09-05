@@ -1,11 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from typing import Optional
 
+import psutil
 from pydantic import BaseModel, Field
 
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
+
+if sys.platform == "win32":
+    try:
+        import win32gui
+        import win32process
+    except ImportError:
+        win32gui = None
+        win32process = None
+else:
+    win32gui = None
+    win32process = None
+
+try:
+    from plyer import notification
+except ImportError:
+    notification = None
+
+try:
+    import pyperclip
+except ImportError:
+    pyperclip = None
 
 
 class ListProcessesParams(BaseModel):
@@ -18,10 +42,8 @@ class ListProcessesParams(BaseModel):
     "List running processes with optional keyword filtering.",
     params=ListProcessesParams,
 )
-async def list_processes(filter: Optional[str] = None, limit: int = 50, offset: int = 0):
-    import sys
-
-    import psutil
+async def list_processes(filter: Optional[str] = None, limit: int = 50, offset: int = 0) -> str:
+    """列出匹配的进程名称，并按偏移量分页。"""
 
     ignored = (
         {
@@ -67,15 +89,12 @@ async def list_processes(filter: Optional[str] = None, limit: int = 50, offset: 
 
 
 @on_function_call("Get the title and process of the currently focused window.")
-async def get_focused_window():
-    import sys
-
+async def get_focused_window() -> str:
+    """读取当前窗口信息，依赖不可用时返回明确提示。"""
     if sys.platform != "win32":
         return "Not supported on this platform (Windows only)."
-
-    import psutil
-    import win32gui
-    import win32process
+    if win32gui is None or win32process is None:
+        return "Focused window information is unavailable: pywin32 could not be loaded. Install or repair pywin32."
 
     try:
         hwnd = win32gui.GetForegroundWindow()
@@ -95,7 +114,6 @@ async def get_focused_window():
 
 @on_function_call("Get system load indicators such as CPU, memory, and battery.")
 async def get_system_status():
-    import psutil
 
     try:
         cpu = psutil.cpu_percent(interval=1)
@@ -121,13 +139,10 @@ class SendDesktopNotificationParams(BaseModel):
     "Send a desktop notification to the user.",
     params=SendDesktopNotificationParams,
 )
-async def send_desktop_notification(title: str, message: str, timeout: int = 5):
-    try:
-        from plyer import notification
-    except ImportError:
+async def send_desktop_notification(title: str, message: str, timeout: int = 5) -> str:
+    """发送桌面通知并返回执行结果。"""
+    if notification is None:
         return "plyer is not installed. Run: pip install plyer"
-
-    import asyncio
 
     def _notify() -> None:
         notification.notify(
@@ -149,12 +164,8 @@ async def send_desktop_notification(title: str, message: str, timeout: int = 5):
 
 @on_function_call("Read the current text content of the system clipboard.")
 async def read_clipboard():
-    try:
-        import pyperclip
-    except ImportError:
+    if pyperclip is None:
         return "pyperclip is not installed. Run: pip install pyperclip"
-
-    import asyncio
 
     loop = asyncio.get_event_loop()
     try:

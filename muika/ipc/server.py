@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from aiohttp import WSMsgType, web
 
 from muika.config import mas_config
+from muika.models import AdapterInfo
 from muika.utils.logger import logger
 
 from .protocol import CoreToBotMessage, ErrorMessage
@@ -31,20 +32,12 @@ ADAPTER_CALLBACK_FUNC = Callable[["AdapterInfo"], Coroutine[Any, Any, None]]
 
 
 @dataclass
-class AdapterInfo:
-    """单个适配器连接的元数据。"""
+class AdapterConnection:
+    """保存 IPC 连接和会话启动状态。"""
 
+    info: AdapterInfo
     ws: web.WebSocketResponse
-    client_name: str
-    connected_at: datetime = field(default_factory=datetime.now)
-    last_active_at: datetime = field(default_factory=datetime.now)
     bootstrapped: bool = False
-
-    def __repr__(self) -> str:
-        return self.client_name
-
-    def __str__(self) -> str:
-        return self.client_name
 
 
 class CoreWsServer:
@@ -67,8 +60,8 @@ class CoreWsServer:
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
 
-        # 适配器连接注册表: client_name → AdapterInfo
-        self._connections: Dict[str, AdapterInfo] = {}
+        # 适配器连接注册表: client_name → AdapterConnection
+        self._connections: Dict[str, AdapterConnection] = {}
 
         # Bot 未连接时暂存的消息
         self._pending: deque[CoreToBotMessage] = deque(maxlen=_MAX_PENDING_MESSAGES)
@@ -82,8 +75,6 @@ class CoreWsServer:
         # 适配器连接 / 断开回调（由 CoreBootstrap 注册）
         self._on_adapter_connected: Optional[ADAPTER_CALLBACK_FUNC] = None
         self._on_adapter_disconnected: Optional[ADAPTER_CALLBACK_FUNC] = None
-
-    # ── 公共 API ──────────────────────────────────────────────────────────
 
     def register_handler(self, message_type: str, handler: EVENT_HANDLER) -> None:
         """
@@ -119,9 +110,9 @@ class CoreWsServer:
 
     async def stop(self) -> None:
         """优雅关闭 WebSocket 服务器。"""
-        for info in list(self._connections.values()):
-            if not info.ws.closed:
-                await info.ws.close(code=1001, message=b"Server shutting down")
+        for connection in list(self._connections.values()):
+            if not connection.ws.closed:
+                await connection.ws.close(code=1001, message=b"Server shutting down")
         self._connections.clear()
 
         # 清空待发送队列
@@ -180,7 +171,7 @@ class CoreWsServer:
 
         # 再 fallback 到最近活跃的适配器
         if self._connections:
-            most_active = max(self._connections.values(), key=lambda i: i.last_active_at)
+            most_active = max(self._connections.values(), key=lambda connection: connection.info.last_active_at)
             return most_active.ws
 
         return None
@@ -220,7 +211,7 @@ class CoreWsServer:
         """记录最近一次触发消息的来源适配器。"""
         self._last_triggering_adapter = client_name
         if client_name in self._connections:
-            self._connections[client_name].last_active_at = datetime.now()
+            self._connections[client_name].info.last_active_at = datetime.now()
 
     def mark_bootstrapped(self, client_name: str):
         """
@@ -228,8 +219,6 @@ class CoreWsServer:
         """
         if client_name in self._connections:
             self._connections[client_name].bootstrapped = True
-
-    # ── HTTP 端点 ─────────────────────────────────────────────────────────
 
     def get_adapter_names(self) -> List[str]:
         """返回当前已连接的所有适配器名称。"""
@@ -279,17 +268,17 @@ class CoreWsServer:
         await ws.prepare(request)
 
         # 注册连接
-        adapter = AdapterInfo(
+        connection = AdapterConnection(
+            info=AdapterInfo(client_name=client_name),
             ws=ws,
-            client_name=client_name,
         )
-        self._connections[client_name] = adapter
+        self._connections[client_name] = connection
         logger.success(f"[CoreWsServer] Adapter connected: {client_name!r}")
 
         # 通知回调
         if self._on_adapter_connected:
             try:
-                await self._on_adapter_connected(adapter)
+                await self._on_adapter_connected(connection.info)
             except Exception:
                 logger.exception("[CoreWsServer] on_adapter_connected callback raised")
 
@@ -300,7 +289,7 @@ class CoreWsServer:
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
-                    await self._dispatch(msg.data, adapter)
+                    await self._dispatch(msg.data, connection.info)
                 elif msg.type == WSMsgType.ERROR:
                     logger.error(f"[CoreWsServer] WebSocket error on {client_name!r}: {ws.exception()}")
                     break
@@ -319,13 +308,11 @@ class CoreWsServer:
             # 通知回调
             if self._on_adapter_disconnected:
                 try:
-                    await self._on_adapter_disconnected(adapter)
+                    await self._on_adapter_disconnected(connection.info)
                 except Exception:
                     logger.exception("[CoreWsServer] on_adapter_disconnected callback raised")
 
         return ws
-
-    # ── 消息分发 ──────────────────────────────────────────────────────────
 
     async def _dispatch(self, raw: str, adapter: AdapterInfo) -> None:
         """解析 JSON 并分发给注册的处理器。"""

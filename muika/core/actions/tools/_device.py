@@ -1,22 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from tempfile import gettempdir
+
+from PIL import ImageGrab
 from pydantic import BaseModel, Field
 
+from muika.models import Resource
 from muika.plugin.func_call import on_function_call
-from muika.plugin.func_call._context import add_resource
+from muika.plugin.func_call.context import ToolContext
 from muika.utils.logger import logger
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 @on_function_call("Capture a screenshot and return it as an image resource.")
-async def capture_screenshot():
-    from datetime import datetime
-    from pathlib import Path
-    from tempfile import gettempdir
-
-    from PIL import ImageGrab
-
-    from muika.models import Resource
-
+async def capture_screenshot(context: ToolContext) -> str:
+    """截取屏幕并将图片加入本次工具调用的资源。"""
     temp_dir = Path(gettempdir()) / "muika_screenshots"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -35,7 +40,7 @@ async def capture_screenshot():
         screenshot.save(file_path)
         logger.info(f"[CaptureScreenshot] Saved to {file_path}")
         resource = Resource(type="image", path=str(file_path), mimetype="image/png")
-        add_resource(resource)
+        context.resources.append(resource)
         return "Screenshot captured successfully. See attached image."
     except Exception as e:
         logger.error(f"[CaptureScreenshot] Failed: {e}")
@@ -50,18 +55,10 @@ class CaptureCameraPhotoParams(BaseModel):
     "Capture a photo from the webcam and return it as an image resource.",
     params=CaptureCameraPhotoParams,
 )
-async def capture_camera_photo(device_index: int = 0):
-    import asyncio
-    from datetime import datetime
-    from pathlib import Path
-    from tempfile import gettempdir
-
-    try:
-        import cv2
-    except ImportError:
+async def capture_camera_photo(context: ToolContext, device_index: int = 0) -> str:
+    """从指定摄像头拍照并附加图片资源。"""
+    if cv2 is None:
         return "opencv-python is not installed. Run: pip install opencv-python"
-
-    from muika.models import Resource
 
     def _capture(idx: int) -> str:
         cap = cv2.VideoCapture(idx)
@@ -85,7 +82,7 @@ async def capture_camera_photo(device_index: int = 0):
         file_path = await loop.run_in_executor(None, _capture, device_index)
         logger.info(f"[CaptureCameraPhoto] Saved to {file_path}")
         resource = Resource(type="image", path=file_path, mimetype="image/jpeg")
-        add_resource(resource)
+        context.resources.append(resource)
         return "Camera photo captured successfully. See attached image."
     except Exception as e:
         logger.error(f"[CaptureCameraPhoto] Failed: {e}")

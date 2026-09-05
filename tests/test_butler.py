@@ -1,12 +1,14 @@
 """``ButlerAgent`` 四方法测试——双裸 ``FakeLLM`` stub 替换 model / summarize_model。
 
 ``ButlerAgent.__new__`` 绕过构造（避免 ``load_model`` / SkillManager watcher），
-``ENABLE_MCP`` 与模板渲染被 mock。
+工具列表与模板渲染被 mock。
 """
 
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
+
+import pytest
 
 from muika.core.butler.agent import ButlerAgent
 from muika.core.memory import (
@@ -24,20 +26,12 @@ def _butler(fake_model, fake_summarize=None) -> ButlerAgent:
     agent = ButlerAgent.__new__(ButlerAgent)
     agent.model = fake_model
     agent.summarize_model = fake_summarize or fake_model
-    # cast：tools 类型须与 get_function_list() 返回的 list[dict[str, dict]] 一致
-    agent.tools = cast(list[dict[str, dict]], [{"name": "read_file"}])
-    agent._mcp_tools = []
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: ""))
     return agent
 
 
 def _preference() -> MemoryRecord:
     return MemoryRecord(layer=MemoryLayer.PREFERENCE, category=MemoryCategory.USER, key="fav_drink", value="tea")
-
-
-# ---------------------------------------------------------------------------
-# fetch_relevant_preferences
-# ---------------------------------------------------------------------------
 
 
 async def test_fetch_preferences_empty_shortcircuit(fake_llm_factory):
@@ -63,11 +57,6 @@ async def test_fetch_preferences_llm_failure_empty(fake_llm_factory):
     assert result == []
 
 
-# ---------------------------------------------------------------------------
-# summarize_session
-# ---------------------------------------------------------------------------
-
-
 async def test_summarize_session_empty(fake_llm_factory):
     agent = _butler(fake_llm_factory())
     result = await agent.summarize_session([])
@@ -88,13 +77,8 @@ async def test_summarize_session_returns_stripped(fake_llm_factory):
 async def test_summarize_session_llm_failure(fake_llm_factory):
     summarize = fake_llm_factory(error=RuntimeError("boom"))
     agent = _butler(fake_llm_factory(), fake_summarize=summarize)
-    result = await agent.summarize_session([SessionTurn(role="user", content="x")])
-    assert result.startswith("[Summary failed:")
-
-
-# ---------------------------------------------------------------------------
-# classify_and_store_memory
-# ---------------------------------------------------------------------------
+    with pytest.raises(RuntimeError, match="boom"):
+        await agent.summarize_session([SessionTurn(role="user", content="x")])
 
 
 async def test_classify_empty_content(fake_llm_factory):
@@ -115,7 +99,7 @@ async def test_classify_state_memory_none(fake_llm_factory):
     assert agent.model.call_count == 1  # 解析成功但 state.memory 为 None 时不写
 
 
-async def test_classify_stores_record(fake_llm_factory):
+async def test_classify_stores_record(fake_llm_factory, redirect_get_session):
     fake = fake_llm_factory(
         response=ModelCompletions(
             text='{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
@@ -147,14 +131,9 @@ async def test_classify_retries_then_gives_up(fake_llm_factory):
     assert len(state.memory.records) == 0
 
 
-# ---------------------------------------------------------------------------
-# execute_command
-# ---------------------------------------------------------------------------
-
-
 def _cmd_patches():
     return (
-        patch("muika.core.butler.agent.ENABLE_MCP", False),
+        patch("muika.core.butler.agent.get_tool_list", return_value=[{"name": "read_file"}]),
         patch("muika.core.butler.agent.generate_prompt_from_template", return_value="SYSTEM"),
     )
 
@@ -168,7 +147,7 @@ async def test_execute_command_report_and_resources(fake_llm_factory):
     assert resources == []
     req = agent.model.requests[0]
     assert req.prompt == "Command: test"
-    assert req.tools == agent.tools
+    assert req.tools == [{"name": "read_file"}]
 
 
 async def test_execute_command_system_assembly(fake_llm_factory):
@@ -190,13 +169,13 @@ async def test_execute_command_llm_error(fake_llm_factory):
 
 
 async def test_execute_command_clears_context(fake_llm_factory):
-    from muika.plugin.func_call._context import get_state
+    from muika.plugin.func_call.context import get_dependencies
 
     fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">Done.</agent_result>'))
     agent = _butler(fake)
     with _cmd_patches()[0], _cmd_patches()[1]:
         await agent.execute_command("cmd", MuikaState(), executor=None)
-    assert get_state() is None
+    assert get_dependencies()[MuikaState] is None
 
 
 async def test_execute_command_rejects_acknowledgement_as_result(fake_llm_factory):

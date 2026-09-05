@@ -1,4 +1,4 @@
-"""Core event loop -- Muika engine."""
+"""驱动 Muika 的事件处理、对话和后台活动。"""
 
 import asyncio
 import os
@@ -7,11 +7,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from random import random
-from typing import Literal, Optional
+from typing import Coroutine, Literal, Optional, TypeVar
 
 from muika.config import mas_config
-from muika.ipc.server import AdapterInfo
-from muika.plugin.func_call._context import pop_resources, set_butler_context
+from muika.models import AdapterInfo
+from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
 from muika.utils.utils import parse_duration
 
@@ -30,11 +30,19 @@ from .constants import (
 from .digest_agent import DigestAgent
 from .events import Event, SessionEndEvent, TimeoutEvent, TimeTickEvent
 from .executor import Executor
-from .memory import MemoryCategory, MemoryLayer, MemoryManager, SessionTurn
+from .memory import (
+    MemoryCategory,
+    MemoryLayer,
+    MemoryManager,
+    MemoryRecord,
+    SessionTurn,
+)
 from .reflection import ReflectionAgent
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
+
+TaskResult = TypeVar("TaskResult")
 
 
 @dataclass
@@ -55,19 +63,15 @@ class ParsedReply:
 
 
 class Muika:
-    """Core persona engine.
+    """管理人格状态、记忆和活动，并通过 Executor 发送消息。"""
 
-    Owns the event loop, state, memory, brain, butler, and topic manager.
-    Message delivery is delegated to an externally-supplied ``Executor``.
-    """
-
-    def __init__(self, executor: Executor) -> None:
+    def __init__(self, executor: Executor, event_queue: asyncio.Queue[Event]) -> None:
         self.is_alive: bool = False
 
         self.state = MuikaState()
         self.memory = MemoryManager()
         self.state.memory = self.memory
-        self.event_queue: asyncio.Queue[Event] = asyncio.Queue()
+        self.event_queue = event_queue
         self.executor = executor
         self.current_adapters: list[AdapterInfo] = []
 
@@ -92,18 +96,20 @@ class Muika:
         self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
 
-        asyncio.create_task(self.memory.load())
-        set_butler_context(self.state, self.executor)
+        self._tasks: set[asyncio.Task[object]] = set()
+        self._summary_task: Optional[asyncio.Task[bool]] = None
+        self._summary_lock = asyncio.Lock()
+        self._summary_retry_at: float = 0.0
 
     async def collect_events(self) -> Event:
-        """Wait for the next event from the queue, or emit a time_tick on timeout."""
+        """等待队列事件，空闲超时则生成时间事件。"""
         try:
             return await asyncio.wait_for(self.event_queue.get(), timeout=5.0)
         except asyncio.TimeoutError:
             return TimeTickEvent()
 
     async def create_event(self, event: Event) -> None:
-        """Push an event into the processing queue."""
+        """将事件放入处理队列。"""
         await self.event_queue.put(event)
 
     def get_think_mode(self, event: Event) -> Optional[Literal["emotional", "topic"]]:
@@ -144,7 +150,7 @@ class Muika:
         return None
 
     async def loop(self) -> None:
-        """Main event loop."""
+        """顺序处理事件，并隔离单次事件的失败。"""
         last_tick_time = time.time()
 
         while self.is_alive:
@@ -237,9 +243,9 @@ class Muika:
 
         if (current_time - self._last_digest_time > DIGEST_INTERVAL_SECONDS) and (self.state.active_topic is None):
             self._last_digest_time = current_time
-            asyncio.create_task(self.digest_agent.fetch_and_digest())
+            self.start_background_task(self.digest_agent.fetch_and_digest())
 
-        if not self._session_end_triggered and self.memory.recent_turns:
+        if not self._session_end_triggered and self.memory.recent_turns and time.monotonic() >= self._summary_retry_at:
             last_activity = self.state.last_interaction
             if self.state.active_topic is not None:
                 last_activity = max(last_activity, self.state.active_topic.started_at)
@@ -250,16 +256,16 @@ class Muika:
                 await self.create_event(SessionEndEvent())
 
             summary_idle_seconds = current_time - self._last_summary_time
-            lastest_turn = self.memory.recent_turns[-1] if self.memory.recent_turns else None
+            latest_turn = self.memory.recent_turns[-1] if self.memory.recent_turns else None
             if (
                 summary_idle_seconds >= AUTO_SUMMARY_INTERVAL
                 and len(self.memory.recent_turns) >= AUTO_SUMMARY_MIN_TURNS
-                and lastest_turn != self._last_summary_turn
+                and latest_turn != self._last_summary_turn
+                and (self._summary_task is None or self._summary_task.done())
             ):
-                self._last_summary_turn = lastest_turn
                 self._last_summary_time = current_time
                 logger.info(f"[Loop] Auto summary triggered after {summary_idle_seconds / 60:.1f} min of idle.")
-                asyncio.create_task(self._update_session_memory())
+                self._summary_task = self.start_background_task(self.update_session_memory())
 
     async def _record_first_conversation(self) -> None:
         """首次 session 时将 first_conversation_time 写入 CoreIdentity 记忆。"""
@@ -276,7 +282,7 @@ class Muika:
     def _parse_reply_tags(reply: str) -> ParsedReply:
         """解析 Brain 回复中的控制标签，返回用户可见文本与结构化标签内容。
 
-        支持六类标签（标签的剥离顺序保证 heart 内容不误解析为其他标签）：
+        支持以下标签（标签的剥离顺序保证 heart 内容不误解析为其他标签）：
         - ``<heart>...</heart>``：私有内心独白，仅从用户可见文本剥离，不入 memory。
         - ``<do_nothing>``：本轮沉默，不发消息。
         - ``<memory>...</memory>``：待归档记忆内容，交给 Butler 分类存储。
@@ -285,8 +291,9 @@ class Muika:
         - ``<timeout: 10min>``：用户回复等待超时，解析为秒后由 Loop 计时。
         - ``<enable_god_mode>``：开启上帝模式，解锁本会话的直接工具调用。
         """
-        heart_cot = re.findall(r"<heart>(.*?)</heart>", reply, re.DOTALL)
-        reply = re.sub(r"<heart>(.*?)</heart>", "", reply, flags=re.DOTALL).strip()
+        heart_pattern = r"<heart\s*>(.*?)(?:</heart\s*>|$)"
+        heart_cot = re.findall(heart_pattern, reply, re.DOTALL | re.IGNORECASE)
+        reply = re.sub(heart_pattern, "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
 
         do_nothing = bool(re.search(r"<do_nothing\s*/?>", reply, re.IGNORECASE))
         reply = re.sub(r"<do_nothing\s*/?>", "", reply, flags=re.IGNORECASE).strip()
@@ -331,7 +338,7 @@ class Muika:
         if seconds <= 0:
             logger.warning(f"[Timeout] non-positive duration {seconds:.1f}s -- ignored.")
             return
-        self._timeout_task = asyncio.create_task(self._wait_timeout(seconds))
+        self._timeout_task = self.start_background_task(self._wait_timeout(seconds))
 
     def _cancel_timeout(self) -> None:
         """取消当前挂起的超时任务（用户已回复或会话结束时调用）。"""
@@ -378,7 +385,7 @@ class Muika:
         self.state.boredom = 0.0
         logger.info(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
-    async def _fetch_preferences(self, event: Event) -> list:
+    async def _fetch_preferences(self, event: Event) -> list[MemoryRecord]:
         """通过 Butler 检索当前用户消息相关的 PreferenceProfile 条目。"""
         if event.type != "user_message":
             return []
@@ -394,7 +401,7 @@ class Muika:
     async def _run_brain_pipeline(
         self,
         event: Event,
-        injected_preferences: list,
+        injected_preferences: list[MemoryRecord],
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
         max_inner_loops = 4
@@ -403,14 +410,16 @@ class Muika:
             logger.debug(
                 f"[Brain] turn {loop_idx + 1}/{max_inner_loops} " f"| history_len={len(self.memory.recent_turns)}"
             )
-            reply = await self.brain.generate_reply(
-                event=event,
-                state=self.state,
-                memory=self.memory,
-                injected_preferences=injected_preferences or None,
-                adapters=self.current_adapters,
-            )
-            resources = pop_resources()
+            with tool_context(self.state, self.executor) as context:
+                reply = await self.brain.generate_reply(
+                    event=event,
+                    state=self.state,
+                    memory=self.memory,
+                    injected_preferences=injected_preferences or None,
+                    adapters=self.current_adapters,
+                    god_mode=self._god_mode,
+                )
+                resources = context.resources
 
             # 发送前只负责提取用户可见文本与路由目标，标签处理统一下移到发送之后
             parsed = self._parse_reply_tags(reply)
@@ -440,7 +449,7 @@ class Muika:
                 self._arm_timeout(parsed.timeout)
             if parsed.clean_reply:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
-                await self.executor.send_message(parsed.clean_reply, target=parsed.target)
+                await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
 
             self.memory.add_context("muika", reply, resources=resources)
 
@@ -453,7 +462,7 @@ class Muika:
                 for content in parsed.memory_contents:
                     await self.butler_agent.classify_and_store_memory(content, self.state)
 
-            if not parsed.agent_commands:
+            if not parsed.agent_commands and not god_mode_just_enabled:
                 logger.debug("[Brain] no agent commands, turn complete.")
                 break
 
@@ -472,7 +481,7 @@ class Muika:
                 )
                 any_observation = True
 
-            if not any_observation:
+            if not any_observation and not god_mode_just_enabled:
                 logger.debug("[Brain] All agent commands were silent -- turn complete.")
                 break
         else:
@@ -493,40 +502,74 @@ class Muika:
             # 沉默时仍打 cooldown 戳，避免每个 tick 都连续触发 LLM 调用
             self.state.last_proactive_at = datetime.now()
 
+    def start_background_task(self, coroutine: Coroutine[object, object, TaskResult]) -> asyncio.Task[TaskResult]:
+        """启动核心所属的后台任务，并在退出时统一回收。"""
+        task = asyncio.create_task(coroutine)
+        self._tasks.add(task)
+        task.add_done_callback(self._finish_background_task)
+        return task
+
+    def _finish_background_task(self, task: asyncio.Task[object]) -> None:
+        """移除已结束的任务并记录未处理的失败。"""
+        self._tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error(f"[Loop] Background task failed: {error}")
+
     def start(self) -> None:
-        """Start the event loop as a background task."""
+        """启动主循环和定期自省任务。"""
+        if self.is_alive:
+            return
         logger.info("Muika is waking up...")
         self.is_alive = True
-        asyncio.create_task(self.loop())
-        self._reflection_task = asyncio.create_task(self.reflection.run_daily())
+        self.start_background_task(self.loop())
+        self._reflection_task = self.start_background_task(self.reflection.run_daily())
 
-    def stop(self) -> None:
-        """Stop the event loop."""
+    async def stop(self) -> None:
+        """取消并等待所有核心任务结束。"""
         logger.info("Muika is going to sleep.")
         self.is_alive = False
-        if self._reflection_task is not None:
-            self._reflection_task.cancel()
-            self._reflection_task = None
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._timeout_task = None
+        self._reflection_task = None
+        self._summary_task = None
 
-    async def _update_session_memory(self):
+    async def update_session_memory(self) -> bool:
+        """尝试归档当前对话，失败后保留会话并等待下一个摘要间隔。
+
+        :return: 对话已归档或无需归档时返回 True，等待重试时返回 False。
         """
-        更新 Session 记忆
-        """
-        turns = list(self.memory.recent_turns)
-        has_user_turn = any(t.role == "user" for t in turns)
-        if not turns or not has_user_turn:
-            return
+        async with self._summary_lock:
+            turns = list(self.memory.recent_turns)
+            if not turns or not any(turn.role == "user" for turn in turns):
+                return True
+            if self._last_summary_turn == turns[-1]:
+                return True
+            if time.monotonic() < self._summary_retry_at:
+                return False
+            try:
+                summary = await self.butler_agent.summarize_session(turns)
+                await self.memory.update_archive(
+                    summary=summary,
+                    period_start=self.memory.session.started_at,
+                    period_end=datetime.now(),
+                )
+            except Exception as error:
+                self._summary_retry_at = time.monotonic() + AUTO_SUMMARY_INTERVAL
+                logger.warning(
+                    f"[Memory] Session archive failed; keeping turns and retrying "
+                    f"after {AUTO_SUMMARY_INTERVAL:.0f}s: {error}"
+                )
+                return False
+            self._last_summary_turn = turns[-1]
+            self._last_summary_time = datetime.now().timestamp()
+            self._summary_retry_at = 0.0
+            return True
 
-        summary = await self.butler_agent.summarize_session(turns)
-        period_start = self.memory.session.started_at
-        period_end = datetime.now()
-        await self.memory.update_archive(
-            summary=summary,
-            period_start=period_start,
-            period_end=period_end,
-        )
-
-    async def _handle_session_end(self):
+    async def _handle_session_end(self) -> None:
         """
         Session 结束处理流程：归纳摘要 → 写入 ARCHIVE → 记录话题历史 → 重置 Session。
         """
@@ -535,12 +578,12 @@ class Muika:
 
         # 仅在用户实际参与过对话时才归档：纯 Muika 独白无需写入长期记忆
         has_user_turn = any(t.role == "user" for t in turns)
-        # 如果 truns 为空，说明是首次启动的空 Session，应该直接跳过归档，避免写入 fabricated memory
-        has_summarized_lastest_turn = (self._last_summary_turn == self.memory.recent_turns[-1]) if turns else True
+        has_summarized_latest_turn = (self._last_summary_turn == self.memory.recent_turns[-1]) if turns else True
         reached_min_turns = len(turns) >= AUTO_SUMMARY_MIN_TURNS
 
-        if turns and has_user_turn and reached_min_turns and not has_summarized_lastest_turn:
-            await self._update_session_memory()
+        if turns and has_user_turn and reached_min_turns and not has_summarized_latest_turn:
+            if not await self.update_session_memory():
+                return
             summary = self.memory.archives[-1].summary if self.memory.archives else ""
             logger.info(
                 f"[Loop] Session archived -- "
@@ -548,7 +591,7 @@ class Muika:
                 f"summary_len={len(summary)}"
             )
         elif turns:
-            logger.info("[Loop] Session had no user turns -- skipping archive to avoid fabricated memory.")
+            logger.debug("[Loop] No new summary needed for this session.")
         else:
             logger.debug("[Loop] No turns in this session -- skipping archive.")
 
@@ -571,6 +614,7 @@ class Muika:
         self._god_mode = False
 
         self.memory.new_session()
+        self._summary_retry_at = 0.0
         self._last_summary_turn = None
         self._last_summary_time = datetime.now().timestamp()
 
@@ -578,7 +622,7 @@ class Muika:
 
     @staticmethod
     def _save_last_connection_time() -> None:
-        """Write a timestamp file for last-connection tracking."""
+        """保存最近连接时间，并清理较早的记录。"""
         data_dir = mas_config.data_dir
         records_path = data_dir / "connection_records"
         records_path.mkdir(exist_ok=True, parents=True)

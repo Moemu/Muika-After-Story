@@ -9,7 +9,7 @@ from muika.config import mas_config
 from muika.models import Message
 
 if TYPE_CHECKING:
-    from muika.ipc.server import AdapterInfo
+    from muika.models import AdapterInfo
 
 
 def _get_last_connection_time() -> Optional[datetime]:

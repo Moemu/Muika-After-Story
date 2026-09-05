@@ -20,9 +20,8 @@ from muika.core.events import (
 from muika.core.memory import MemoryCategory, MemoryLayer, MemoryManager, MemoryRecord
 from muika.core.state import MuikaState
 from muika.core.topic_manager import EventTopic, StaticTopic, TopicSource
-from muika.ipc.server import AdapterInfo
 from muika.llm import ModelCompletions
-from muika.models import Message
+from muika.models import AdapterInfo, Message
 
 
 def _user_event(msg: str = "hello") -> UserMessageEvent:
@@ -32,7 +31,6 @@ def _user_event(msg: str = "hello") -> UserMessageEvent:
 def _brain(fake_llm) -> MuikaBrain:
     brain = MuikaBrain.__new__(MuikaBrain)
     brain.model = fake_llm
-    brain._mcp_tools = []
     return brain
 
 
@@ -62,12 +60,12 @@ def model_config_manager():
 def test_adapters_info_none_or_small_none():
     assert MuikaBrain.generate_adapters_info(None) is None
     assert MuikaBrain.generate_adapters_info([]) is None
-    assert MuikaBrain.generate_adapters_info([AdapterInfo(ws=None, client_name="qq")]) is None
+    assert MuikaBrain.generate_adapters_info([AdapterInfo(client_name="qq")]) is None
 
 
 def test_adapters_info_two_adapters():
-    a1 = AdapterInfo(ws=None, client_name="qq", last_active_at=datetime.now() - timedelta(seconds=30))
-    a2 = AdapterInfo(ws=None, client_name="telegram", last_active_at=datetime.now() - timedelta(hours=2))
+    a1 = AdapterInfo(client_name="qq", last_active_at=datetime.now() - timedelta(seconds=30))
+    a2 = AdapterInfo(client_name="telegram", last_active_at=datetime.now() - timedelta(hours=2))
     info = MuikaBrain.generate_adapters_info([a1, a2])
     assert "qq(Last active at just now)" in info
     assert "telegram(Last active at 2 hours ago)" in info
@@ -81,7 +79,7 @@ def test_adapters_info_ago_buckets():
         (timedelta(days=2), "2 days ago"),
     ]
     for delta, expected in cases:
-        adapter = AdapterInfo(ws=None, client_name="x", last_active_at=datetime.now() - delta)
+        adapter = AdapterInfo(client_name="x", last_active_at=datetime.now() - delta)
         info = MuikaBrain.generate_adapters_info([adapter, adapter])
         assert f"x(Last active at {expected})" in info
 
@@ -273,14 +271,14 @@ async def test_generate_reply_exception_fallback(fake_llm_factory):
     assert result == "My mind feels foggy... I encountered an error."
 
 
-async def test_generate_reply_god_mode_passes_tools(fake_llm_factory):
+async def test_generate_reply_god_mode_passes_tools(fake_llm_factory, monkeypatch):
     fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
     brain = _brain(fake)
 
-    async def _tools():
+    def _tools():
         return [{"name": "t"}]
 
-    brain._get_tool_list = _tools
+    monkeypatch.setattr("muika.core.brain.get_tool_list", _tools)
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
     assert fake.requests[0].tools == [{"name": "t"}]
@@ -325,3 +323,57 @@ async def test_expand_topic_failure_empty(fake_llm_factory):
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         result = await brain.expand_topic(topic, MuikaState(), _memory())
     assert result == ""
+
+
+async def test_mcp_tools_remain_in_consecutive_requests_and_clear_on_cleanup(fake_llm_factory, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from muika.plugin.mcp import client
+
+    tool = SimpleNamespace(name="remote_probe", description="probe", input_schema={"type": "object"})
+    server = SimpleNamespace(
+        name="test", initialize=AsyncMock(), list_tools=AsyncMock(return_value=[tool]), cleanup=AsyncMock()
+    )
+    monkeypatch.setattr(client, "_servers", [])
+    monkeypatch.setattr(client, "_tools", [])
+    monkeypatch.setattr(client, "get_mcp_server_config", lambda: {"test": {}})
+    monkeypatch.setattr(client, "Server", lambda *args: server)
+    fake = fake_llm_factory(response=ModelCompletions(text="hello"))
+    brain = _brain(fake)
+    try:
+        await client.initialize_servers()
+        for _ in range(2):
+            await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
+        assert all("remote_probe" in {t["function"]["name"] for t in r.tools} for r in fake.requests)
+        server.list_tools.assert_awaited_once()
+        await client.cleanup_servers()
+        await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
+        assert "remote_probe" not in {t["function"]["name"] for t in fake.requests[-1].tools}
+    finally:
+        await client.cleanup_servers()
+
+
+async def test_mcp_cleanup_exits_scopes_in_original_task_and_reverse_order(monkeypatch):
+    from contextlib import AsyncExitStack
+    from types import SimpleNamespace
+
+    from anyio import CancelScope
+
+    from muika.plugin.mcp import client
+
+    closed = []
+    servers = []
+    for name in ("first", "second"):
+        stack = AsyncExitStack()
+        stack.enter_context(CancelScope())
+
+        async def cleanup(stack=stack, name=name):
+            await stack.aclose()
+            closed.append(name)
+
+        servers.append(SimpleNamespace(cleanup=cleanup))
+    monkeypatch.setattr(client, "_servers", servers)
+    monkeypatch.setattr(client, "_tools", [])
+    await client.cleanup_servers()
+    assert closed == ["second", "first"]
