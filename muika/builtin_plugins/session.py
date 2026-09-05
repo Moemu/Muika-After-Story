@@ -33,5 +33,9 @@ async def _session_new(muika: Muika) -> str:
 
 @session_cmd.assign("summarize")
 async def _session_summarize(muika: Muika) -> str:
-    await muika._update_session_memory()
+    """保存当前摘要，并如实报告等待重试的状态。"""
+    if not any(turn.role == "user" for turn in muika.memory.recent_turns):
+        return "[System] 当前没有需要保存的对话"
+    if not await muika.update_session_memory():
+        return "[System] 摘要暂未保存，当前对话已保留，请稍后重试"
     return "[System] 会话摘要已保存"

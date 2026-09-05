@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from random import random
-from typing import Coroutine, Literal, Optional
+from typing import Coroutine, Literal, Optional, TypeVar
 
 from muika.config import mas_config
 from muika.models import AdapterInfo
@@ -41,6 +41,8 @@ from .reflection import ReflectionAgent
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
+
+TaskResult = TypeVar("TaskResult")
 
 
 @dataclass
@@ -94,9 +96,10 @@ class Muika:
         self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
 
-        self._tasks: set[asyncio.Task[None]] = set()
-        self._summary_task: Optional[asyncio.Task[None]] = None
+        self._tasks: set[asyncio.Task[object]] = set()
+        self._summary_task: Optional[asyncio.Task[bool]] = None
         self._summary_lock = asyncio.Lock()
+        self._summary_retry_at: float = 0.0
 
     async def collect_events(self) -> Event:
         """等待队列事件，空闲超时则生成时间事件。"""
@@ -242,7 +245,7 @@ class Muika:
             self._last_digest_time = current_time
             self.start_background_task(self.digest_agent.fetch_and_digest())
 
-        if not self._session_end_triggered and self.memory.recent_turns:
+        if not self._session_end_triggered and self.memory.recent_turns and time.monotonic() >= self._summary_retry_at:
             last_activity = self.state.last_interaction
             if self.state.active_topic is not None:
                 last_activity = max(last_activity, self.state.active_topic.started_at)
@@ -262,7 +265,7 @@ class Muika:
             ):
                 self._last_summary_time = current_time
                 logger.info(f"[Loop] Auto summary triggered after {summary_idle_seconds / 60:.1f} min of idle.")
-                self._summary_task = self.start_background_task(self._update_session_memory())
+                self._summary_task = self.start_background_task(self.update_session_memory())
 
     async def _record_first_conversation(self) -> None:
         """首次 session 时将 first_conversation_time 写入 CoreIdentity 记忆。"""
@@ -499,14 +502,14 @@ class Muika:
             # 沉默时仍打 cooldown 戳，避免每个 tick 都连续触发 LLM 调用
             self.state.last_proactive_at = datetime.now()
 
-    def start_background_task(self, coroutine: Coroutine[object, object, None]) -> asyncio.Task[None]:
+    def start_background_task(self, coroutine: Coroutine[object, object, TaskResult]) -> asyncio.Task[TaskResult]:
         """启动核心所属的后台任务，并在退出时统一回收。"""
         task = asyncio.create_task(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._finish_background_task)
         return task
 
-    def _finish_background_task(self, task: asyncio.Task[None]) -> None:
+    def _finish_background_task(self, task: asyncio.Task[object]) -> None:
         """移除已结束的任务并记录未处理的失败。"""
         self._tasks.discard(task)
         if not task.cancelled() and (error := task.exception()) is not None:
@@ -534,22 +537,37 @@ class Muika:
         self._reflection_task = None
         self._summary_task = None
 
-    async def _update_session_memory(self) -> None:
-        """归档当前对话，仅在写入成功后更新摘要进度。"""
+    async def update_session_memory(self) -> bool:
+        """尝试归档当前对话，失败后保留会话并等待下一个摘要间隔。
+
+        :return: 对话已归档或无需归档时返回 True，等待重试时返回 False。
+        """
         async with self._summary_lock:
             turns = list(self.memory.recent_turns)
             if not turns or not any(turn.role == "user" for turn in turns):
-                return
+                return True
             if self._last_summary_turn == turns[-1]:
-                return
-            summary = await self.butler_agent.summarize_session(turns)
-            await self.memory.update_archive(
-                summary=summary,
-                period_start=self.memory.session.started_at,
-                period_end=datetime.now(),
-            )
+                return True
+            if time.monotonic() < self._summary_retry_at:
+                return False
+            try:
+                summary = await self.butler_agent.summarize_session(turns)
+                await self.memory.update_archive(
+                    summary=summary,
+                    period_start=self.memory.session.started_at,
+                    period_end=datetime.now(),
+                )
+            except Exception as error:
+                self._summary_retry_at = time.monotonic() + AUTO_SUMMARY_INTERVAL
+                logger.warning(
+                    f"[Memory] Session archive failed; keeping turns and retrying "
+                    f"after {AUTO_SUMMARY_INTERVAL:.0f}s: {error}"
+                )
+                return False
             self._last_summary_turn = turns[-1]
             self._last_summary_time = datetime.now().timestamp()
+            self._summary_retry_at = 0.0
+            return True
 
     async def _handle_session_end(self) -> None:
         """
@@ -564,7 +582,8 @@ class Muika:
         reached_min_turns = len(turns) >= AUTO_SUMMARY_MIN_TURNS
 
         if turns and has_user_turn and reached_min_turns and not has_summarized_latest_turn:
-            await self._update_session_memory()
+            if not await self.update_session_memory():
+                return
             summary = self.memory.archives[-1].summary if self.memory.archives else ""
             logger.info(
                 f"[Loop] Session archived -- "
@@ -595,6 +614,7 @@ class Muika:
         self._god_mode = False
 
         self.memory.new_session()
+        self._summary_retry_at = 0.0
         self._last_summary_turn = None
         self._last_summary_time = datetime.now().timestamp()
 
