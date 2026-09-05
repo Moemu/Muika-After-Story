@@ -11,8 +11,12 @@ from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
 if sys.platform == "win32":
-    import win32gui
-    import win32process
+    try:
+        import win32gui
+        import win32process
+    except ImportError:
+        win32gui = None
+        win32process = None
 
 try:
     from plyer import notification
@@ -82,9 +86,12 @@ async def list_processes(filter: Optional[str] = None, limit: int = 50, offset: 
 
 
 @on_function_call("Get the title and process of the currently focused window.")
-async def get_focused_window():
+async def get_focused_window() -> str:
+    """读取当前窗口信息，依赖不可用时返回明确提示。"""
     if sys.platform != "win32":
         return "Not supported on this platform (Windows only)."
+    if win32gui is None or win32process is None:
+        return "Focused window information is unavailable: pywin32 could not be loaded. Install or repair pywin32."
 
     try:
         hwnd = win32gui.GetForegroundWindow()
