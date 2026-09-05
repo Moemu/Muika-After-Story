@@ -17,6 +17,9 @@ if sys.platform == "win32":
     except ImportError:
         win32gui = None
         win32process = None
+else:
+    win32gui = None
+    win32process = None
 
 try:
     from plyer import notification
