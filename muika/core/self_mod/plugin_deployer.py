@@ -276,7 +276,6 @@ class PluginDeployer:
                 f"Candidate quarantined as {quarantine_id}.\n{recovery}"
             ) from exc
 
-        manager.refresh_butler()
         self._remove_staging(target.name)
         commands, tools = self._owned_names(record.module_name)
         return (
@@ -318,7 +317,6 @@ class PluginDeployer:
                     raise SelfModError(f"Plugin revert reload failed: {exc}\n{recovery}") from exc
             elif module_name in get_plugins():
                 unload_plugin(module_name)
-            manager.refresh_butler()
             return report
 
     def list_quarantine(self) -> str:
@@ -368,7 +366,6 @@ class PluginDeployer:
                 load_plugin(module_name)
             elif module_name in get_plugins():
                 unload_plugin(module_name)
-            get_plugin_manager().refresh_butler()
             return "Recovery succeeded."
         except PluginLoadError as exc:
             return f"Recovery failed: {exc}"
@@ -400,7 +397,6 @@ class PluginDeployer:
                 except PluginLoadError as exc:
                     if was_loaded:
                         return f"Recovery failed: {exc}"
-            get_plugin_manager().refresh_butler()
             return "Recovery succeeded."
         except Exception as exc:
             logger.critical(f"[PluginDeployer] revert recovery failed for {module_name}: {exc}")

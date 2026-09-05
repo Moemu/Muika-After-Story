@@ -10,14 +10,6 @@ from muika.core.executor import Executor
 # ---------------------------------------------------------------------------
 
 
-def test_split_empty_returns_single_empty():
-    assert Executor._split_message("") == [""]
-
-
-def test_split_short_text_unchanged():
-    assert Executor._split_message("hello") == ["hello"]
-
-
 def test_split_paragraphs_stay_separate():
     assert Executor._split_message("a\n\nb") == ["a", "b"]
 

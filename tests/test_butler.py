@@ -1,7 +1,7 @@
 """``ButlerAgent`` 四方法测试——双裸 ``FakeLLM`` stub 替换 model / summarize_model。
 
 ``ButlerAgent.__new__`` 绕过构造（避免 ``load_model`` / SkillManager watcher），
-``ENABLE_MCP`` 与模板渲染被 mock。
+工具列表与模板渲染被 mock。
 """
 
 from types import SimpleNamespace
@@ -24,9 +24,6 @@ def _butler(fake_model, fake_summarize=None) -> ButlerAgent:
     agent = ButlerAgent.__new__(ButlerAgent)
     agent.model = fake_model
     agent.summarize_model = fake_summarize or fake_model
-    # cast：tools 类型须与 get_function_list() 返回的 list[dict[str, dict]] 一致
-    agent.tools = cast(list[dict[str, dict]], [{"name": "read_file"}])
-    agent._mcp_tools = []
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: ""))
     return agent
 
@@ -154,7 +151,7 @@ async def test_classify_retries_then_gives_up(fake_llm_factory):
 
 def _cmd_patches():
     return (
-        patch("muika.core.butler.agent.ENABLE_MCP", False),
+        patch("muika.core.butler.agent.get_tool_list", return_value=[{"name": "read_file"}]),
         patch("muika.core.butler.agent.generate_prompt_from_template", return_value="SYSTEM"),
     )
 
@@ -168,7 +165,7 @@ async def test_execute_command_report_and_resources(fake_llm_factory):
     assert resources == []
     req = agent.model.requests[0]
     assert req.prompt == "Command: test"
-    assert req.tools == agent.tools
+    assert req.tools == [{"name": "read_file"}]
 
 
 async def test_execute_command_system_assembly(fake_llm_factory):

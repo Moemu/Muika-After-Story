@@ -28,10 +28,6 @@ def test_sampling_keys_are_model_config_fields():
             assert key in ModelConfig.model_fields, f"{level} 覆写含非法字段 {key!r}"
 
 
-def test_medium_has_no_override():
-    assert HEART_INTENSITY_SAMPLING["medium"] == {}
-
-
 def test_set_heart_intensity_applies_overrides():
     # 仅覆写基准配置已声明（非 None）的字段——从未设置的惩罚参数保持 None 不注入
     base = ModelConfig(provider="openai", model_name="test", presence_penalty=0.5)

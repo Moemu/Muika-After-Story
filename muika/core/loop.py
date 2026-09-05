@@ -61,13 +61,13 @@ class Muika:
     Message delivery is delegated to an externally-supplied ``Executor``.
     """
 
-    def __init__(self, executor: Executor) -> None:
+    def __init__(self, executor: Executor, event_queue: asyncio.Queue[Event]) -> None:
         self.is_alive: bool = False
 
         self.state = MuikaState()
         self.memory = MemoryManager()
         self.state.memory = self.memory
-        self.event_queue: asyncio.Queue[Event] = asyncio.Queue()
+        self.event_queue = event_queue
         self.executor = executor
         self.current_adapters: list[AdapterInfo] = []
 
@@ -92,7 +92,6 @@ class Muika:
         self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
 
-        asyncio.create_task(self.memory.load())
         set_butler_context(self.state, self.executor)
 
     async def collect_events(self) -> Event:

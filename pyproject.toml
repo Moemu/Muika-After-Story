@@ -10,7 +10,6 @@ dependencies = [
     "aiohttp>=3.13.3",
     "aiosqlite>=0.22.1",
     "arclet-alconna>=1.8.0",
-    "dateparser>=1.2.2",
     "feedparser>=6.0.12",
     "fleep>=1.0.1",
     "jinja2>=3.1.6",

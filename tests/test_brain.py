@@ -32,7 +32,6 @@ def _user_event(msg: str = "hello") -> UserMessageEvent:
 def _brain(fake_llm) -> MuikaBrain:
     brain = MuikaBrain.__new__(MuikaBrain)
     brain.model = fake_llm
-    brain._mcp_tools = []
     return brain
 
 
@@ -273,14 +272,14 @@ async def test_generate_reply_exception_fallback(fake_llm_factory):
     assert result == "My mind feels foggy... I encountered an error."
 
 
-async def test_generate_reply_god_mode_passes_tools(fake_llm_factory):
+async def test_generate_reply_god_mode_passes_tools(fake_llm_factory, monkeypatch):
     fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
     brain = _brain(fake)
 
-    async def _tools():
+    def _tools():
         return [{"name": "t"}]
 
-    brain._get_tool_list = _tools
+    monkeypatch.setattr("muika.core.brain.get_tool_list", _tools)
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
     assert fake.requests[0].tools == [{"name": "t"}]
@@ -325,3 +324,32 @@ async def test_expand_topic_failure_empty(fake_llm_factory):
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         result = await brain.expand_topic(topic, MuikaState(), _memory())
     assert result == ""
+
+
+async def test_mcp_tools_remain_in_consecutive_requests_and_clear_on_cleanup(fake_llm_factory, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from muika.plugin.mcp import client
+
+    tool = SimpleNamespace(name="remote_probe", description="probe", input_schema={"type": "object"})
+    server = SimpleNamespace(
+        name="test", initialize=AsyncMock(), list_tools=AsyncMock(return_value=[tool]), cleanup=AsyncMock()
+    )
+    monkeypatch.setattr(client, "_servers", [])
+    monkeypatch.setattr(client, "_tools", [])
+    monkeypatch.setattr(client, "get_mcp_server_config", lambda: {"test": {}})
+    monkeypatch.setattr(client, "Server", lambda *args: server)
+    fake = fake_llm_factory(response=ModelCompletions(text="hello"))
+    brain = _brain(fake)
+    try:
+        await client.initialize_servers()
+        for _ in range(2):
+            await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
+        assert all("remote_probe" in {t["function"]["name"] for t in r.tools} for r in fake.requests)
+        server.list_tools.assert_awaited_once()
+        await client.cleanup_servers()
+        await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
+        assert "remote_probe" not in {t["function"]["name"] for t in fake.requests[-1].tools}
+    finally:
+        await client.cleanup_servers()

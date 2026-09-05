@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 from muika.config import get_model_config, mas_config
 
@@ -35,7 +34,7 @@ from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import Resource
-from muika.plugin.func_call import get_function_list
+from muika.plugin.func_call import get_tool_list
 from muika.plugin.func_call._context import (
     clear_butler_context,
     pop_resources,
@@ -45,7 +44,6 @@ from muika.plugin.skills import get_skill_manager
 from muika.template.loader import generate_prompt_from_template
 from muika.utils.logger import logger
 
-ENABLE_MCP = Path("./configs/mcp.json").exists()
 AGENT_RESULT_PATTERN = re.compile(
     r"<agent_result\s+status=[\"'](completed|blocked)[\"']>(.*?)</agent_result>",
     re.DOTALL,
@@ -80,23 +78,9 @@ class ButlerAgent:
         summarize_model_cfg = get_model_config(mas_config.session_summarize_model or mas_config.butler_model)
         self.model = load_model(butler_cfg)
         self.summarize_model = load_model(summarize_model_cfg)
-        self.tools = get_function_list()
-
-        logger.debug(f"Loaded {len(self.tools)} tools.")
 
         # 技能管理器：启动时扫描技能目录并启动热重载监听
         self._skill_manager = get_skill_manager()
-        self._mcp_tools: list[dict[str, dict]] = []
-
-    def refresh_tools(self) -> int:
-        """重建 LLM 工具列表（function-call + 已缓存的 MCP 工具）。
-
-        插件热重载或手动 reload 后调用，使 LLM 可见新增 / 移除的工具。
-        :return: 重建后的工具总数。
-        """
-        self.tools = get_function_list() + self._mcp_tools
-        logger.debug(f"[Butler] Tools refreshed: {len(self.tools)} total")
-        return len(self.tools)
 
     # ------------------------------------------------------------------
     # Public API
@@ -257,16 +241,10 @@ class ButlerAgent:
             if skills_section:
                 system += f"\n\n{skills_section}"
 
-            if ENABLE_MCP and not self._mcp_tools:
-                from muika.plugin.mcp import get_mcp_list
-
-                self._mcp_tools = await get_mcp_list()
-                self.tools += self._mcp_tools
-
             request = ModelRequest(
                 prompt=f"Command: {command}",
                 system=system,
-                tools=self.tools,
+                tools=get_tool_list(),
             )
 
             try:

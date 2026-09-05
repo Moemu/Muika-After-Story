@@ -91,8 +91,3 @@ class Executor:
             res = resources if i == last_idx else None
             await self._send_func(msg, res, target)
             await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
-
-    async def _delayed_send(self, content: str, delay: int) -> None:
-        """Send *content* after *delay* seconds."""
-        await asyncio.sleep(delay)
-        await self.send_message(content)

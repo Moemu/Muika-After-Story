@@ -1,5 +1,7 @@
 """``MuikaState.tick_state`` 状态机单元测试（零依赖）。"""
 
+from datetime import datetime
+
 import pytest
 
 from muika.core.events import TimeTickEvent, UserMessageEvent, UserMessagePayload
@@ -67,18 +69,10 @@ def test_lonely_takes_precedence_over_bored():
 
 
 def test_user_message_resets_loneliness_and_attention():
-    s = MuikaState(loneliness=0.7, attention=0.3)
+    s = MuikaState(loneliness=0.9, attention=0.3)
     s.tick_state(_user_event(), 0.0)
     assert s.loneliness == 0.0
     assert s.attention == 1.0
-    assert s.mood == "calm"
-
-
-def test_user_message_resets_mood_to_calm():
-    # 回归：情绪须依据用户消息重置后的最终状态判定，孤独感归零后不能残留 lonely
-    s = MuikaState(loneliness=0.9)
-    s.tick_state(_user_event(), 0.0)
-    assert s.loneliness == 0.0
     assert s.mood == "calm"
 
 
@@ -89,11 +83,18 @@ def test_user_message_keeps_bored_mood_when_boredom_high():
     assert s.mood == "bored"
 
 
-def test_user_message_updates_last_interaction():
-    s = MuikaState()
-    before = s.last_interaction
+def test_user_message_updates_last_interaction(monkeypatch):
+    now = datetime(2026, 9, 5, 12)
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("muika.core.state.datetime", FixedClock)
+    s = MuikaState(last_interaction=datetime(2026, 9, 4))
     s.tick_state(_user_event(), 0.0)
-    assert s.last_interaction >= before
+    assert s.last_interaction == now
 
 
 def test_user_message_marks_active_topic_engaged():

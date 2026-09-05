@@ -95,7 +95,7 @@ class CoreBootstrap:
 
         event_queue: asyncio.Queue = asyncio.Queue()
         self._executor = Executor(event_queue, send_func=_send_llm_reply)
-        self._muika = Muika(self._executor)
+        self._muika = Muika(self._executor, event_queue)
 
         self._shutdown_event = asyncio.Event()
         self.is_bootstraped = False
@@ -108,6 +108,7 @@ class CoreBootstrap:
 
         validate_template_configuration((mas_config.persona_template, mas_config.agent_template))
 
+        await self._muika.memory.load()
         self._register_handlers()
         self._register_adapter_callbacks()
         await self._ws_server.start()
@@ -130,6 +131,7 @@ class CoreBootstrap:
         stop_plugin_watcher()
         get_plugin_manager().shutdown_all()
         self._muika.stop()
+        await self._executor.scheduler.close()
         await self._ws_server.stop()
         await close_db()
 
@@ -275,7 +277,6 @@ async def run_core(
     load_plugins(BUILTIN_PLUGINS_PATH, mas_config.plugins_dir)
 
     bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
-    get_plugin_manager().bind_butler(bootstrap._muika.butler_agent)
     if mas_config.enable_plugin_hot_reload:
         start_plugin_watcher(get_plugin_manager(), Path(mas_config.plugins_dir))
 

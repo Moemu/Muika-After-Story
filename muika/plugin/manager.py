@@ -1,4 +1,4 @@
-"""插件生命周期协调器：集中 unload / reload / Butler.refresh_tools 调用链。
+"""插件生命周期协调器：管理加载、卸载和重载。
 
 模块级单例通过 :func:`get_plugin_manager` 访问。builtin_plugins 不允许通过该
 协调器卸载（会破坏核心命令）——仅用户 plugins/ 下的插件可热重载。
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from muika.plugin.command import _commands
 from muika.plugin.exceptions import PluginLoadError
@@ -17,44 +17,29 @@ from muika.plugin.lifecycle import run_unload_hooks
 from muika.plugin.loader import _plugins, get_plugins, reload_plugin, unload_plugin
 from muika.utils.logger import logger
 
-if TYPE_CHECKING:
-    from muika.core.butler.agent import ButlerAgent
-
-
 _BUILTIN_PREFIX = "muika.builtin_plugins"
 """builtin 插件的 module 前缀；拒绝通过本管理器卸载。"""
 
 
 class PluginManager:
-    """插件生命周期协调器。
+    """管理插件生命周期和文件监听抑制。"""
 
-    持有 ButlerAgent 引用以便在 reload 后重建 LLM 工具列表。
-    """
-
-    def __init__(self, butler: Optional[ButlerAgent] = None) -> None:
-        self._butler = butler
+    def __init__(self) -> None:
         self._watcher_suppression: dict[str, float] = {}
         self._watcher_lock = threading.Lock()
 
-    def bind_butler(self, butler: ButlerAgent) -> None:
-        """延迟绑定 Butler 实例（CoreBootstrap 启动后调用）。"""
-        self._butler = butler
-
     def unload(self, package_name: str) -> bool:
-        """卸载指定插件并在成功后刷新 Butler 工具列表。
+        """卸载指定插件。
 
         builtin 插件拒绝卸载（返回 False）。
         """
         if package_name.startswith(_BUILTIN_PREFIX):
             logger.warning(f"[PluginManager] refusing to unload builtin plugin {package_name!r}")
             return False
-        if not unload_plugin(package_name):
-            return False
-        self.refresh_butler()
-        return True
+        return unload_plugin(package_name)
 
     def reload(self, package_name: str) -> bool:
-        """重载指定插件并刷新 Butler 工具列表。"""
+        """重载指定插件。"""
         if package_name.startswith(_BUILTIN_PREFIX):
             logger.warning(f"[PluginManager] refusing to reload builtin plugin {package_name!r}")
             return False
@@ -64,8 +49,6 @@ class PluginManager:
         except PluginLoadError as exc:
             logger.error(str(exc))
             return False
-        finally:
-            self.refresh_butler()
 
     def reload_all_user_plugins(self) -> list[str]:
         """重载所有用户插件（非 builtin）。返回成功重载的 package_name 列表。"""
@@ -76,15 +59,6 @@ class PluginManager:
             if self.reload(package_name):
                 reloaded.append(package_name)
         return reloaded
-
-    def refresh_butler(self) -> int:
-        """重建 Butler 工具列表，返回新的工具数；未绑定 Butler 时返回 0。"""
-        if self._butler is None:
-            logger.debug("[PluginManager] refresh_butler: no butler bound, skipping")
-            return 0
-        count = self._butler.refresh_tools()
-        logger.info(f"[PluginManager] Butler tools refreshed: {count} tools")
-        return count
 
     def suppress_watcher(self, package_name: str, seconds: float = 3.0) -> None:
         """临时忽略指定插件的文件监听事件。"""
