@@ -33,21 +33,23 @@ class WindowsJob:
         :param pid: 要加入作业的进程 ID。
         :raises RuntimeError: 当前平台不是 Windows。
         """
-        if sys.platform != "win32":
+        if sys.platform == "win32":
+            self.handle = win32job.CreateJobObject(None, "")
+            info = win32job.QueryInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation)
+            info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            win32job.SetInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation, info)
+            process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
+            try:
+                win32job.AssignProcessToJobObject(self.handle, process)
+            finally:
+                process.Close()
+        else:
             raise RuntimeError("Windows jobs are unavailable on this platform")
-        self.handle = win32job.CreateJobObject(None, "")
-        info = win32job.QueryInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation)
-        info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        win32job.SetInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation, info)
-        process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
-        try:
-            win32job.AssignProcessToJobObject(self.handle, process)
-        finally:
-            process.Close()
 
     def close(self) -> None:
         """关闭作业句柄并终止作业中的进程。"""
-        self.handle.Close()
+        if sys.platform == "win32":
+            self.handle.Close()
 
 
 class ProcessResult(BaseModel):
@@ -153,6 +155,9 @@ class ProcessManager:
         process_id = uuid4().hex
         directory = mas_config.data_dir.resolve() / "agent_processes" / process_id
         directory.mkdir(parents=True)
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
         with (directory / "stdout.log").open("wb") as stdout, (directory / "stderr.log").open("wb") as stderr:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -161,7 +166,7 @@ class ProcessManager:
                 env=env,
                 cwd=cwd,
                 start_new_session=sys.platform != "win32",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+                creationflags=creationflags,
             )
         running = RunningProcess(process, directory, owner)
         self._processes[process_id] = running
