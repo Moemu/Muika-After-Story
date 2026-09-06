@@ -26,6 +26,22 @@ EMBED_FUNC: TypeAlias = Callable[..., Awaitable[EmbeddingsBatchResult]]
 _usage_write_lock = asyncio.Lock()
 
 
+async def save_model_usage(model: "BaseLLM", usage: Usage) -> None:
+    """记录一次模型调用的用量。"""
+    plugin_name = _get_caller_plugin_name() or "muika"
+    model_config = get_name_from_config(model.config)
+    async with _usage_write_lock:
+        async with get_session() as session:
+            await UsageORM.save_usage(
+                session,
+                plugin_name,
+                model_config,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+            )
+
+
 def record_plugin_usage(func: ASK_FUNC):
     """
     记录插件用量的装饰器
@@ -62,9 +78,6 @@ def record_plugin_usage(func: ASK_FUNC):
             last_usage = Usage()
             try:
                 async for chunk in response:
-                    if not chunk.succeed:
-                        continue
-
                     last_usage = chunk.usage
                     yield chunk
             finally:

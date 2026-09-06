@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any, AsyncGenerator, List, Literal, Union, overload
 
 from .. import (
@@ -9,6 +10,7 @@ from .. import (
     Usage,
     register,
 )
+from .._schema import ModelMessage
 from ..utils.images import get_file_base64
 
 
@@ -20,6 +22,18 @@ class Echo(BaseLLM):
 
     def __init__(self, model_config: ModelConfig) -> None:
         super().__init__(model_config)
+
+    async def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
+    ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        completion = await self._ask_sync(
+            self._build_messages(request) + [m.model_dump() for m in messages], request.tools, request.format
+        )
+        yield ModelStreamCompletions(
+            chunk=completion.text,
+            usage=completion.usage,
+            message=ModelMessage(role="assistant", content=completion.text),
+        )
 
     def _build_multi_messages(self, request: ModelRequest) -> dict:
         """

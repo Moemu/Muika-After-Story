@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Sequence
 
-from muika.core.events import Event
+from muika.core.butler.task_store import TaskRecord
+from muika.core.events import AgentHandoffEvent, AgentTaskEvent, Event
 from muika.core.loop import Muika
 from muika.core.memory import MemoryManager
 from muika.core.state import MuikaState
@@ -112,6 +114,51 @@ class _FixtureButler:
         return report or "", []
 
 
+class _FixtureTasks:
+    """Queue deterministic reports through the production task-event boundary."""
+
+    def __init__(self, butler: _FixtureButler, state: MuikaState, events: asyncio.Queue[Event]) -> None:
+        self.butler = butler
+        self.state = state
+        self.events = events
+        self.tasks: dict[str, TaskRecord] = {}
+
+    def describe(self) -> str:
+        return "\n".join(f"Task {t.id} status={t.status}: {t.instruction}" for t in self.tasks.values())
+
+    def persona_task(self) -> None:
+        return None
+
+    async def submit(self, instruction: str, original_request: str) -> TaskRecord:
+        task = TaskRecord(instruction=instruction, original_request=original_request)
+        self.tasks[task.id] = task
+        await self._complete(task)
+        return task
+
+    async def _complete(self, task: TaskRecord) -> None:
+        report, _ = await self.butler.execute_command(task.instruction, self.state, None)
+        task.status = "failed" if report.upper().startswith(("FAILED", "ERROR")) else "completed"
+        if report:
+            await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, report))
+
+    async def update(self, task_id: str, instruction: str, *, cancel: bool = False) -> TaskRecord:
+        task = self.tasks[task_id]
+        task.revision += 1
+        task.corrections.append(instruction)
+        if cancel:
+            task.status = "cancelled"
+        else:
+            task.instruction += "\nCorrection: " + instruction
+            await self._complete(task)
+        return task
+
+    async def handoff(self) -> str:
+        return self.describe()
+
+    async def release_persona(self) -> None:
+        return None
+
+
 async def run_brain_once(
     brain: Any,
     event: Event,
@@ -167,12 +214,30 @@ async def run_production_loop(
     engine.state = state
     engine.current_adapters = []
     engine._god_mode = False
+    engine._god_mode_pending = False
+    engine._tasks = set()
+    engine.event_queue = asyncio.Queue()
+    engine.agent_tasks = _FixtureTasks(engine.butler_agent, state, engine.event_queue)
     engine._timeout_task = None
     engine._arm_timeout = lambda seconds: trace.add("timeout", seconds=seconds)
 
     if event.type == "user_message":
         memory.add_context("user", event.payload.message.message)
     await engine._run_brain_pipeline(event, [])
+    for _ in range(20):
+        if engine._tasks:
+            await asyncio.gather(*list(engine._tasks))
+        if engine.event_queue.empty():
+            break
+        result = engine.event_queue.get_nowait()
+        if isinstance(result, AgentHandoffEvent):
+            engine._god_mode = True
+            engine._god_mode_pending = False
+        elif isinstance(result, AgentTaskEvent):
+            memory.add_context("agent", f"[Action result] {result.task_id}: {result.report}")
+        await engine._run_brain_pipeline(result, [])
+    else:
+        trace.add("agent_fixture_error", reason="event_limit_exceeded")
     return trace
 
 

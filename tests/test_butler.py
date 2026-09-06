@@ -4,6 +4,7 @@
 工具列表与模板渲染被 mock。
 """
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from muika.llm import ModelCompletions
 
 def _butler(fake_model, fake_summarize=None) -> ButlerAgent:
     agent = ButlerAgent.__new__(ButlerAgent)
+    agent.action_lock = asyncio.Lock()
     agent.model = fake_model
     agent.summarize_model = fake_summarize or fake_model
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: ""))
@@ -156,7 +158,7 @@ async def test_execute_command_system_assembly(fake_llm_factory):
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: "SKILLS"))
     with _cmd_patches()[0], _cmd_patches()[1]:
         await agent.execute_command("cmd", MuikaState(), executor=None)
-    assert agent.model.requests[0].system == "SYSTEM\n\nSKILLS"
+    assert agent.model.requests[0].system.startswith("SYSTEM\n\nSKILLS\n\nExecution environment:")
 
 
 async def test_execute_command_llm_error(fake_llm_factory):

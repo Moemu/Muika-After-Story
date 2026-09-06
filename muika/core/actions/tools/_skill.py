@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.plugin.skills import get_skill_manager
 from muika.utils.logger import logger
@@ -17,17 +18,14 @@ class LoadSkillParams(BaseModel):
     )
 
 
-@on_function_call(
-    "Load the full instructions (SKILL.md) of a named skill.",
-    params=LoadSkillParams,
-)
+@on_function_call("Load the full instructions (SKILL.md) of a named skill.", params=LoadSkillParams, read_only=True)
 async def load_skill(skill_name: str):
     manager = get_skill_manager()
     skill = manager.get(skill_name)
 
     if skill is None:
         available = ", ".join(s.name for s in manager.skills) or "(none)"
-        return f"Skill {skill_name!r} not found. Available skills: {available}"
+        return ToolError(f"Skill {skill_name!r} not found. Available skills: {available}")
 
     try:
         text = skill.location.read_text(encoding="utf-8", errors="replace")
@@ -38,7 +36,7 @@ async def load_skill(skill_name: str):
         )
     except Exception as e:
         logger.error(f"[LoadSkill] Failed to read {skill.location}: {e}")
-        return f"Error reading skill: {e}"
+        return ToolError(f"Error reading skill: {e}")
 
     truncated = ""
     if len(text) > _MAX_SKILL_CHARS:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import re
+import platform
+import sys
+from pathlib import Path
 
 from muika.config import get_model_config, mas_config
 
@@ -26,31 +29,24 @@ from muika.plugin.skills import get_skill_manager
 from muika.template.loader import generate_prompt_from_template
 from muika.utils.logger import logger
 
-AGENT_RESULT_PATTERN = re.compile(
-    r"<agent_result\s+status=[\"'](completed|blocked)[\"']>(.*?)</agent_result>",
-    re.DOTALL,
-)
+from .report import parse_report
 
 
 def _parse_agent_report(text: str) -> str:
-    match = AGENT_RESULT_PATTERN.fullmatch(text.strip())
-    if match:
-        report = match.group(2).strip()
-        return report if match.group(1) == "completed" else f"Agent blocked: {report}"
-    last_output = text.strip() or "(empty response)"
+    report = parse_report(text)
+    if report:
+        body = report.describe()
+        return body if report.status == "completed" else f"Agent blocked: {body}"
+    _, visible = general_processor(text)
+    last_output = visible.strip() or "(empty response)"
     return f"Agent stopped before reporting completion. Last output: {last_output}"
 
 
 class ButlerAgent:
-    """
-    Receives a natural-language command, passes it to the LLM with all registered tools,
-    and returns the LLM's final text response as a butler report.
-
-    Tool call dispatch is handled entirely by the LLM provider — the Butler does not
-    need its own execution loop.
-    """
+    """提供行动模型、执行提示及记忆处理能力。"""
 
     def __init__(self) -> None:
+        self.action_lock = asyncio.Lock()
         butler_cfg = get_model_config(mas_config.butler_model)
         summarize_model_cfg = get_model_config(mas_config.session_summarize_model or mas_config.butler_model)
         self.model = load_model(butler_cfg)
@@ -199,6 +195,19 @@ class ButlerAgent:
         )
         logger.info(f"[Butler/Memory] Stored: [{layer.value}/{category.value}] " f"{key} = {value[:60]!r}...")
 
+    def build_request(self, command: str) -> ModelRequest:
+        """组装当前模板、技能、工具和实际运行环境。"""
+        system = generate_prompt_from_template(mas_config.agent_template)
+        skills_section = self._skill_manager.render_prompt_section()
+        if skills_section:
+            system += f"\n\n{skills_section}"
+        system += (
+            f"\n\nExecution environment: OS={platform.system()}; cwd={Path.cwd()}; "
+            f"Python={sys.executable}. Default shell={'powershell' if sys.platform == 'win32' else 'bash'}. "
+            "Use this environment's syntax. A running process is not a completed check."
+        )
+        return ModelRequest(prompt=f"Command: {command}", system=system, tools=get_tool_list())
+
     async def execute_command(
         self,
         command: str,
@@ -206,24 +215,19 @@ class ButlerAgent:
         executor: Executor,
     ) -> tuple[str, list[Resource]]:
         """调用模型执行行动意图，返回执行报告和工具资源。"""
+        async with self.action_lock:
+            return await self._execute_command(command, state, executor)
+
+    async def _execute_command(self, command: str, state: MuikaState, executor: Executor) -> tuple[str, list[Resource]]:
         logger.info(f"[Butler] Executing command: {command!r}")
 
         with tool_context(state, executor) as context:
-            # 组装系统提示（Muika 的行动半身模板），注入可用技能列表
-            system = generate_prompt_from_template(mas_config.agent_template)
-
-            skills_section = self._skill_manager.render_prompt_section()
-            if skills_section:
-                system += f"\n\n{skills_section}"
-
-            request = ModelRequest(
-                prompt=f"Command: {command}",
-                system=system,
-                tools=get_tool_list(),
-            )
+            request = self.build_request(command)
 
             try:
                 completion = await self.model.ask(request=request, stream=False)
+                if not completion.succeed:
+                    raise RuntimeError(completion.text)
                 report = _parse_agent_report(completion.text)
             except Exception as e:
                 logger.error(f"[Butler] LLM error: {e}")

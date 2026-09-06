@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Iterator
 if TYPE_CHECKING:
     from muika.core.executor import Executor
     from muika.core.state import MuikaState
+    from muika.llm._schema import ToolCall, ToolResult
     from muika.models import Resource
 
 
@@ -20,15 +22,31 @@ class ToolContext:
     state: MuikaState
     executor: Executor
     resources: list[Resource] = field(default_factory=list)
+    task_id: str | None = None
+    file_versions: dict[str, str] = field(default_factory=dict)
+    execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None
 
 
 _tool_context: ContextVar[ToolContext | None] = ContextVar("tool_context", default=None)
 
 
 @contextmanager
-def tool_context(state: MuikaState, executor: Executor) -> Iterator[ToolContext]:
+def tool_context(
+    state: MuikaState,
+    executor: Executor,
+    *,
+    task_id: str | None = None,
+    file_versions: dict[str, str] | None = None,
+    execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None,
+) -> Iterator[ToolContext]:
     """隔离本次调用的资源，并在退出时恢复外层上下文。"""
-    context = ToolContext(state, executor)
+    context = ToolContext(
+        state,
+        executor,
+        task_id=task_id,
+        file_versions=file_versions if file_versions is not None else {},
+        execute_tool=execute_tool,
+    )
     token = _tool_context.set(context)
     try:
         yield context

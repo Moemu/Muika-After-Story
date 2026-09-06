@@ -201,6 +201,7 @@ class MuikaBrain:
         adapters: Optional[List[AdapterInfo]] = None,
         god_mode: bool = False,
         now: datetime | None = None,
+        task_context: str = "",
     ) -> str:
         """
         Pure roleplay response generation.
@@ -246,7 +247,18 @@ class MuikaBrain:
             )
 
         # Construct the immediate event context if it's the start of the interaction
-        if event.type == "user_message":
+        if event.type == "agent_task":
+            prompt = (
+                f"[Action result] Task {event.task_id}, revision {event.revision}, status {event.status}:\n"
+                f"{event.report}\nContinue from this result in the current conversation. "
+                "This is an observation from your acting half, not a new user request."
+            )
+        elif event.type == "agent_handoff":
+            prompt = (
+                "[System] Your acting half has paused at an execution boundary. Direct tools are now available. "
+                "Continue from this task state; do not repeat completed actions:\n" + event.report
+            )
+        elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
         elif event.type == "time_tick":
             if state.mood == "lonely":
@@ -283,6 +295,8 @@ class MuikaBrain:
         # 内化当前时间：每轮 prompt 统一带时间戳前缀，替代 system 中的 current_time，
         # 使 system prompt 保持字节级稳定以利前缀缓存。
         prompt = f"[{current_time:%Y-%m-%d %H:%M:%S}] {prompt}"
+        if task_context:
+            prompt += f"\n\n[Current action tasks]\n{task_context}"
 
         # 历史记录去重
         history = memory.recent_turns.copy()

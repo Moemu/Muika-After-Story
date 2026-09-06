@@ -512,6 +512,7 @@ async def test_maintenance_loop_gate_does_not_start_persona_work(core_workspace,
     engine = Muika.__new__(Muika)
     engine.is_alive = True
     engine._is_collecting_event = False
+    engine.agent_tasks = AsyncMock()
 
     async def collect_event():
         engine.is_alive = False

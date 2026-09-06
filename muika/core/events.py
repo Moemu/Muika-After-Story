@@ -135,6 +135,27 @@ class TimeoutEvent:
     type: Literal["timeout"] = "timeout"
 
 
+@dataclass(frozen=True)
+class AgentTaskEvent:
+    """将行动结果交回当前会话，不重放原始用户请求。"""
+
+    task_id: str
+    revision: int
+    status: str
+    report: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["agent_task"] = "agent_task"
+
+
+@dataclass(frozen=True)
+class AgentHandoffEvent:
+    """提示主人格已取得动作执行权。"""
+
+    report: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["agent_handoff"] = "agent_handoff"
+
+
 Event: TypeAlias = (
     UserMessageEvent
     | TimeTickEvent
@@ -144,4 +165,6 @@ Event: TypeAlias = (
     | AdapterOnlineEvent
     | AdapterOfflineEvent
     | TimeoutEvent
+    | AgentTaskEvent
+    | AgentHandoffEvent
 )

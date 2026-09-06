@@ -1,31 +1,44 @@
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 pytest.importorskip("dashscope")
 
-from muika.llm import ModelCompletions, ModelConfig  # noqa: E402
+from muika.llm import ModelConfig, ModelRequest  # noqa: E402
 from muika.llm._retry import LLMRequestError  # noqa: E402
 from muika.llm.providers.dashscope import Dashscope  # noqa: E402
 
 
 async def test_non_stream_response_prioritizes_tool_calls(monkeypatch):
-    provider = Dashscope.__new__(Dashscope)
-    expected = ModelCompletions(text="tool result")
-    handler = AsyncMock(return_value=expected)
-    monkeypatch.setattr(provider, "_tool_calls_handle_sync", handler)
-    message = SimpleNamespace(content="I will read it first.", tool_calls=[{"id": "call-1"}])
-    response = SimpleNamespace(
+    from dashscope.api_entities.dashscope_response import GenerationResponse
+
+    provider = Dashscope(ModelConfig(provider="dashscope", model_name="qwen-test", api_key="test-key"))
+    response = GenerationResponse(
         status_code=200,
-        usage=SimpleNamespace(input_tokens=1, output_tokens=1, prompt_tokens_details=None),
-        output=SimpleNamespace(text="I will read it first.", choices=[SimpleNamespace(message=message)]),
+        usage={"input_tokens": 1, "output_tokens": 1},
+        output={
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "I will read it first.",
+                        "tool_calls": [
+                            {"id": "call-1", "function": {"name": "read_file", "arguments": '{"path":"one.py"}'}},
+                            {"id": "call-2", "function": {"name": "read_file", "arguments": '{"path":"two.py"}'}},
+                        ],
+                    },
+                }
+            ]
+        },
     )
-
-    result = await provider._GenerationResponse_handle([], [], None, response)
-
-    assert result is expected
-    handler.assert_awaited_once()
+    call = AsyncMock(return_value=response)
+    monkeypatch.setattr("dashscope.AioGeneration.call", call)
+    result = await provider._collect_stream(provider.request_step(ModelRequest("read"), [], stream=False))
+    assert result.message is not None
+    assert [tool.id for tool in result.message.tool_calls] == ["call-1", "call-2"]
+    assert result.stop_reason == "tool_calls"
+    assert result.text == "I will read it first."
 
 
 async def test_dashscope_uses_async_sdk_and_normalizes_status(monkeypatch):
@@ -42,7 +55,7 @@ async def test_dashscope_uses_async_sdk_and_normalizes_status(monkeypatch):
     monkeypatch.setattr("dashscope.AioGeneration.call", call)
 
     with pytest.raises(LLMRequestError) as exc_info:
-        await provider._ask([], [], None, False)
+        await provider._collect_stream(provider.request_step(ModelRequest("test"), [], stream=False))
 
     assert exc_info.value.kind == "congestion"
     call.assert_awaited_once()
@@ -73,7 +86,7 @@ async def test_dashscope_retries_stream_error_before_content(monkeypatch):
     monkeypatch.setattr("dashscope.AioGeneration.call", call)
     monkeypatch.setattr("muika.llm._retry._retry_delay", lambda error, attempt: 0.0)
 
-    stream = await provider._ask([], [], None, True)
+    stream = provider.request_step(ModelRequest("test"), [], stream=True)
     with pytest.raises(LLMRequestError):
         async for _ in stream:
             pass

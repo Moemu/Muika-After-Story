@@ -29,8 +29,9 @@ class FunctionCallValidationError(ValueError):
 
 
 class Caller:
-    def __init__(self, description: str, params: Optional[Type[BaseModel]] = None):
+    def __init__(self, description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False):
         self._name: str = ""
+        self.read_only = read_only
         """函数名称"""
         self._description: str = description
         """函数描述"""
@@ -154,7 +155,7 @@ class Caller:
         }
 
 
-def on_function_call(description: str, params: Optional[Type[BaseModel]] = None) -> Caller:
+def on_function_call(description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False) -> Caller:
     """
     返回一个Caller类，可用于装饰一个函数，使其注册为一个可被AI调用的function call函数
 
@@ -163,7 +164,7 @@ def on_function_call(description: str, params: Optional[Type[BaseModel]] = None)
 
     :return: Caller对象
     """
-    caller = Caller(description=description, params=params)
+    caller = Caller(description=description, params=params, read_only=read_only)
     return caller
 
 

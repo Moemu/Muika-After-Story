@@ -106,3 +106,27 @@ class RssDigestCacheORM(Base):
     summary: Mapped[str] = mapped_column(Text)
     fetched_at: Mapped[str] = mapped_column(String)
     evaluated_at: Mapped[str] = mapped_column(String)
+
+
+class AgentTaskORM(Base):
+    """保存独立于聊天会话的行动任务。"""
+
+    __tablename__ = "agent_task"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(String, index=True)
+    updated_at: Mapped[str] = mapped_column(String)
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class AgentCallORM(Base):
+    """记录工具执行前后的状态，避免恢复时盲目重放。"""
+
+    __tablename__ = "agent_call"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(String, index=True)
+    status: Mapped[str] = mapped_column(String, index=True)
+    payload: Mapped[str] = mapped_column(Text)

@@ -7,6 +7,7 @@ from typing import Optional
 import psutil
 from pydantic import BaseModel, Field
 
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -85,16 +86,18 @@ async def list_processes(filter: Optional[str] = None, limit: int = 50, offset: 
         return out
     except Exception as e:
         logger.error(f"[ListProcesses] Failed: {e}")
-        return f"Error listing processes: {e}"
+        return ToolError(f"Error listing processes: {e}")
 
 
 @on_function_call("Get the title and process of the currently focused window.")
 async def get_focused_window() -> str:
     """读取当前窗口信息，依赖不可用时返回明确提示。"""
     if sys.platform != "win32":
-        return "Not supported on this platform (Windows only)."
+        return ToolError("Not supported on this platform (Windows only).")
     if win32gui is None or win32process is None:
-        return "Focused window information is unavailable: pywin32 could not be loaded. Install or repair pywin32."
+        return ToolError(
+            "Focused window information is unavailable: pywin32 could not be loaded. Install or repair pywin32."
+        )
 
     try:
         hwnd = win32gui.GetForegroundWindow()
@@ -109,7 +112,7 @@ async def get_focused_window() -> str:
         return f"Focused Window: '{title}' (Process: {process_name}, PID: {pid})"
     except Exception as e:
         logger.error(f"[GetFocusedWindow] Failed: {e}")
-        return f"Error getting focused window: {e}"
+        return ToolError(f"Error getting focused window: {e}")
 
 
 @on_function_call("Get system load indicators such as CPU, memory, and battery.")
@@ -126,7 +129,7 @@ async def get_system_status():
         return status
     except Exception as e:
         logger.error(f"[GetSystemStatus] Failed: {e}")
-        return f"Error getting system status: {e}"
+        return ToolError(f"Error getting system status: {e}")
 
 
 class SendDesktopNotificationParams(BaseModel):
@@ -142,7 +145,7 @@ class SendDesktopNotificationParams(BaseModel):
 async def send_desktop_notification(title: str, message: str, timeout: int = 5) -> str:
     """发送桌面通知并返回执行结果。"""
     if notification is None:
-        return "plyer is not installed. Run: pip install plyer"
+        return ToolError("plyer is not installed. Run: pip install plyer")
 
     def _notify() -> None:
         notification.notify(
@@ -159,13 +162,13 @@ async def send_desktop_notification(title: str, message: str, timeout: int = 5) 
         return f"Desktop notification sent: {title!r}"
     except Exception as e:
         logger.error(f"[SendDesktopNotification] Failed: {e}")
-        return f"Failed to send desktop notification: {e}"
+        return ToolError(f"Failed to send desktop notification: {e}")
 
 
 @on_function_call("Read the current text content of the system clipboard.")
 async def read_clipboard():
     if pyperclip is None:
-        return "pyperclip is not installed. Run: pip install pyperclip"
+        return ToolError("pyperclip is not installed. Run: pip install pyperclip")
 
     loop = asyncio.get_event_loop()
     try:
@@ -178,7 +181,7 @@ async def read_clipboard():
         logger.debug(f"[ReadClipboard] Read {len(text)} chars from clipboard")
         return f"Clipboard content:\n{truncated}{suffix}"
     except pyperclip.PyperclipException as e:
-        return f"Clipboard unavailable (Linux requires xclip or xsel: apt install xclip)" f": {e}"
+        return ToolError(f"Clipboard unavailable (Linux requires xclip or xsel: apt install xclip)" f": {e}")
     except Exception as e:
         logger.error(f"[ReadClipboard] Failed: {e}")
-        return f"Failed to read clipboard: {e}"
+        return ToolError(f"Failed to read clipboard: {e}")

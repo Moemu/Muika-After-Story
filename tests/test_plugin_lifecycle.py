@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types
@@ -663,6 +664,7 @@ async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monk
     )
     fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">done</agent_result>'))
     agent = ButlerAgent.__new__(ButlerAgent)
+    agent.action_lock = asyncio.Lock()
     agent.model = fake
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""

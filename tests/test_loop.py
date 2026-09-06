@@ -12,6 +12,7 @@ import pytest
 from muika.core.events import TimeTickEvent, UserMessageEvent, UserMessagePayload
 from muika.core.loop import Muika, ParsedReply
 from muika.core.state import ActiveTopicState, MuikaState
+from muika.llm import ModelCompletions, ModelRequest
 from muika.models import Message
 
 
@@ -213,11 +214,54 @@ async def test_god_mode_enables_tools_and_isolates_resources(engine):
 
     engine.brain.generate_reply = generate_reply
     await engine._run_brain_pipeline(TimeTickEvent(), [])
+    handoff = await asyncio.wait_for(engine.event_queue.get(), timeout=1)
+    await engine._process_event(handoff, 0)
     await engine._run_brain_pipeline(TimeTickEvent(), [])
     assert requests == [False, True, True]
     assert engine.executor.send_message.await_args_list[0].kwargs["resources"] == [resource]
     assert engine.executor.send_message.await_args_list[1].kwargs["resources"] == []
     assert get_dependencies()[ToolContext] is None
+
+
+async def test_chat_and_session_end_keep_background_task(engine, monkeypatch, db_session, session_ctx_factory):
+    monkeypatch.setattr("muika.core.butler.task_store.get_session", lambda: session_ctx_factory(db_session))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def step(request, messages):
+        entered.set()
+        await release.wait()
+        return ModelCompletions(text='<agent_result status="completed">Verified.</agent_result>')
+
+    engine.butler_agent.action_lock = asyncio.Lock()
+    engine.butler_agent.build_request = lambda command: ModelRequest(command, tools=[])
+    engine.butler_agent.model.step = step
+    engine.brain.generate_reply = AsyncMock(side_effect=["我去看看。<agent>Develop Daily</agent>", "我在呢。"])
+    worker = asyncio.create_task(engine.agent_tasks.run())
+    try:
+        await engine._run_brain_pipeline(
+            UserMessageEvent(payload=UserMessagePayload(message=Message(message="开始"))), []
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        task = next(iter(engine.agent_tasks.tasks.values()))
+        await asyncio.wait_for(
+            engine._run_brain_pipeline(
+                UserMessageEvent(payload=UserMessagePayload(message=Message(message="陪我聊会儿"))), []
+            ),
+            1,
+        )
+        assert engine.executor.send_message.await_args.args[0] == "我在呢。"
+        await engine._handle_session_end()
+        assert engine.agent_tasks.tasks[task.id] is task
+        assert task.status == "running"
+        release.set()
+        result = await asyncio.wait_for(engine.event_queue.get(), 1)
+        assert result.task_id == task.id and result.status == "completed"
+    finally:
+        release.set()
+        await engine.agent_tasks.close()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 async def test_failed_summary_preserves_session_and_can_retry(engine, monkeypatch):

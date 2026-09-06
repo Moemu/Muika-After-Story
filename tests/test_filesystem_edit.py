@@ -4,9 +4,15 @@
 ``line_end`` 越界静默截断。若后续合入 WIP 的边界变更，需同步更新。
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from muika.core.actions.tools._filesystem import _apply_edit
+from muika.config import mas_config
+from muika.core.actions.tools._filesystem import _apply_edit, edit_file, read_file
+from muika.core.state import MuikaState
+from muika.llm.utils.tools import ToolError
+from muika.plugin.func_call.context import tool_context
 
 
 def test_replace_ok():
@@ -66,3 +72,21 @@ def test_delete_lines_invalid_range_raises():
 def test_unknown_operation_raises():
     with pytest.raises(ValueError):
         _apply_edit("a\n", "foo", None, None, None, None, None)
+
+
+async def test_external_edit_requires_fresh_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
+    monkeypatch.setattr(mas_config, "enable_file_write", True)
+    file = tmp_path / "draft.txt"
+    file.write_text("original\nsecond", encoding="utf-8")
+    with tool_context(MuikaState(), MagicMock(), task_id="task"):
+        first = await read_file(str(file), line_start=1, max_chars=4)
+        assert "1: orig" in first and "char_offset=4" in first
+        file.write_text("external\nsecond", encoding="utf-8")
+        rejected = await edit_file(str(file), "replace", old_string="second", new_string="updated")
+        assert isinstance(rejected, ToolError) and "changed since your last read" in rejected
+        assert file.read_text(encoding="utf-8") == "external\nsecond"
+        await read_file(str(file))
+        changed = await edit_file(str(file), "replace", old_string="second", new_string="updated")
+        assert not isinstance(changed, ToolError)
+        assert file.read_text(encoding="utf-8") == "external\nupdated"

@@ -125,46 +125,12 @@ class Server:
 
         return tools
 
-    async def execute_tool(
-        self,
-        tool_name: str,
-        arguments: Optional[dict[str, Any]] = None,
-        retries: int = 2,
-        delay: float = 1.0,
-    ) -> Any:
-        """
-        执行一个 MCP 工具
-
-        :param tool_name: 工具名称
-        :param arguments: 工具参数
-        :param retries: 重试次数
-        :param delay: 重试间隔
-
-        :return: 工具执行结果
-
-        :raises RuntimeError: 如果服务器未初始化
-        :raises Exception: 工具在所有重试中均失败
-        """
+    async def execute_tool(self, tool_name: str, arguments: Optional[dict[str, Any]] = None) -> Any:
+        """执行一次 MCP 工具；传输失败时由调用者核对结果。"""
         if not self.session:
             raise RuntimeError(f"Server {self.name} not initialized")
-
-        attempt = 0
-        while attempt < retries:
-            try:
-                logging.info(f"Executing {tool_name}...")
-                result = await self.session.call_tool(tool_name, arguments)
-
-                return result
-
-            except Exception as e:
-                attempt += 1
-                logging.warning(f"Error executing tool: {e}. Attempt {attempt} of {retries}.")
-                if attempt < retries:
-                    logging.info(f"Retrying in {delay} seconds...")
-                    await asyncio.sleep(delay)
-                else:
-                    logging.error("Max retries reached. Failing.")
-                    raise
+        logging.info(f"Executing {tool_name}...")
+        return await self.session.call_tool(tool_name, arguments)
 
     async def cleanup(self) -> None:
         """Clean up server resources."""

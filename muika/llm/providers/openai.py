@@ -1,11 +1,12 @@
 import base64
-import json
+import wave
+from collections.abc import Sequence
 from io import BytesIO
 from typing import Any, AsyncGenerator, List, Literal, Union, overload
 
 import openai
 from openai import NOT_GIVEN, NotGiven
-from openai.types.chat import ChatCompletionMessage, ChatCompletionToolParam
+from openai.types.chat import ChatCompletionToolParam
 from openai.types.shared_params.response_format_json_schema import (
     JSONSchema,
     ResponseFormatJSONSchema,
@@ -13,7 +14,6 @@ from openai.types.shared_params.response_format_json_schema import (
 from pydantic import TypeAdapter
 
 from muika.models import Resource
-from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,
@@ -25,8 +25,9 @@ from .. import (
     register,
 )
 from .._retry import RequestRetry
+from .._schema import ModelMessage, ToolCall
 from ..utils.images import get_file_base64
-from ..utils.tools import function_call_handler
+from ..utils.protocol import ToolCallBuffer, ToolDelta, stop_reason, tool_payload
 
 
 @register("openai")
@@ -133,262 +134,150 @@ class Openai(BaseLLM):
 
         return messages
 
-    def _tool_call_request_precheck(self, message: ChatCompletionMessage) -> bool:
-        """
-        工具调用请求预检
-        """
-        # We expect a single tool call
-        if not (message.tool_calls and len(message.tool_calls) == 1):
-            return False
-
-        # We expect the tool to be a function call
-        tool_call = message.tool_calls[0]
-        if tool_call.type != "function":
-            return False
-
-        return True
-
-    async def _ask_sync(
-        self,
-        messages: list,
-        tools: Union[List[ChatCompletionToolParam], NotGiven],
-        response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
-        total_usage: Usage | None = None,
-    ) -> ModelCompletions:
-        if total_usage is None:
-            total_usage = Usage()
-        completions = ModelCompletions()
-
-        try:
-
-            async def send_request():
-                return await self.client.chat.completions.create(
-                    audio=self.audio,  # type: ignore
-                    model=self.model,
-                    modalities=self.modalities,  # type: ignore
-                    messages=messages,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    stream=False,
-                    tools=tools,  # type: ignore
-                    extra_body=self.extra_body,
-                    response_format=response_format,  # type: ignore
-                    **self._sampling_kwargs(),
-                )
-
-            response: Any = await RequestRetry(self.config).run(send_request)
-
-            logger.debug(f"OpenAI response: id={response.id}, choices={response.choices}, usage={response.usage}")
-
-            result = ""
-            message = response.choices[0].message  # type: ignore
-            if response.usage:
-                total_usage.input_tokens += response.usage.prompt_tokens or 0
-                total_usage.output_tokens += response.usage.completion_tokens or 0
-                details = getattr(response.usage, "prompt_tokens_details", None)
-                total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
-
-            if (
-                hasattr(message, "reasoning_content")  # type: ignore
-                and message.reasoning_content  # type: ignore
-            ):
-                result += f"<think>{message.reasoning_content}</think>"  # type: ignore
-
-            if response.choices[0].finish_reason == "tool_calls" and self._tool_call_request_precheck(
-                response.choices[0].message
-            ):
-                messages.append(response.choices[0].message)
-                tool_call = response.choices[0].message.tool_calls[0]  # type: ignore
-                arguments = json.loads(tool_call.function.arguments.replace("'", '"'))
-
-                function_return = await function_call_handler(tool_call.function.name, arguments)
-
+    def _conversation_messages(self, request: ModelRequest, conversation: Sequence[ModelMessage]) -> list:
+        messages = self._build_messages(request)
+        for item in conversation:
+            if item.role == "user" and item.resources:
                 messages.append(
-                    {
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": tool_call.function.name,
-                        "content": function_return,
-                    }
+                    self.__build_multi_messages(
+                        ModelRequest(item.content, resources=[r.to_resource() for r in item.resources])
+                    )
                 )
-                return await self._ask_sync(messages, tools, response_format, total_usage)
+                continue
+            message: dict = {"role": item.role, "content": item.content}
+            if item.reasoning:
+                message["reasoning_content"] = item.reasoning
+            if item.tool_calls:
+                message["tool_calls"] = [tool_payload(call) for call in item.tool_calls]
+            if item.role == "tool":
+                message["tool_call_id"] = item.tool_call_id
+            messages.append(message)
+        return messages
 
-            if message.content:  # type: ignore
-                result += message.content  # type: ignore
+    def _response_format(self, request: ModelRequest):
+        if request.format != "json":
+            return NOT_GIVEN
+        if request.json_schema is None:
+            return {"type": "json_object"}
+        schema = (
+            request.json_schema.json_schema()
+            if isinstance(request.json_schema, TypeAdapter)
+            else request.json_schema.model_json_schema()
+        )
+        return ResponseFormatJSONSchema(
+            type="json_schema",
+            json_schema=JSONSchema(
+                name=request.json_schema.__name__ if isinstance(request.json_schema, type) else "response",
+                schema=schema,
+                strict=True,
+            ),
+        )
 
-            # 多模态消息处理（目前仅支持 audio 输出）
-            if response.choices[0].message.audio:
-                wav_bytes = base64.b64decode(response.choices[0].message.audio.data)
-                completions.resources = [Resource(type="audio", raw=wav_bytes)]
-
-            completions.text = result or "（警告：模型无输出！）"
-            completions.usage = total_usage
-
-        except openai.APIConnectionError as e:
-            error_message = f"API 连接错误: {e}"
-            completions.text = error_message
-            logger.error(error_message)
-            logger.error(e.__cause__)
-            completions.succeed = False
-
-        except openai.APIStatusError as e:
-            error_message = f"API 状态异常: {e.status_code}({e.body})"
-            completions.text = error_message
-            logger.error(error_message)
-            completions.succeed = False
-
-        return completions
-
-    async def _ask_stream(
-        self,
-        messages: list,
-        tools: Union[List[ChatCompletionToolParam], NotGiven],
-        response_format: Union[ResponseFormatJSONSchema, NotGiven, Any],
-        total_usage: Usage | None = None,
+    async def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        if total_usage is None:
-            total_usage = Usage()
-        is_insert_think_label = False
-        function_id = ""
-        function_name = ""
-        function_arguments = ""
-        audio_string = ""
+        kwargs = dict(
+            audio=self.audio,
+            model=self.model,
+            modalities=self.modalities,
+            messages=self._conversation_messages(request, messages),
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            stream=stream,
+            tools=request.tools or NOT_GIVEN,
+            extra_body=self.extra_body,
+            response_format=self._response_format(request),
+            **self._sampling_kwargs(),
+        )
+        if stream:
+            kwargs["stream_options"] = {"include_usage": True}
 
-        try:
+        async def send_request():
+            return await self.client.chat.completions.create(**kwargs)
 
-            async def send_request():
-                return await self.client.chat.completions.create(
-                    audio=self.audio,  # type: ignore
-                    model=self.model,
-                    modalities=self.modalities,  # type: ignore
-                    messages=messages,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                    tools=tools,  # type: ignore
-                    extra_body=self.extra_body,
-                    response_format=response_format,  # type: ignore
-                    **self._sampling_kwargs(),
-                )
+        usage = Usage()
+        if not stream:
+            response = await RequestRetry[Any](self.config).run(send_request)
+            choice = response.choices[0]
+            raw = choice.message.model_dump(exclude_none=True)
+            message = ModelMessage(
+                role="assistant",
+                content=raw.get("content", ""),
+                reasoning=raw.get("reasoning_content", ""),
+                tool_calls=[
+                    ToolCall(id=call["id"], name=call["function"]["name"], arguments=call["function"]["arguments"])
+                    for call in raw.get("tool_calls", [])
+                ],
+            )
+            if response.usage:
+                usage.input_tokens = response.usage.prompt_tokens or 0
+                usage.output_tokens = response.usage.completion_tokens or 0
+                details = response.usage.prompt_tokens_details
+                usage.cached_tokens = details.cached_tokens or 0 if details else 0
+            resources = []
+            if choice.message.audio:
+                resources.append(Resource(type="audio", raw=base64.b64decode(choice.message.audio.data)))
+            reason = stop_reason(choice.finish_reason, has_tools=bool(message.tool_calls))
+            yield ModelStreamCompletions(
+                chunk=(f"<think>{message.reasoning}</think>" if message.reasoning else "") + message.content,
+                message=message,
+                usage=usage,
+                resources=resources,
+                stop_reason=reason,
+                succeed=reason != "filtered",
+            )
+            return
 
-            async for chunk in RequestRetry[Any](self.config).stream(send_request):
-                stream_completions = ModelStreamCompletions()
-
-                logger.debug(f"OpenAI response: id={chunk.id}, choices={chunk.choices}, usage={chunk.usage}")
-
-                # 获取 usage （最后一个包中返回）
-                if chunk.usage:
-                    total_usage.input_tokens += chunk.usage.prompt_tokens or 0
-                    total_usage.output_tokens += chunk.usage.completion_tokens or 0
-                    try:
-                        details = chunk.usage.prompt_tokens_details
-                        total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
-                    except AttributeError:
-                        pass
-                    stream_completions.usage = total_usage
-
-                if not chunk.choices:
-                    yield stream_completions
-                    continue
-
-                # 处理 Function call
-                if chunk.choices[0].delta.tool_calls:
-                    tool_call = chunk.choices[0].delta.tool_calls[0]
-                    if tool_call.id:
-                        function_id = tool_call.id
-                    if tool_call.function:
-                        if tool_call.function.name:
-                            function_name += tool_call.function.name
-                        if tool_call.function.arguments:
-                            function_arguments += tool_call.function.arguments
-
-                delta = chunk.choices[0].delta
-                answer_content = delta.content
-
-                # 处理思维过程 reasoning_content
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:  # type: ignore
-                    reasoning_content = chunk.choices[0].delta.reasoning_content  # type: ignore
-                    stream_completions.chunk = (
-                        reasoning_content if is_insert_think_label else "<think>" + reasoning_content
-                    )
-                    yield stream_completions
-                    is_insert_think_label = True
-
-                elif answer_content:
-                    stream_completions.chunk = (
-                        answer_content if not is_insert_think_label else "</think>" + answer_content
-                    )
-                    yield stream_completions
-                    is_insert_think_label = False
-
-                # 处理多模态消息 (audio-only) (非标准方法，可能出现问题)
-                if hasattr(chunk.choices[0].delta, "audio"):
-                    audio = chunk.choices[0].delta.audio  # type: ignore
-                    if audio.get("data", None):
-                        audio_string += audio.get("data")
-                    stream_completions.chunk = audio.get("transcript", "")
-                    yield stream_completions
-
-            if function_id:
-
-                function_return = await function_call_handler(function_name, json.loads(function_arguments))
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": function_id,
-                                "type": "function",
-                                "function": {"name": function_name, "arguments": function_arguments},
-                            }
-                        ],
-                    }
-                )
-                messages.append(
-                    {
-                        "tool_call_id": function_id,
-                        "role": "tool",
-                        "content": function_return,
-                    }
-                )
-
-                async for chunk in self._ask_stream(messages, tools, response_format, total_usage):
-                    yield chunk
-                return
-
-            # 处理多模态返回
-            if audio_string:
-                import numpy as np
-                import soundfile as sf
-
-                wav_bytes = base64.b64decode(audio_string)
-                pcm_data = np.frombuffer(wav_bytes, dtype=np.int16)
-                wav_io = BytesIO()
-                sf.write(wav_io, pcm_data, samplerate=24000, format="WAV")
-
-                stream_completions = ModelStreamCompletions()
-                stream_completions.resources = [Resource(type="audio", raw=wav_io)]
-                yield stream_completions
-
-        except openai.APIConnectionError as e:
-            error_message = f"API 连接错误: {e}"
-            logger.error(error_message)
-            logger.error(e.__cause__)
-            stream_completions = ModelStreamCompletions()
-            stream_completions.chunk = error_message
-            stream_completions.succeed = False
-            yield stream_completions
-
-        except openai.APIStatusError as e:
-            error_message = f"API 状态异常: {e.status_code}({e.body})"
-            logger.error(error_message)
-            stream_completions = ModelStreamCompletions()
-            stream_completions.chunk = error_message
-            stream_completions.succeed = False
-            yield stream_completions
+        buffer = ToolCallBuffer()
+        content = ""
+        reasoning = ""
+        thinking = False
+        finish = None
+        audio_data = ""
+        async for chunk in RequestRetry[Any](self.config).stream(send_request):
+            if chunk.usage:
+                usage.input_tokens = chunk.usage.prompt_tokens or 0
+                usage.output_tokens = chunk.usage.completion_tokens or 0
+                details = chunk.usage.prompt_tokens_details
+                usage.cached_tokens = details.cached_tokens or 0 if details else 0
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            finish = choice.finish_reason or finish
+            raw = choice.delta.model_dump(exclude_none=True)
+            for call in raw.get("tool_calls", []):
+                buffer.add(ToolDelta.model_validate(call))
+            thought = raw.get("reasoning_content", "")
+            text = raw.get("content", "")
+            if thought:
+                reasoning += thought
+                yield ModelStreamCompletions(chunk=("" if thinking else "<think>") + thought)
+                thinking = True
+            if text:
+                content += text
+                yield ModelStreamCompletions(chunk=("</think>" if thinking else "") + text)
+                thinking = False
+            audio = raw.get("audio", {})
+            audio_data += audio.get("data", "")
+            if audio.get("transcript"):
+                content += audio["transcript"]
+                yield ModelStreamCompletions(chunk=audio["transcript"])
+        if thinking:
+            yield ModelStreamCompletions(chunk="</think>")
+        message = ModelMessage(role="assistant", content=content, reasoning=reasoning, tool_calls=buffer.finish())
+        reason = stop_reason(finish, has_tools=bool(message.tool_calls))
+        resources = []
+        if audio_data:
+            output = BytesIO()
+            with wave.open(output, "wb") as audio_file:
+                audio_file.setnchannels(1)
+                audio_file.setsampwidth(2)
+                audio_file.setframerate(24000)
+                audio_file.writeframes(base64.b64decode(audio_data))
+            resources.append(Resource(type="audio", raw=output.getvalue()))
+        yield ModelStreamCompletions(
+            message=message, usage=usage, resources=resources, stop_reason=reason, succeed=reason != "filtered"
+        )
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
@@ -401,33 +290,4 @@ class Openai(BaseLLM):
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        tools = request.tools if request.tools else NOT_GIVEN
-
-        messages = self._build_messages(request)
-        if request.format == "json" and request.json_schema:
-            if isinstance(request.json_schema, TypeAdapter):
-                schema = request.json_schema.json_schema()
-            else:
-                schema = request.json_schema.model_json_schema()
-
-            # JSONSchema 是 TypedDict，必须显式填写 `name` 与 `schema` 两个字段：
-            # 直接把 pydantic 的 JSON Schema dict 展开进去会丢失 `schema` 键，
-            # 导致 OpenAI 兼容端点（如 DeepSeek）报 "missing field `schema`"。
-            response_format = ResponseFormatJSONSchema(
-                type="json_schema",
-                json_schema=JSONSchema(
-                    name=request.json_schema.__name__ if isinstance(request.json_schema, type) else "response",
-                    schema=schema,
-                    strict=True,
-                ),
-            )
-        else:
-            response_format = NOT_GIVEN
-
-        if stream:
-            return self._ask_stream(messages, tools, response_format)  # type: ignore
-
-        return await self._complete_response(
-            lambda: self._ask_sync(messages, tools, response_format),
-            lambda: self._ask_stream(messages, tools, response_format),
-        )
+        return await self.run_conversation(request, stream=stream)

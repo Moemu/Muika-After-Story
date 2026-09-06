@@ -1,0 +1,261 @@
+"""管理工具启动的子进程、输出文件和退出清理。"""
+
+from __future__ import annotations
+
+import asyncio
+import codecs
+import json
+import os
+import signal
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+from uuid import uuid4
+
+from pydantic import BaseModel
+
+from muika.config import mas_config
+
+if sys.platform == "win32":
+    import win32api
+    import win32con
+    import win32job
+
+
+class WindowsJob:
+    """在关闭时终止本次执行的所有 Windows 子进程。"""
+
+    def __init__(self, pid: int) -> None:
+        if sys.platform != "win32":
+            raise RuntimeError("Windows jobs are unavailable on this platform")
+        self.handle = win32job.CreateJobObject(None, "")
+        info = win32job.QueryInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation)
+        info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        win32job.SetInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation, info)
+        process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
+        try:
+            win32job.AssignProcessToJobObject(self.handle, process)
+        finally:
+            process.Close()
+
+    def close(self) -> None:
+        self.handle.Close()
+
+
+class ProcessResult(BaseModel):
+    """返回执行状态与按字节续读的输出。"""
+
+    process_id: str
+    status: Literal["running", "completed", "stopped", "timeout"]
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    stdout_offset: int = 0
+    stderr_offset: int = 0
+    stdout_more: bool = False
+    stderr_more: bool = False
+    output_directory: str
+
+
+@dataclass
+class RunningProcess:
+    process: asyncio.subprocess.Process
+    directory: Path
+    owner: str | None
+    job: WindowsJob | None = None
+    monitor: asyncio.Task[None] | None = None
+    status: Literal["running", "completed", "stopped", "timeout"] = "running"
+
+
+class ProcessManager:
+    """拥有工具启动的进程，等待操作不会终止仍在运行的工作。"""
+
+    def __init__(self) -> None:
+        self._processes: dict[str, RunningProcess] = {}
+
+    @staticmethod
+    def _save_record(running: RunningProcess) -> None:
+        temporary = running.directory / "record.tmp"
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "owner": running.owner,
+                    "pid": running.process.pid,
+                    "status": running.status,
+                    "exit_code": running.process.returncode,
+                },
+                file,
+            )
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(running.directory / "record.json")
+
+    def read_record(
+        self,
+        process_id: str,
+        *,
+        owner: str | None,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = 12000,
+    ) -> dict[str, object]:
+        """读取持久执行证据，不恢复旧进程的控制权。"""
+        if len(process_id) != 32 or any(char not in "0123456789abcdef" for char in process_id):
+            raise ValueError("Invalid process ID")
+        directory = mas_config.data_dir.resolve() / "agent_processes" / process_id
+        record = json.loads((directory / "record.json").read_text(encoding="utf-8"))
+        if owner is not None and record["owner"] != owner:
+            raise ValueError("This execution record belongs to another task")
+        record["process_id"] = process_id
+        record["controllable"] = process_id in self._processes
+        if not record["controllable"] and record["status"] == "running":
+            record["status"] = "unknown_after_restart"
+        for stream, offset in (("stdout", stdout_offset), ("stderr", stderr_offset)):
+            body, following, more = self._read(directory / f"{stream}.log", offset, max_bytes)
+            record[stream] = body
+            record[f"{stream}_offset"] = following
+            record[f"{stream}_more"] = more
+        return record
+
+    async def start(
+        self, command: list[str], *, env: dict[str, str], cwd: str, owner: str | None, timeout: float
+    ) -> str:
+        process_id = uuid4().hex
+        directory = mas_config.data_dir.resolve() / "agent_processes" / process_id
+        directory.mkdir(parents=True)
+        with (directory / "stdout.log").open("wb") as stdout, (directory / "stderr.log").open("wb") as stderr:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=stdout,
+                stderr=stderr,
+                env=env,
+                cwd=cwd,
+                start_new_session=sys.platform != "win32",
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            )
+        running = RunningProcess(process, directory, owner)
+        self._processes[process_id] = running
+        try:
+            if sys.platform == "win32" and process.returncode is None:
+                running.job = WindowsJob(process.pid)
+            self._save_record(running)
+        except Exception:
+            await self._terminate_tree(running)
+            del self._processes[process_id]
+            raise
+        running.monitor = asyncio.create_task(self._monitor(running, timeout))
+        return process_id
+
+    async def _monitor(self, running: RunningProcess, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(running.process.wait(), timeout)
+            if running.status == "running":
+                running.status = "completed"
+        except asyncio.TimeoutError:
+            running.status = "timeout"
+        finally:
+            await self._terminate_tree(running)
+            self._save_record(running)
+
+    async def _terminate_tree(self, running: RunningProcess) -> None:
+        if running.job is not None:
+            running.job.close()
+            running.job = None
+        elif sys.platform != "win32":
+            try:
+                os.killpg(running.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        elif running.process.returncode is None:
+            running.process.kill()
+        await running.process.wait()
+
+    def _get(self, process_id: str, owner: str | None) -> RunningProcess:
+        running = self._processes.get(process_id)
+        if running is None:
+            raise ValueError("Unknown process ID in this runtime. Inspect saved outputs; do not relaunch blindly.")
+        if owner is not None and owner != running.owner:
+            raise ValueError("This process belongs to another task")
+        return running
+
+    async def wait(
+        self,
+        process_id: str,
+        *,
+        owner: str | None,
+        seconds: float = 1.0,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = 12000,
+    ) -> ProcessResult:
+        running = self._get(process_id, owner)
+        if running.monitor and not running.monitor.done() and seconds > 0:
+            await asyncio.wait({running.monitor}, timeout=min(seconds, 30.0))
+        stdout, stdout_next, stdout_more = self._read(running.directory / "stdout.log", stdout_offset, max_bytes)
+        stderr, stderr_next, stderr_more = self._read(running.directory / "stderr.log", stderr_offset, max_bytes)
+        return ProcessResult(
+            process_id=process_id,
+            status=running.status,
+            exit_code=running.process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_offset=stdout_next,
+            stderr_offset=stderr_next,
+            stdout_more=stdout_more,
+            stderr_more=stderr_more,
+            output_directory=str(running.directory),
+        )
+
+    @staticmethod
+    def _read(path: Path, offset: int, limit: int) -> tuple[str, int, bool]:
+        if offset < 0 or limit < 1:
+            raise ValueError("Output offset must be nonnegative and max_bytes must be positive")
+        with path.open("rb") as file:
+            file.seek(offset)
+            data = file.read(min(limit, 100000))
+            following = file.read(1)
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            text = decoder.decode(data, final=not following)
+            while not text and following:
+                data += following
+                text += decoder.decode(following)
+                following = file.read(1)
+            pending, _ = decoder.getstate()
+        return text, offset + len(data) - len(pending), bool(following or pending)
+
+    async def stop(self, process_id: str, *, owner: str | None) -> ProcessResult:
+        running = self._get(process_id, owner)
+        if running.status == "running":
+            running.status = "stopped"
+            await self._terminate_tree(running)
+        if running.monitor:
+            await running.monitor
+        return await self.wait(process_id, owner=owner, seconds=0)
+
+    async def stop_owner(self, owner: str) -> None:
+        for process_id, running in list(self._processes.items()):
+            if running.owner == owner and running.status == "running":
+                await self.stop(process_id, owner=owner)
+
+    def active_for(self, owner: str) -> list[str]:
+        return [
+            key
+            for key, item in self._processes.items()
+            if item.owner == owner
+            and (item.status == "running" or item.monitor is not None and not item.monitor.done())
+        ]
+
+    async def close(self) -> None:
+        for process_id in list(self._processes):
+            await self.stop(process_id, owner=None)
+        self._processes.clear()
+
+
+_process_manager = ProcessManager()
+
+
+def get_process_manager() -> ProcessManager:
+    """返回当前核心进程的执行记录。"""
+    return _process_manager

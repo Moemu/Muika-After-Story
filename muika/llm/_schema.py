@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Literal, Optional, Sequence, Type, Union
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 
 from ..models import Resource
 
@@ -11,6 +11,50 @@ if TYPE_CHECKING:
     from numpy import ndarray
 
     from muika.core.memory import SessionTurn
+
+
+class MediaReference(BaseModel):
+    """保存可重新读取的模型资源引用。"""
+
+    type: Literal["image", "video", "audio", "file"]
+    path: str
+    mimetype: str | None = None
+
+    def to_resource(self) -> Resource:
+        return Resource(type=self.type, path=self.path, mimetype=self.mimetype)
+
+
+class ToolCall(BaseModel):
+    """保存一次工具调用的原始参数和协议标识。"""
+
+    id: str
+    name: str
+    arguments: str
+
+
+class ToolResult(BaseModel):
+    """表示工具的业务结果及可供后续模型读取的资源。"""
+
+    text: str
+    is_error: bool = False
+    resources: list[MediaReference] = Field(default_factory=list)
+
+
+class ModelMessage(BaseModel):
+    """保存可跨请求延续的消息及必要的提供者协议数据。"""
+
+    role: Literal["user", "assistant", "tool"]
+    content: str = ""
+    reasoning: str = ""
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    tool_call_id: str | None = None
+    name: str | None = None
+    resources: list[MediaReference] = Field(default_factory=list)
+    # 原生协议字段用于保留签名等不能由通用消息重新生成的数据。
+    provider_data: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+StopReason = Literal["stop", "tool_calls", "length", "filtered", "error"]
 
 
 @dataclass
@@ -66,6 +110,8 @@ class ModelCompletions:
     """模型输出多模态资源列表"""
     succeed: bool = True
     """调用成功（如不成功会在 `text` 中输出错误信息）"""
+    message: ModelMessage | None = None
+    stop_reason: StopReason = "stop"
 
 
 @dataclass
@@ -82,6 +128,8 @@ class ModelStreamCompletions:
     """模型输出多模态资源列表"""
     succeed: bool = True
     """调用成功（如不成功会在 `chunk` 中输出错误信息）"""
+    message: ModelMessage | None = None
+    stop_reason: StopReason = "stop"
 
 
 @dataclass

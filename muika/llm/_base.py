@@ -16,7 +16,13 @@ from typing import (
 
 from ._config import ModelConfig
 from ._retry import LLMRequestError
-from ._schema import ModelCompletions, ModelRequest, ModelStreamCompletions, Usage
+from ._schema import (
+    ModelCompletions,
+    ModelMessage,
+    ModelRequest,
+    ModelStreamCompletions,
+    Usage,
+)
 
 if TYPE_CHECKING:
     from muika.core.memory import SessionTurn
@@ -158,12 +164,43 @@ class BaseLLM(ABC):
             if not chunk.succeed:
                 completion.succeed = False
                 completion.text = chunk.chunk
+                completion.stop_reason = chunk.stop_reason
                 return completion
             completion.text += chunk.chunk
             completion.usage = chunk.usage
             if chunk.resources:
-                completion.resources.extend(chunk.resources)
+                completion.resources.extend(r for r in chunk.resources if r not in completion.resources)
+            if chunk.message is not None:
+                completion.message = chunk.message
+            completion.stop_reason = chunk.stop_reason
         return completion
+
+    def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
+    ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        """执行一次提供者请求，不派发工具。"""
+        raise NotImplementedError(f"Provider {self.config.provider} does not support step requests")
+
+    async def step(self, request: ModelRequest, messages: Sequence[ModelMessage]) -> ModelCompletions:
+        """执行并计量一个可恢复的模型步骤。"""
+        # 执行层和用量记录依赖插件模块，须在模型注册完成后导入。
+        from ._execution import collect_step
+        from ._wrapper import save_model_usage
+
+        completion = await collect_step(self, request, messages)
+        await save_model_usage(self, completion.usage)
+        return completion
+
+    async def run_conversation(
+        self, request: ModelRequest, *, stream: bool
+    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
+        """通过共享执行层保持普通 ask 的多步工具行为。"""
+        from ._execution import run_conversation
+
+        response = run_conversation(self, request, stream=stream)
+        if stream:
+            return response
+        return await self._collect_stream(response)
 
     async def _complete_response(
         self,

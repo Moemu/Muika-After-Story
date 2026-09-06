@@ -66,7 +66,7 @@ def _sanitize_extension(ext: str | None) -> str:
     return ext if len(ext) > 1 else ".bin"
 
 
-async def _ensure_resource_path(resource: Resource) -> None:
+async def ensure_resource_path(resource: Resource) -> None:
     """若 Resource 仅有 raw 但无 path，落盘到 data_dir/downloads。
 
     :raises ValueError: raw 数据超过 ``_MAX_RESOURCE_SIZE``
@@ -184,7 +184,7 @@ class CommandRegistry:
             if isinstance(item, str):
                 text_parts.append(item)
             elif isinstance(item, Resource):
-                await _ensure_resource_path(item)
+                await ensure_resource_path(item)
                 resource_dicts.append(item.to_dict())
 
         text = "\n".join(text_parts) if text_parts else ""

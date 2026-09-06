@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import fnmatch
+import hashlib
+import os
 from pathlib import Path
 from typing import Literal, Optional
 
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.self_mod.policy import is_protected_path
+from muika.llm._schema import MediaReference, ToolResult
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
+from muika.plugin.func_call.context import ToolContext, get_dependencies
 from muika.utils.logger import logger
 
 
@@ -54,20 +61,21 @@ class ListDirectoryParams(BaseModel):
 @on_function_call(
     "List the contents of a directory within the allowed paths.",
     params=ListDirectoryParams,
+    read_only=True,
 )
 async def list_directory(path: str, show_hidden: bool = False):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled by configuration."
+        return ToolError("File system tools are disabled by configuration.")
 
     try:
         resolved = _resolve_and_check(path)
     except _FSError as e:
-        return str(e)
+        return ToolError(str(e))
 
     if not resolved.exists():
-        return f"Path does not exist: {resolved}"
+        return ToolError(f"Path does not exist: {resolved}")
     if not resolved.is_dir():
-        return f"Not a directory: {resolved}"
+        return ToolError(f"Not a directory: {resolved}")
 
     try:
         entries = sorted(resolved.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
@@ -90,52 +98,95 @@ async def list_directory(path: str, show_hidden: bool = False):
         logger.debug(f"[ListDirectory] Listed {resolved}")
         return "\n".join(lines)
     except PermissionError:
-        return f"Permission denied: {resolved}"
+        return ToolError(f"Permission denied: {resolved}")
     except Exception as e:
         logger.error(f"[ListDirectory] Failed: {e}")
-        return f"Error: {e}"
+        return ToolError(f"Error: {e}")
+
+
+def _remember_file(path: Path) -> None:
+    context = get_dependencies().get(ToolContext)
+    if isinstance(context, ToolContext):
+        context.file_versions[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _check_read_version(path: Path) -> None:
+    context = get_dependencies().get(ToolContext)
+    if not isinstance(context, ToolContext) or str(path) not in context.file_versions:
+        return
+    actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+    if actual != context.file_versions[str(path)]:
+        raise _FSError("The file changed since your last read. Read it again and revise the edit before retrying.")
 
 
 class ReadFileParams(BaseModel):
-    path: str = Field(..., description="Absolute or relative path of the file to read.")
-    encoding: str = Field("utf-8", description="File encoding, default utf-8.")
-    max_chars: int = Field(
-        4000,
-        description="Maximum characters to return. Content beyond this limit is truncated.",
+    path: str = Field(..., description="Absolute or relative file path.")
+    encoding: str = Field("utf-8", description="File encoding.")
+    max_chars: int = Field(4000, ge=1, description="Maximum source characters to read, excluding line numbers.")
+    line_start: int | None = Field(
+        None, ge=1, description="First line, 1-based. Specifying a line range shows line numbers."
     )
+    line_end: int | None = Field(None, ge=1, description="Last line, inclusive. Omit to read toward EOF.")
+    char_offset: int = Field(
+        0, ge=0, description="Character offset within the first line, from a previous continuation."
+    )
+    with_line_numbers: bool = Field(False, description="Show source line numbers even without an explicit line range.")
 
 
 @on_function_call(
-    "Read the text content of a file within the allowed paths.",
+    "Read a text file, with optional line ranges and a precise continuation position.",
     params=ReadFileParams,
+    read_only=True,
 )
-async def read_file(path: str, encoding: str = "utf-8", max_chars: int = 4000):
-    if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled by configuration."
-
+async def read_file(
+    path: str,
+    encoding: str = "utf-8",
+    max_chars: int = 4000,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    char_offset: int = 0,
+    with_line_numbers: bool = False,
+):
     try:
         resolved = _resolve_and_check(path)
-    except _FSError as e:
-        return str(e)
-
-    if not resolved.exists():
-        return f"File not found: {resolved}"
-    if not resolved.is_file():
-        return f"Not a file: {resolved}"
-
-    try:
-        text = resolved.read_text(encoding=encoding, errors="replace")
-    except PermissionError:
-        return f"Permission denied: {resolved}"
-    except Exception as e:
-        logger.error(f"[ReadFile] Failed: {e}")
-        return f"Error reading file: {e}"
-
-    total = len(text)
-    truncated = text[:max_chars]
-    suffix = f"\n...(truncated, {total - max_chars:,} chars omitted)" if total > max_chars else ""
-    logger.debug(f"[ReadFile] Read {total:,} chars from {resolved}")
-    return f"File: {resolved}\n\n{truncated}{suffix}"
+        if not resolved.is_file():
+            return ToolError(f"File not found: {resolved}")
+        text = resolved.read_text(encoding=encoding)
+        _remember_file(resolved)
+        lines = text.splitlines(keepends=True)
+        start = line_start or 1
+        end = line_end if line_end is not None else len(lines)
+        if start < 1 or max_chars < 1 or char_offset < 0 or line_end is not None and end < start:
+            return ToolError("Invalid range: use positive line numbers and max_chars, and a nonnegative char_offset.")
+        if start > len(lines):
+            return f"File: {resolved}\nEOF ({len(lines)} lines)"
+        if char_offset > len(lines[start - 1]):
+            return ToolError("char_offset exceeds the first line length")
+        start_index = sum(map(len, lines[: start - 1])) + char_offset
+        end_index = sum(map(len, lines[:end]))
+        stop = min(start_index + max_chars, end_index)
+        content = text[start_index:stop]
+        next_line = start
+        next_offset = char_offset
+        for char in content:
+            if char == "\n":
+                next_line += 1
+                next_offset = 0
+            else:
+                next_offset += 1
+        if with_line_numbers or line_start is not None or line_end is not None:
+            content = "".join(
+                f"{number}: {line}" for number, line in enumerate(content.splitlines(keepends=True), start)
+            )
+        suffix = ""
+        if stop < len(text):
+            suffix = (
+                f"\n[Next read: line_start={next_line}, char_offset={next_offset}. "
+                f"{len(text) - stop} source characters remain.]"
+            )
+        return f"File: {resolved}\n\n{content}{suffix}"
+    except (_FSError, OSError, UnicodeError) as exc:
+        return ToolError(f"Read failed: {exc}")
 
 
 class WriteFileParams(BaseModel):
@@ -155,27 +206,29 @@ class WriteFileParams(BaseModel):
 )
 async def write_file(path: str, content: str, write_mode: str = "overwrite", encoding: str = "utf-8"):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled by configuration."
+        return ToolError("File system tools are disabled by configuration.")
     if not mas_config.enable_file_write:
-        return "File write/delete is disabled by configuration."
+        return ToolError("File write/delete is disabled by configuration.")
 
     try:
         resolved = _resolve_and_check(path, require_write=True)
+        _check_read_version(resolved)
     except _FSError as e:
-        return str(e)
+        return ToolError(str(e))
 
     open_mode = "a" if write_mode == "append" else "w"
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with resolved.open(open_mode, encoding=encoding) as f:
             f.write(content)
+        _remember_file(resolved)
         logger.info(f"[WriteFile] Wrote {len(content):,} chars to {resolved} (mode={write_mode})")
         return f"File written successfully ({write_mode}): {resolved}  ({len(content):,} chars)"
     except PermissionError:
-        return f"Permission denied: {resolved}"
+        return ToolError(f"Permission denied: {resolved}")
     except Exception as e:
         logger.error(f"[WriteFile] Failed: {e}")
-        return f"Error: {e}"
+        return ToolError(f"Error: {e}")
 
 
 class EditFileParams(BaseModel):
@@ -228,37 +281,39 @@ async def edit_file(
     encoding: str = "utf-8",
 ):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled by configuration."
+        return ToolError("File system tools are disabled by configuration.")
     if not mas_config.enable_file_write:
-        return "File write/delete is disabled by configuration."
+        return ToolError("File write/delete is disabled by configuration.")
 
     try:
         resolved = _resolve_and_check(path, require_write=True)
+        _check_read_version(resolved)
     except _FSError as e:
-        return str(e)
+        return ToolError(str(e))
 
     if not resolved.exists():
-        return f"File not found: {resolved}"
+        return ToolError(f"File not found: {resolved}")
     if not resolved.is_file():
-        return f"Not a file: {resolved}"
+        return ToolError(f"Not a file: {resolved}")
 
     try:
-        original = resolved.read_text(encoding=encoding, errors="replace")
+        original = resolved.read_text(encoding=encoding)
     except Exception as e:
-        return f"Failed to read file: {e}"
+        return ToolError(f"Failed to read file: {e}")
 
     try:
         result = _apply_edit(original, operation, old_string, new_string, line_number, line_start, line_end)
     except ValueError as e:
-        return str(e)
+        return ToolError(str(e))
 
     try:
         resolved.write_text(result, encoding=encoding)
+        _remember_file(resolved)
     except PermissionError:
-        return f"Permission denied: {resolved}"
+        return ToolError(f"Permission denied: {resolved}")
     except Exception as e:
         logger.error(f"[EditFile] Failed to write: {e}")
-        return f"Error writing file: {e}"
+        return ToolError(f"Error writing file: {e}")
 
     logger.info(f"[EditFile] Applied '{operation}' to {resolved}")
     return f"File edited successfully ({operation}): {resolved}"
@@ -323,17 +378,18 @@ class DeleteFileParams(BaseModel):
 )
 async def delete_file(path: str):
     if not mas_config.fs_allowed_paths:
-        return "File system tools are disabled by configuration."
+        return ToolError("File system tools are disabled by configuration.")
     if not mas_config.enable_file_write:
-        return "File write/delete is disabled by configuration."
+        return ToolError("File write/delete is disabled by configuration.")
 
     try:
         resolved = _resolve_and_check(path, require_write=True)
+        _check_read_version(resolved)
     except _FSError as e:
-        return str(e)
+        return ToolError(str(e))
 
     if not resolved.exists():
-        return f"File not found: {resolved}"
+        return ToolError(f"File not found: {resolved}")
     if resolved.is_dir():
         return f"{resolved} is a directory. Only single files can be deleted."
 
@@ -342,7 +398,109 @@ async def delete_file(path: str):
         logger.warning(f"[DeleteFile] Deleted: {resolved}")
         return f"File deleted: {resolved}"
     except PermissionError:
-        return f"Permission denied: {resolved}"
+        return ToolError(f"Permission denied: {resolved}")
     except Exception as e:
         logger.error(f"[DeleteFile] Failed: {e}")
-        return f"Error: {e}"
+        return ToolError(f"Error: {e}")
+
+
+class FindFilesParams(BaseModel):
+    path: str = Field(".", description="Directory to search, within allowed paths.")
+    pattern: str = Field("*", description="Glob matched against the relative file path or filename.")
+    max_results: int = Field(100, ge=1, le=1000, description="Maximum matching files to return.")
+
+
+def _files(root: Path, pattern: str):
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [name for name in dirs if not name.startswith(".") and name not in {"node_modules", "__pycache__"}]
+        for name in sorted(files):
+            candidate = Path(directory) / name
+            relative = candidate.relative_to(root).as_posix()
+            if not (fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(name, pattern)):
+                continue
+            try:
+                resolved = _resolve_and_check(str(candidate))
+            except _FSError:
+                continue
+            if resolved == root or root in resolved.parents:
+                yield resolved
+
+
+@on_function_call(
+    "Find files recursively in an allowed directory; hidden directories and dependency caches are skipped.",
+    params=FindFilesParams,
+    read_only=True,
+)
+async def find_files(path: str = ".", pattern: str = "*", max_results: int = 100):
+    try:
+        root = _resolve_and_check(path)
+        if not root.is_dir():
+            return ToolError(f"Not a directory: {root}")
+        results: list[str] = []
+        for file in _files(root, pattern):
+            if len(results) >= max_results:
+                return "\n".join(results) + "\n[More matches exist; narrow the path or pattern.]"
+            results.append(str(file))
+        return "\n".join(results) or "No matching files."
+    except (OSError, _FSError) as exc:
+        return ToolError(str(exc))
+
+
+class SearchFilesParams(FindFilesParams):
+    query: str = Field(..., min_length=1, description="Literal text to search for.")
+    case_sensitive: bool = Field(True, description="Whether matching is case-sensitive.")
+
+
+@on_function_call(
+    "Search literal text in UTF-8 files and return file paths, line numbers and matching text.",
+    params=SearchFilesParams,
+    read_only=True,
+)
+async def search_files(
+    query: str, path: str = ".", pattern: str = "*", max_results: int = 100, case_sensitive: bool = True
+):
+    try:
+        root = _resolve_and_check(path)
+        if not root.is_dir():
+            return ToolError(f"Not a directory: {root}")
+        needle = query if case_sensitive else query.casefold()
+        results: list[str] = []
+        skipped = 0
+        for file in _files(root, pattern):
+            try:
+                with file.open(encoding="utf-8") as source:
+                    for number, line in enumerate(source, 1):
+                        position = (line if case_sensitive else line.casefold()).find(needle)
+                        if position < 0:
+                            continue
+                        if len(results) >= max_results:
+                            return "\n".join(results) + "\n[More matches exist; narrow the search.]"
+                        excerpt = line[max(0, position - 100) : position + len(query) + 200].rstrip()
+                        results.append(f"{file}:{number}: {excerpt}")
+            except (UnicodeError, OSError):
+                skipped += 1
+        return ("\n".join(results) or "No matches.") + (
+            f"\nSkipped {skipped} unreadable or non-UTF-8 files." if skipped else ""
+        )
+    except (OSError, _FSError) as exc:
+        return ToolError(str(exc))
+
+
+class ViewImageParams(BaseModel):
+    path: str = Field(..., description="Local image path within allowed directories.")
+
+
+@on_function_call(
+    "Read a local image for visual inspection in the next model step.", params=ViewImageParams, read_only=True
+)
+async def view_image(path: str):
+    try:
+        resolved = _resolve_and_check(path)
+        with Image.open(resolved) as picture:
+            picture.verify()
+        return ToolResult(
+            text=f"Image ready for visual inspection: {resolved}",
+            resources=[MediaReference(type="image", path=str(resolved))],
+        )
+    except (OSError, ValueError, _FSError) as exc:
+        return ToolError(f"Image read failed: {exc}")

@@ -62,14 +62,20 @@
 
 ### 大小姐——管家模型
 
-Muika 采用双角色协作架构: 核心模型负责人格表达与自然语言生成，管家模型(Butler Agent)负责工具调用、记忆读写与信息检索。两者通过内联标签 `<agent>指令</agent>` 通信，Ojou-sama 在回复中嵌入指令，Butler 静默执行后将结果回填上下文，驱动下一轮推理。
+Muika 的主人格负责对话，行动半身负责工具调用、记忆读写与信息检索。两者共享同一身份。内部标签 `<agent>指令</agent>` 创建后台任务，任务结果通过专用事件返回当前对话。执行期间，Muika 可以继续聊天。
+
+你可以直接说“继续刚才的工作”“把布局改成上下排列”或“停止这个任务”。Muika 根据当前对话判断要纠正、取消还是创建任务。你无需提供任务 ID，也无需撰写完整计划。
+
+同一时间执行一个行动任务，其他任务按提交顺序排队。聊天归档保留任务。Core 重启后恢复未完成记录：确认完成的动作不重做；结果不明的动作先读取现场核对，无法确认时说明受阻原因。旧进程 ID 和失效预览不会恢复控制权或确认权限。
+
+任务检查点保存在数据库；完整输出和图片保存在 `data_dir/agent_tasks`，执行输出保存在 `data_dir/agent_processes`。模型上下文只缩短较早的工具正文；`agent_tool_context_chars` 控制此部分的字符预算，默认 60000，不限制私密思考深度。
 
 ### 事件循环
 
 1. **启动阶段**：加载配置（模型 / MCP 等），初始化 LLM Provider、记忆层与数据库（SQLAlchemy），加载插件和注册工具。开放连接前完成历史记忆加载；首次适配器连接后创建 Session，并投递 `SessionBootstrapEvent`。
 2. **消息进入**：Nonebot2 收到平台消息后封装为 `UserMessageEvent` 投入事件队列；Butler 预处理层对用户输入做语义匹配，从 `PreferenceProfile` 层中筛选出相关偏好条目注入本轮推理。
 3. **核心模型内循环推理**：将系统提示、多层记忆摘要、注入偏好及对话历史拼装为请求，调用 LLM 生成回复；解析出 `<agent>...</agent>` 指令后交由 Butler 执行。
-4. **管家 Agent 内循环推理**：Butler 每次请求读取当前工具注册表及初始化后的 MCP 工具列表。Provider 处理模型的工具调用，执行结果回填模型，最终报告返回核心模型。
+4. **行动任务执行**：共享执行层按模型顺序派发每轮全部工具调用，并在动作前后保存检查点。Provider 只负责单次请求和协议转换。纠正与取消在动作边界生效，最终报告区分已完成工作、验证证据和剩余问题。
 5. **记忆沉淀**：记忆分四层持久化至 SQLAlchemy DB：`CORE`（稳定身份事实，每次均注入）、`STATE`（时效性上下文，Resume 时注入最近 3 条）、`PREFERENCE`（长期软偏好，由 Butler 预处理层按需注入）、`ARCHIVE`（Session 历史摘要，按需检索）。
 6. **Session 生命周期**：用户若干小时后无交流后触发 `SessionEndEvent`；Butler 对本次对话生成文字摘要写入 ARCHIVE，随后静默重置 Session（不主动发送消息），等待用户下次发言时以 Resume 模式响应。
 7. **输出与调度**：最终消息经 Executor 回传至平台；`plan_future_event` 工具可创建单次或重复提醒。调度器与主循环共用事件队列；提醒只保存在内存中，Core 重启后失效。
@@ -100,6 +106,12 @@ Muika 现在使用 `Muika(executor, event_queue)` 构造。调用方须将同一
 Bootstrap 在开放连接前等待 `memory.load()`；直接创建 Muika 的调用方也须完成这一步。
 
 ### 工具列表
+
+`read_file` 支持行范围、行号和续读位置；`find_files` 和 `search_files` 在授权目录内查找文件与文本。`view_image` 把图片加入下一次模型请求。模型关闭多模态输入时，任务会记录缺少视觉验证。
+
+`execute_python` 使用当前解释器。执行工具默认等待 1 秒后返回，硬超时默认 30 分钟。运行中结果需要用 `wait_process` 继续等待；`stop_process` 清理执行进程及其子进程。`read_execution_record` 可以在重启后读取保存的执行证据，`read_task_output` 可以续读当前任务的长输出。
+
+插件可以返回 `ToolResult(text=..., is_error=True)`，或兼容字符串的 `ToolError(...)`，明确表示业务失败。普通字符串仍按成功结果处理，框架不根据任意插件文案猜测执行状态。
 
 Brain 和 Butler 每次请求调用 `get_tool_list()`，读取当前函数注册表和 MCP 工具列表。
 插件管理器不再绑定 Butler，也不再调用 `refresh_tools()` 或 `refresh_butler()`。

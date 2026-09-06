@@ -8,6 +8,7 @@ from tempfile import gettempdir
 from PIL import ImageGrab
 from pydantic import BaseModel, Field
 
+from muika.llm.utils.tools import ToolError
 from muika.models import Resource
 from muika.plugin.func_call import on_function_call
 from muika.plugin.func_call.context import ToolContext
@@ -28,10 +29,10 @@ async def capture_screenshot(context: ToolContext) -> str:
     try:
         screenshot = ImageGrab.grab()
     except OSError as e:
-        return f"Screen capture failed (headless or no display available): {e}"
+        return ToolError(f"Screen capture failed (headless or no display available): {e}")
     except Exception as e:
         logger.error(f"[CaptureScreenshot] Failed: {e}")
-        return f"Failed to capture screenshot: {e}"
+        return ToolError(f"Failed to capture screenshot: {e}")
 
     try:
         screenshot.thumbnail((1920, 1080))
@@ -44,7 +45,7 @@ async def capture_screenshot(context: ToolContext) -> str:
         return "Screenshot captured successfully. See attached image."
     except Exception as e:
         logger.error(f"[CaptureScreenshot] Failed: {e}")
-        return f"Failed to save screenshot: {e}"
+        return ToolError(f"Failed to save screenshot: {e}")
 
 
 class CaptureCameraPhotoParams(BaseModel):
@@ -58,7 +59,7 @@ class CaptureCameraPhotoParams(BaseModel):
 async def capture_camera_photo(context: ToolContext, device_index: int = 0) -> str:
     """从指定摄像头拍照并附加图片资源。"""
     if cv2 is None:
-        return "opencv-python is not installed. Run: pip install opencv-python"
+        return ToolError("opencv-python is not installed. Run: pip install opencv-python")
 
     def _capture(idx: int) -> str:
         cap = cv2.VideoCapture(idx)
@@ -86,4 +87,4 @@ async def capture_camera_photo(context: ToolContext, device_index: int = 0) -> s
         return "Camera photo captured successfully. See attached image."
     except Exception as e:
         logger.error(f"[CaptureCameraPhoto] Failed: {e}")
-        return f"Failed to capture camera photo: {e}"
+        return ToolError(f"Failed to capture camera photo: {e}")

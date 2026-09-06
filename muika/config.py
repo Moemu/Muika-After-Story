@@ -47,6 +47,8 @@ class MASConfig(BaseSettings):
 
     butler_model: Optional[str] = None
     """管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
+    agent_tool_context_chars: int = Field(60000, ge=4000)
+    """行动任务保留在模型上下文中的工具正文预算，不限制私密思考。"""
     session_summarize_model: Optional[str] = None
     """会话总结 Agent 所用模型的配置名，建议使用与核心模型相同型号或其量化版本。留空则使用管家模型"""
     load_user_skills: bool = False

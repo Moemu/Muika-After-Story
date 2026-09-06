@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from muika.core.self_mod import SelfModError
 from muika.core.self_mod.plugin_deployer import get_plugin_deployer
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -25,7 +26,7 @@ async def plugin_load(name: str) -> str:
     try:
         return await get_plugin_deployer().activate(name.strip())
     except SelfModError as exc:
-        return f"Plugin activation was rejected: {exc}"
+        return ToolError(f"Plugin activation was rejected: {exc}")
     except Exception as exc:
         logger.error(f"[PluginTool] Unexpected activation error for {name!r}: {exc}")
-        return f"Unexpected plugin activation error: {exc}"
+        return ToolError(f"Unexpected plugin activation error: {exc}")

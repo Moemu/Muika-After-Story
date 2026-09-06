@@ -1,5 +1,12 @@
+import base64
 from typing import Any, Optional
 
+from mcp.types import CallToolResult, ImageContent, TextContent
+
+from muika.llm._schema import MediaReference, ToolResult
+from muika.llm.utils.tools import ToolError
+from muika.models import Resource
+from muika.plugin.command import ensure_resource_path
 from muika.utils.logger import logger
 
 from .config import get_mcp_server_config
@@ -28,7 +35,7 @@ async def initialize_servers() -> None:
             raise
 
 
-async def handle_mcp_tool(tool: str, arguments: Optional[dict[str, Any]] = None) -> Optional[str]:
+async def handle_mcp_tool(tool: str, arguments: Optional[dict[str, Any]] = None) -> str | ToolResult | None:
     """
     处理 MCP Tool 调用
     """
@@ -48,11 +55,23 @@ async def handle_mcp_tool(tool: str, arguments: Optional[dict[str, Any]] = None)
                 percentage = (progress / total) * 100
                 logger.info(f"工具执行进度: {progress}/{total} ({percentage:.1f}%)")
 
+            if isinstance(result, CallToolResult):
+                resources = []
+                content = []
+                for item in result.content:
+                    if isinstance(item, ImageContent):
+                        resource = Resource(type="image", raw=base64.b64decode(item.data), mimetype=item.mimeType)
+                        await ensure_resource_path(resource)
+                        resources.append(MediaReference(type="image", path=resource.path, mimetype=item.mimeType))
+                        content.append(f"Image: {resource.path}")
+                    else:
+                        content.append(item.text if isinstance(item, TextContent) else item.model_dump_json())
+                return ToolResult(text="\n".join(content), is_error=result.isError, resources=resources)
             return f"Tool execution result: {result}"
         except Exception as e:
             error_msg = f"Error executing tool: {str(e)}"
             logger.error(error_msg)
-            return error_msg
+            return ToolError(error_msg)
 
     return None  # Not found.
 

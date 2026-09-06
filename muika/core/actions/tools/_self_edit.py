@@ -22,6 +22,7 @@ from muika.core.self_mod import SelfModError, get_self_mod_manager
 from muika.core.self_mod.plugin_deployer import get_plugin_deployer
 from muika.core.self_mod.policy import allowed_roots, display_path, resolve_self_path
 from muika.core.self_mod.validators import validate_content, validate_template
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.template.loader import SEARCH_PATH
 from muika.utils.logger import logger
@@ -121,10 +122,11 @@ class SelfReadParams(BaseModel):
     "and the journal of her past self-modifications. "
     "This is how Muika looks at herself before deciding to change.",
     params=SelfReadParams,
+    read_only=True,
 )
 async def self_read(path: str = "") -> str:
     if _disabled():
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
 
     manager = get_self_mod_manager()
 
@@ -137,18 +139,18 @@ async def self_read(path: str = "") -> str:
         try:
             return await manager.history(target, limit=15)
         except SelfModError as e:
-            return str(e)
+            return ToolError(str(e))
 
     try:
         resolved = resolve_self_path(stripped)
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
 
     if not resolved.exists():
-        return f"File not found: {display_path(resolved)}"
+        return ToolError(f"File not found: {display_path(resolved)}")
 
     if not resolved.is_file():
-        return f"Not a file: {display_path(resolved)}"
+        return ToolError(f"Not a file: {display_path(resolved)}")
 
     text = resolved.read_text(encoding="utf-8", errors="replace")
     suffix = f"\n...(truncated, {len(text) - _READ_LIMIT:,} chars omitted)" if len(text) > _READ_LIMIT else ""
@@ -179,21 +181,21 @@ class SelfWriteParams(BaseModel):
 )
 async def self_write(path: str, content: str, reason: str) -> str:
     if _disabled():
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
 
     if not reason or not reason.strip():
-        return "A non-empty 'reason' is required: every change to yourself must be explained and journaled."
+        return ToolError("A non-empty 'reason' is required: every change to yourself must be explained and journaled.")
 
     if not content:
-        return "'content' must not be empty: self_write requires the full file content."
+        return ToolError("'content' must not be empty: self_write requires the full file content.")
 
     try:
         resolved = resolve_self_path(path, require_write=True)
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
 
     if resolved.exists():
-        return (
+        return ToolError(
             f"{display_path(resolved)} already exists. self_write only creates new files. "
             "Use self_edit to make a precise partial modification instead of rewriting the whole file."
         )
@@ -204,10 +206,10 @@ async def self_write(path: str, content: str, reason: str) -> str:
         return await get_self_mod_manager().apply(path, content, reason.strip())
     except SelfModError as e:
         logger.info(f"[SelfEdit] Rejected write to {path!r}: {e}")
-        return f"The change was rejected: {e}"
+        return ToolError(f"The change was rejected: {e}")
     except Exception as e:
         logger.error(f"[SelfEdit] Unexpected error writing {path!r}: {e}")
-        return f"Unexpected error: {e}"
+        return ToolError(f"Unexpected error: {e}")
 
 
 class SelfEditParams(BaseModel):
@@ -251,18 +253,18 @@ async def self_edit(
     reason: str = "",
 ) -> str:
     if _disabled():
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
 
     if not reason or not reason.strip():
-        return "A non-empty 'reason' is required: every change to yourself must be explained and journaled."
+        return ToolError("A non-empty 'reason' is required: every change to yourself must be explained and journaled.")
 
     try:
         resolved = resolve_self_path(path, require_write=True)
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
 
     if not resolved.exists() or not resolved.is_file():
-        return (
+        return ToolError(
             f"File not found: {display_path(resolved)}. "
             "self_write creates new files; self_edit modifies existing ones."
         )
@@ -272,12 +274,12 @@ async def self_edit(
     try:
         new_text = _apply_edit(original, operation, old_string, new_string, line_number, line_start, line_end)
     except ValueError as e:
-        return f"The edit was rejected: {e}"
+        return ToolError(f"The edit was rejected: {e}")
 
     try:
         validate_content(resolved, new_text)
     except SelfModError as e:
-        return f"The edit would break this file, so it was rejected: {e}"
+        return ToolError(f"The edit would break this file, so it was rejected: {e}")
 
     rel = display_path(resolved)
     change_line = _locate_change_line(original, operation, old_string, line_number, line_start)
@@ -323,25 +325,25 @@ class SelfEditConfirmParams(BaseModel):
 async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
     """将 self_edit 预览过的待写内容提交到磁盘。"""
     if _disabled():
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
 
     try:
         resolved = resolve_self_path(path, require_write=True)
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
 
     rel = display_path(resolved)
     pending = _pending_edits.get(rel)
 
     if pending is None:
-        return (
+        return ToolError(
             f"No pending edit for {rel}. Call self_edit first to preview the change, "
             f"then call self_edit_confirm to apply it."
         )
 
     if datetime.now() - pending.timestamp > _PENDING_TTL:
         _pending_edits.pop(rel, None)
-        return (
+        return ToolError(
             f"The preview for {rel} has expired (older than 30 minutes). "
             f"Call self_edit again to generate a fresh preview."
         )
@@ -354,7 +356,7 @@ async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
             not resolved.is_file()
             or _content_sha256(resolved.read_text(encoding="utf-8", errors="replace")) != pending.source_sha256
         ):
-            return f"The file changed after the preview: {rel}. Create a new preview."
+            return ToolError(f"The file changed after the preview: {rel}. Create a new preview.")
         is_plugin = _is_plugin_path(resolved)
         if is_plugin:
             report = await get_plugin_deployer().deploy_if_unchanged(
@@ -366,10 +368,10 @@ async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
         else:
             report = await get_self_mod_manager().apply(path, new_text, effective_reason)
     except SelfModError as e:
-        return f"The change was rejected: {e}"
+        return ToolError(f"The change was rejected: {e}")
     except Exception as e:
         logger.error(f"[SelfEdit] Unexpected error confirming edit to {path!r}: {e}")
-        return f"Unexpected error: {e}"
+        return ToolError(f"Unexpected error: {e}")
     finally:
         _pending_edits.pop(rel, None)
 
@@ -426,7 +428,7 @@ class SelfRevertParams(BaseModel):
 )
 async def self_revert(path: str, revision: Optional[int] = None) -> str:
     if _disabled():
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
 
     try:
         resolved = resolve_self_path(path, require_write=True)
@@ -434,10 +436,10 @@ async def self_revert(path: str, revision: Optional[int] = None) -> str:
             return await get_plugin_deployer().revert(path, revision_id=revision)
         return await get_self_mod_manager().revert(path, revision_id=revision)
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
     except Exception as e:
         logger.error(f"[SelfEdit] Unexpected error reverting {path!r}: {e}")
-        return f"Unexpected error: {e}"
+        return ToolError(f"Unexpected error: {e}")
 
 
 def _resolve_template(name: str) -> Path:
@@ -492,13 +494,15 @@ class PersonaSwitchParams(BaseModel):
 async def persona_switch(template_name: str) -> str:
     """切换人格模板：校验格式 → 更新配置 → 回写 .env → 立即生效。"""
     if _disabled():
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
 
     name = template_name.strip()
     if not name:
         return "template_name must not be empty."
     if not _TEMPLATE_NAME_RE.match(name):
-        return f"Invalid template name {name!r}: only letters, digits, '_', '.', '-' are allowed (no path separators)."
+        return ToolError(
+            f"Invalid template name {name!r}: only letters, digits, '_', '.', '-' are allowed (no path separators)."
+        )
     if not name.endswith((".j2", ".jinja2")):
         name += ".jinja2"
 
@@ -507,11 +511,11 @@ async def persona_switch(template_name: str) -> str:
         content = source_path.read_text(encoding="utf-8")
         validate_template(content)
     except FileNotFoundError as exc:
-        return f"Template switch failed: {exc}"
+        return ToolError(f"Template switch failed: {exc}")
     except OSError as exc:
-        return f"Template switch failed: cannot read {name}: {exc}"
+        return ToolError(f"Template switch failed: cannot read {name}: {exc}")
     except SelfModError as exc:
-        return f"Template validation failed: {exc}"
+        return ToolError(f"Template validation failed: {exc}")
 
     old_name = mas_config.persona_template
     mas_config.persona_template = name
@@ -524,6 +528,7 @@ async def persona_switch(template_name: str) -> str:
 @on_function_call(
     "List all available persona templates (override layer + built-in), marking the currently active one. "
     "Use this before persona_switch to see what templates are available.",
+    read_only=True,
 )
 async def persona_list() -> str:
     """列出所有可用的人格模板文件，标注当前激活项。"""

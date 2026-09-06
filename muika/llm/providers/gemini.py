@@ -1,3 +1,7 @@
+import json
+from collections.abc import Sequence
+from copy import deepcopy
+from pathlib import Path
 from typing import (
     Any,
     AsyncGenerator,
@@ -9,12 +13,14 @@ from typing import (
     Union,
     overload,
 )
+from uuid import uuid4
 
 from google import genai
-from google.genai import errors
 from google.genai.types import (
+    AutomaticFunctionCallingConfig,
     Content,
     ContentOrDict,
+    FunctionCall,
     GenerateContentConfig,
     GoogleSearch,
     HarmBlockThreshold,
@@ -23,11 +29,9 @@ from google.genai.types import (
     SafetySetting,
     Tool,
 )
-from httpx import ConnectError
 from pydantic import BaseModel, TypeAdapter
 
 from muika.models import Resource
-from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,
@@ -39,8 +43,8 @@ from .. import (
     register,
 )
 from .._retry import RequestRetry
-from ..utils.images import get_file_base64
-from ..utils.tools import function_call_handler
+from .._schema import ModelMessage, ToolCall
+from ..utils.protocol import json_arguments, stop_reason
 
 
 @register("gemini")
@@ -95,19 +99,16 @@ class Gemini(BaseLLM):
 
         # build tools
         for tool in tools if tools else []:
-            tool = tool["function"]
-            required_parameters = tool["required"]
-            del tool["required"]
-            tool["parameters"]["required"] = required_parameters
-            format_tools.append(tool)
+            function = deepcopy(tool["function"])
+            format_tools.append(function)
 
-        function_tools = Tool(function_declarations=format_tools)  # type: ignore
+        function_tools = Tool(function_declarations=format_tools)
 
+        tool_list = [function_tools] if tools else []
         if self.enable_search:
-            function_tools.google_search = GoogleSearch()
-
-        if tools or self.enable_search:
-            gemini_config.tools = [function_tools]
+            tool_list.append(Tool(google_search=GoogleSearch()))
+        gemini_config.tools = [tool for tool in tool_list] or None
+        gemini_config.automatic_function_calling = AutomaticFunctionCallingConfig(disable=True)
 
         # build response format
         if response_format:
@@ -130,9 +131,7 @@ class Gemini(BaseLLM):
         for resource in request.resources:
             if resource.type == "image" and resource.path is not None:
                 user_parts.append(
-                    Part.from_bytes(
-                        data=get_file_base64(resource.path), mime_type=resource.mimetype or "image/jpeg"  # type: ignore
-                    )
+                    Part.from_bytes(data=Path(resource.path).read_bytes(), mime_type=resource.mimetype or "image/jpeg")
                 )
 
         return user_parts
@@ -157,175 +156,110 @@ class Gemini(BaseLLM):
 
         return messages
 
-    async def _ask_sync(
-        self,
-        messages: list[ContentOrDict],
-        tools: Optional[List[dict]],
-        response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
-        total_usage: Usage | None = None,
-    ) -> ModelCompletions:
-        if total_usage is None:
-            total_usage = Usage()
-        gemini_config = self._build_gemini_config(tools, response_format)
-        completions = ModelCompletions()
-
-        try:
-            chat = self.client.aio.chats.create(model=self.model_name, config=gemini_config, history=messages[:-1])
-            message = messages[-1].parts  # type: ignore
-
-            async def send_request():
-                return await chat.send_message(message=message)  # type: ignore
-
-            response: Any = await RequestRetry(self.config).run(send_request)
-            if response.usage_metadata:
-                total_usage.input_tokens += response.usage_metadata.prompt_token_count or 0
-                total_usage.output_tokens += response.usage_metadata.candidates_token_count or 0
-                total_usage.cached_tokens += response.usage_metadata.cached_content_token_count or 0
-
-            if response.text:
-                completions.text = response.text
-
-            if (
-                response.candidates
-                and response.candidates[0].content
-                and response.candidates[0].content.parts
-                and response.candidates[0].content.parts[0].inline_data
-                and response.candidates[0].content.parts[0].inline_data.data
-            ):
-                completions.resources = [
-                    Resource(type="image", raw=response.candidates[0].content.parts[0].inline_data.data)
-                ]
-
-            if response.function_calls:
-                function_call = response.function_calls[0]
-                function_name = function_call.name
-                function_args = function_call.args
-
-                function_return = await function_call_handler(function_name, function_args)  # type: ignore
-
-                function_response_part = Part.from_function_response(
-                    name=function_name,  # type: ignore
-                    response={"result": function_return},
-                )
-
-                messages.append(Content(role="model", parts=[Part(function_call=function_call)]))
-                messages.append(Content(role="user", parts=[function_response_part]))
-
-                return await self._ask_sync(messages, tools, response_format, total_usage)
-
-            completions.text = completions.text or "（警告：模型无输出！）"
-            completions.usage = total_usage
-            return completions
-
-        except errors.APIError as e:
-            error_message = f"API 状态异常: {e.code}({e.response})"
-            completions.text = error_message
-            completions.succeed = False
-            logger.error(error_message)
-            logger.error(e.message)
-            return completions
-
-        except ConnectError:
-            error_message = "模型加载器连接超时"
-            completions.text = error_message
-            completions.succeed = False
-            logger.error(error_message)
-            return completions
-
-    async def _ask_stream(
-        self,
-        messages: list,
-        tools: Optional[List[dict]],
-        response_format: Optional[Union[Type[BaseModel], TypeAdapter]],
-        total_usage: Usage | None = None,
-    ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        if total_usage is None:
-            total_usage = Usage()
-        gemini_config = self._build_gemini_config(tools, response_format)
-        try:
-            current_input = 0
-            current_output = 0
-            current_cached = 0
-
-            async def send_request():
-                response = await self.client.aio.models.generate_content_stream(
-                    model=self.model_name, contents=messages, config=gemini_config
-                )
-                return await response if isinstance(response, Awaitable) else response
-
-            async for chunk in RequestRetry[Any](self.config).stream(send_request):
-                stream_completions = ModelStreamCompletions()
-
-                if chunk.text:
-                    stream_completions.chunk = chunk.text
-                    yield stream_completions
-
-                if chunk.usage_metadata and chunk.usage_metadata.total_token_count:
-                    current_input = chunk.usage_metadata.prompt_token_count or 0
-                    current_output = chunk.usage_metadata.candidates_token_count or 0
-                    current_cached = chunk.usage_metadata.cached_content_token_count or 0
-
-                if (
-                    chunk.candidates
-                    and chunk.candidates[0].content
-                    and chunk.candidates[0].content.parts
-                    and chunk.candidates[0].content.parts[0].inline_data
-                    and chunk.candidates[0].content.parts[0].inline_data.data
-                ):
-                    stream_completions.resources = [
-                        Resource(type="image", raw=chunk.candidates[0].content.parts[0].inline_data.data)
-                    ]
-                    yield stream_completions
-
-                if chunk.function_calls:
-                    function_call = chunk.function_calls[0]
-                    function_name = function_call.name
-                    function_args = function_call.args
-
-                    function_return = await function_call_handler(function_name, function_args)  # type: ignore
-
-                    function_response_part = Part.from_function_response(
-                        name=function_name,  # type: ignore
-                        response={"result": function_return},
+    def _conversation_messages(self, request: ModelRequest, conversation: Sequence[ModelMessage]) -> list:
+        messages = self._build_messages(request)
+        for item in conversation:
+            if item.role == "assistant":
+                native = item.provider_data.get("gemini_content")
+                if native:
+                    messages.append(Content.model_validate(native))
+                else:
+                    parts = [Part.from_text(text=item.content)] if item.content else []
+                    parts.extend(
+                        Part(function_call=FunctionCall(id=call.id, name=call.name, args=json.loads(call.arguments)))
+                        for call in item.tool_calls
                     )
+                    messages.append(Content(role="model", parts=parts))
+            elif item.role == "tool":
+                part = Part.from_function_response(name=item.name or "", response={"result": item.content})
+                if part.function_response:
+                    part.function_response.id = item.tool_call_id
+                # 同一批工具结果组成一个 user 内容，保持调用与响应的数量对应。
+                if messages and isinstance(messages[-1], Content) and messages[-1].role == "user":
+                    parts = messages[-1].parts or []
+                    if parts and all(p.function_response for p in parts):
+                        parts.append(part)
+                        continue
+                messages.append(Content(role="user", parts=[part]))
+            else:
+                messages.append(
+                    Content(
+                        role="user",
+                        parts=self._build_user_parts(
+                            ModelRequest(item.content, resources=[r.to_resource() for r in item.resources])
+                        ),
+                    )
+                )
+        return messages
 
-                    messages.append(Content(role="model", parts=[Part(function_call=function_call)]))
-                    messages.append(Content(role="user", parts=[function_response_part]))
+    async def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
+    ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        config = self._build_gemini_config(request.tools, request.json_schema)
+        config.system_instruction = request.system
+        if request.format == "json":
+            config.response_mime_type = "application/json"
 
-                    total_usage.input_tokens += current_input
-                    total_usage.output_tokens += current_output
-                    total_usage.cached_tokens += current_cached
+        async def send_request():
+            kwargs = dict(model=self.model_name, contents=self._conversation_messages(request, messages), config=config)
+            if stream:
+                response = self.client.aio.models.generate_content_stream(**kwargs)
+                return await response if isinstance(response, Awaitable) else response
+            return await self.client.aio.models.generate_content(**kwargs)
 
-                    async for final_chunk in self._ask_stream(messages, tools, response_format, total_usage):
-                        yield final_chunk
-                    return
+        async def responses():
+            if stream:
+                async for chunk in RequestRetry[Any](self.config).stream(send_request):
+                    yield chunk
+            else:
+                yield await RequestRetry[Any](self.config).run(send_request)
 
-            totaltokens_completions = ModelStreamCompletions()
-
-            total_usage.input_tokens += current_input
-            total_usage.output_tokens += current_output
-            total_usage.cached_tokens += current_cached
-            totaltokens_completions.usage = total_usage
-            yield totaltokens_completions
-
-        except errors.APIError as e:
-            stream_completions = ModelStreamCompletions()
-            error_message = f"API 状态异常: {e.code}({e.response})"
-            stream_completions.chunk = error_message
-            logger.error(error_message)
-            logger.error(e.message)
-            stream_completions.succeed = False
-            yield stream_completions
-            return
-
-        except ConnectError:
-            stream_completions = ModelStreamCompletions()
-            error_message = "模型加载器连接超时"
-            stream_completions.chunk = error_message
-            logger.error(error_message)
-            stream_completions.succeed = False
-            yield stream_completions
-            return
+        message = ModelMessage(role="assistant")
+        parts: list[Part] = []
+        usage = Usage()
+        finish = None
+        thinking = False
+        async for response in responses():
+            if response.usage_metadata:
+                usage.input_tokens = response.usage_metadata.prompt_token_count or 0
+                usage.output_tokens = (response.usage_metadata.candidates_token_count or 0) + (
+                    response.usage_metadata.thoughts_token_count or 0
+                )
+                usage.cached_tokens = response.usage_metadata.cached_content_token_count or 0
+            if not response.candidates:
+                continue
+            candidate = response.candidates[0]
+            finish = candidate.finish_reason or finish
+            if not candidate.content:
+                continue
+            for part in candidate.content.parts or []:
+                parts.append(part)
+                if part.text:
+                    if part.thought:
+                        message.reasoning += part.text
+                        yield ModelStreamCompletions(chunk=("" if thinking else "<think>") + part.text)
+                        thinking = True
+                    else:
+                        message.content += part.text
+                        yield ModelStreamCompletions(chunk=("</think>" if thinking else "") + part.text)
+                        thinking = False
+                if part.function_call:
+                    call = part.function_call
+                    call_id = call.id or f"call_{uuid4().hex}"
+                    message.tool_calls.append(
+                        ToolCall(id=call_id, name=call.name or "", arguments=json_arguments(call.args or {}))
+                    )
+                if part.inline_data and part.inline_data.data:
+                    yield ModelStreamCompletions(
+                        resources=[
+                            Resource(type="image", raw=part.inline_data.data, mimetype=part.inline_data.mime_type)
+                        ]
+                    )
+        if thinking:
+            yield ModelStreamCompletions(chunk="</think>")
+        message.provider_data = {"gemini_content": Content(role="model", parts=parts).model_dump(mode="json")}
+        reason = stop_reason(finish, has_tools=bool(message.tool_calls))
+        yield ModelStreamCompletions(message=message, usage=usage, stop_reason=reason, succeed=reason != "filtered")
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
@@ -338,13 +272,4 @@ class Gemini(BaseLLM):
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        messages = self._build_messages(request)
-        response_format = request.json_schema if request.format == "json" else None
-
-        if stream:
-            return self._ask_stream(messages, request.tools, response_format)
-
-        return await self._complete_response(
-            lambda: self._ask_sync(messages, request.tools, response_format),
-            lambda: self._ask_stream(messages, request.tools, response_format),
-        )
+        return await self.run_conversation(request, stream=stream)

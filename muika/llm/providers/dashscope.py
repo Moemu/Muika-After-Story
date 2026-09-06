@@ -1,24 +1,11 @@
-import json
-from dataclasses import dataclass
-from typing import (
-    Any,
-    AsyncGenerator,
-    Generator,
-    List,
-    Literal,
-    Optional,
-    Union,
-    cast,
-    overload,
-)
+from collections.abc import Sequence
+from typing import Any, AsyncGenerator, List, Literal, Union, overload
 
 import dashscope
 from dashscope.api_entities.dashscope_response import (
     GenerationResponse,
     MultiModalConversationResponse,
 )
-
-from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,
@@ -29,80 +16,21 @@ from .. import (
     Usage,
     register,
 )
-from .._retry import LLMRequestError, RequestRetry, error_from_status
-from ..utils.tools import function_call_handler
+from .._retry import RequestRetry, error_from_status
+from .._schema import ModelMessage, ToolCall
+from ..utils.protocol import (
+    ToolCallBuffer,
+    ToolDelta,
+    json_arguments,
+    stop_reason,
+    tool_payload,
+)
 
 
-@dataclass
-class FunctionCallStream:
-    enable: bool = False
-    id: str = ""
-    function_name: str = ""
-    function_args: str = ""
-
-    def from_chunk(self, chunk: GenerationResponse | MultiModalConversationResponse):
-        tool_calls = chunk.output.choices[0].message.tool_calls
-        tool_call = tool_calls[0]
-
-        if tool_call.get("id", ""):
-            self.id = tool_call["id"]
-
-        if tool_call.get("function", {}).get("name", ""):
-            self.function_name = tool_call.get("function").get("name")
-
-        function_arg = tool_call.get("function", {}).get("arguments", "")
-
-        if function_arg and self.function_args != function_arg:
-            self.function_args += function_arg
-
-        self.enable = True
-
-
-class ThoughtStream:
-    def __init__(self):
-        self.is_insert_think_label: bool = False
-
-    def process_chunk(self, chunk: GenerationResponse | MultiModalConversationResponse) -> str:
-        choice = chunk.output.choices[0].message
-        answer_content = choice.content
-        reasoning_content = choice.get("reasoning_content", "")
-        reasoning_content = reasoning_content.replace("\n</think>", "") if reasoning_content else ""
-
-        # 处理模型可能输出的 reasoning（思考内容）
-        if reasoning_content:
-            if not self.is_insert_think_label:
-                self.is_insert_think_label = True
-                return f"<think>{reasoning_content}"
-            else:
-                return reasoning_content
-
-        if not answer_content:
-            answer_content = ""
-
-        if isinstance(answer_content, list):
-            answer_content = answer_content[0].get("text", "")
-
-        if self.is_insert_think_label:
-            self.is_insert_think_label = False
-            return f"</think>{answer_content}"
-
-        return answer_content
-
-
-# Dashscope 的同步 / 流式返回类型（非多模态与多模态接口的返回值联合）
-SyncResponse = Union[GenerationResponse, MultiModalConversationResponse]
-StreamResponse = Union[
-    Generator[GenerationResponse, None, None],
-    Generator[MultiModalConversationResponse, None, None],
-]
-CallResponse = Union[SyncResponse, StreamResponse]
-
-
-async def _validate_stream(response: Any) -> AsyncGenerator[Any, None]:
-    async for chunk in response:
-        if chunk.status_code != 200:
-            raise error_from_status(chunk.status_code, str(chunk.message), code=str(chunk.code))
-        yield chunk
+def _text_content(content: str | list | None) -> str:
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content)
+    return content or ""
 
 
 @register("dashscope")
@@ -177,267 +105,145 @@ class Dashscope(BaseLLM):
 
         return messages
 
-    async def _GenerationResponse_handle(
-        self,
-        messages: list,
-        tools: List[dict],
-        response_format: Optional[dict],
-        response: GenerationResponse | MultiModalConversationResponse,
-        total_usage: Usage | None = None,
-    ) -> ModelCompletions:
-        """
-        处理 Dashscope 的非流式返回对象
-
-        :param message: 总消息列表，用于工具调用
-        :param tools: 工具列表
-        :param response_format: 消息回复格式
-        :param response: 迭代器主体
-        :param total_usage: 整体用量
-        """
-        if total_usage is None:
-            total_usage = Usage()
-        completions = ModelCompletions()
-
-        if response.status_code != 200:
-            completions.succeed = False
-            logger.error(f"模型调用失败: {response.status_code}({response.code})")
-            logger.error(f"{response.message}")
-            completions.text = f"模型调用失败: {response.status_code}({response.code})"
-            return completions
-
-        total_usage.input_tokens += response.usage.input_tokens
-        total_usage.output_tokens += response.usage.output_tokens
-        prompt_tokens_details = getattr(response.usage, "prompt_tokens_details", None)
-        if prompt_tokens_details:
-            total_usage.cached_tokens += getattr(prompt_tokens_details, "cached_tokens", 0)
-        completions.usage = total_usage
-
-        message = response.output.choices[0].message
-        if getattr(message, "tool_calls", None):
-            return await self._tool_calls_handle_sync(messages, tools, response_format, response, total_usage)
-
-        if response.output.text:
-            completions.text = response.output.text
-            return completions
-
-        message_content = message.content
-        if message_content:
-            completions.text = message_content if isinstance(message_content, str) else message_content[0].get("text")
-            return completions
-
-        return completions
-
-    async def _Generator_handle(
-        self,
-        messages: list,
-        tools: List[dict],
-        response_format: Optional[dict],
-        response_factory: Any,
-        total_usage: Usage | None = None,
-    ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        """
-        处理 Dashscope 的流式迭代器
-
-        :param message: 总消息列表，用于工具调用
-        :param tools: 工具列表
-        :param response_format: 消息回复格式
-        :param response: 迭代器主体
-        :param total_usage: 整体用量
-        """
-        if total_usage is None:
-            total_usage = Usage()
-        func_stream = FunctionCallStream()
-        thought_stream = ThoughtStream()
-
-        async for chunk in RequestRetry[Any](self.config).stream(response_factory):
-            logger.debug(chunk)
-            stream_completions = ModelStreamCompletions()
-
-            # 更新 token 消耗
-            total_usage.input_tokens = chunk.usage.input_tokens
-            total_usage.output_tokens = chunk.usage.output_tokens
-            prompt_tokens_details = getattr(chunk.usage, "prompt_tokens_details", None)
-            if prompt_tokens_details:
-                total_usage.cached_tokens = getattr(prompt_tokens_details, "cached_tokens", 0)
-            stream_completions.usage = total_usage
-
-            # 优先判断是否是工具调用（OpenAI-style function calling）
-            if chunk.output.choices and chunk.output.choices[0].message.get("tool_calls", []):
-                func_stream.from_chunk(chunk)
-                # 工具调用也可能在输出文本之后发生
-
-            # DashScope 的 text 模式（非标准接口）
-            if hasattr(chunk.output, "text") and chunk.output.text:
-                stream_completions.chunk = chunk.output.text
-                yield stream_completions
-                continue
-
-            if chunk.output.choices is None:
-                continue
-
-            stream_completions.chunk = thought_stream.process_chunk(chunk)
-            yield stream_completions
-
-        # 流式处理工具调用响应
-        if func_stream.enable:
-            async for final_chunk in await self._tool_calls_handle_stream(
-                messages, tools, response_format, func_stream, total_usage
-            ):
-                yield final_chunk
-
-    async def _tool_calls_handle_sync(
-        self,
-        messages: List,
-        tools: List[dict],
-        response_format: Optional[dict],
-        response: GenerationResponse | MultiModalConversationResponse,
-        total_usage: Usage | None = None,
-    ) -> ModelCompletions:
-        """
-        处理非流式工具调用流
-
-        :param messages: 消息列表
-        :param tools: 工具列表
-        :param response_format: 消息回复格式
-        :param func_stream: 工具调用流实例
-        :param total_usage: 整体用量
-        """
-        if total_usage is None:
-            total_usage = Usage()
-        tool_call = response.output.choices[0].message.tool_calls[0]
-        tool_call_id = tool_call["id"]
-        function_name = tool_call["function"]["name"]
-        function_args = json.loads(tool_call["function"]["arguments"])
-
-        function_return = await function_call_handler(function_name, function_args)
-
-        messages.append(response.output.choices[0].message)
-        messages.append({"role": "tool", "content": function_return, "tool_call_id": tool_call_id})
-
-        return cast(
-            ModelCompletions,
-            await self._ask(messages, tools, response_format, False, total_usage),
-        )
-
-    async def _tool_calls_handle_stream(
-        self,
-        messages: List,
-        tools: List[dict],
-        response_format: Optional[dict],
-        func_stream: FunctionCallStream,
-        total_usage: Usage | None = None,
-    ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        """
-        处理流式工具调用流
-
-        :param messages: 消息列表
-        :param tools: 工具列表
-        :param response_format: 消息回复格式
-        :param func_stream: 工具调用流实例
-        :param total_usage: 整体用量
-        """
-        if total_usage is None:
-            total_usage = Usage()
-        function_args = json.loads(func_stream.function_args)
-
-        function_return = await function_call_handler(func_stream.function_name, function_args)  # type: ignore
-
-        messages.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": func_stream.id,
-                        "function": {
-                            "arguments": func_stream.function_args,
-                            "name": func_stream.function_name,
-                        },
-                        "type": "function",
-                        "index": 0,
-                    }
-                ],
-            }
-        )
-        messages.append({"role": "tool", "content": function_return, "tool_call_id": func_stream.id})
-
-        return cast(
-            AsyncGenerator[ModelStreamCompletions, None],
-            await self._ask(messages, tools, response_format, True, total_usage),
-        )
-
-    async def _ask(
-        self,
-        messages: list,
-        tools: List[dict],
-        response_format: Optional[dict],
-        stream: bool,
-        total_usage: Usage | None = None,
-    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        if total_usage is None:
-            total_usage = Usage()
-        if not self.config.multimodal:
-            call_kwargs: dict[str, Any] = {
-                "api_key": self.api_key,
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "repetition_penalty": self.repetition_penalty,
-                "stream": stream,
-                "tools": tools,
-                "parallel_tool_calls": True,
-                "enable_search": self.enable_search,
-                "incremental_output": self.incremental_output,
-                "headers": self.extra_headers,
-                "enable_thinking": self.enable_thinking,
-                "thinking_budget": self.thinking_budget,
-                "response_format": response_format,
-            }
-        else:
-            call_kwargs = {
-                "api_key": self.api_key,
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "repetition_penalty": self.repetition_penalty,
-                "stream": stream,
-                "tools": tools,
-                "parallel_tool_calls": True,
-                "enable_search": self.enable_search,
-                "incremental_output": self.incremental_output,
-                "headers": self.extra_headers,
-                "response_format": response_format,
-            }
-
-        call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
-
-        async def send_request() -> Any:
-            if self.config.multimodal:
-                result: Any = await dashscope.AioMultiModalConversation.call(**call_kwargs)
-            else:
-                result = await dashscope.AioGeneration.call(**call_kwargs)
-            if isinstance(result, (GenerationResponse, MultiModalConversationResponse)) and result.status_code != 200:
-                raise error_from_status(
-                    result.status_code,
-                    str(result.message),
-                    code=str(result.code),
+    def _conversation_messages(self, request: ModelRequest, conversation: Sequence[ModelMessage]) -> list:
+        messages = self._build_messages(request)
+        for item in conversation:
+            if item.role == "user" and item.resources:
+                messages.append(
+                    self.__build_multi_messages(
+                        ModelRequest(item.content, resources=[r.to_resource() for r in item.resources])
+                    )
                 )
+                continue
+            message: dict = {"role": item.role, "content": item.content}
+            if item.reasoning:
+                message["reasoning_content"] = item.reasoning
+            if item.tool_calls:
+                message["tool_calls"] = [tool_payload(call) for call in item.tool_calls]
+            if item.role == "tool":
+                message["tool_call_id"] = item.tool_call_id
+            messages.append(message)
+        return messages
+
+    async def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
+    ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            "model": self.model,
+            "messages": self._conversation_messages(request, messages),
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "stream": stream,
+            "tools": request.tools or None,
+            "parallel_tool_calls": True,
+            "enable_search": self.enable_search,
+            "incremental_output": self.incremental_output,
+            "headers": self.extra_headers,
+            "result_format": "message",
+            "response_format": {"type": "json_object"} if request.format == "json" else None,
+        }
+        if not self.config.multimodal:
+            kwargs.update(
+                repetition_penalty=self.repetition_penalty,
+                enable_thinking=self.enable_thinking,
+                thinking_budget=self.thinking_budget,
+            )
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        async def send_request():
+            if self.config.multimodal:
+                response = await dashscope.AioMultiModalConversation.call(**kwargs)
+            else:
+                response = await dashscope.AioGeneration.call(**kwargs)
             if stream:
-                return _validate_stream(result)
-            return result
+                return self._validated_stream(response)
+            self._validate_response(response)
+            return response
 
-        if stream:
-            return self._Generator_handle(messages, tools, response_format, send_request, total_usage)
+        usage = Usage()
+        if not stream:
+            response = await RequestRetry[Any](self.config).run(send_request)
+            choice = response.output["choices"][0]
+            raw = choice["message"]
+            message = ModelMessage(
+                role="assistant",
+                content=_text_content(raw.get("content")),
+                reasoning=raw.get("reasoning_content") or "",
+                tool_calls=[
+                    ToolCall(
+                        id=call["id"],
+                        name=call["function"]["name"],
+                        arguments=json_arguments(call["function"]["arguments"]),
+                    )
+                    for call in raw.get("tool_calls", [])
+                ],
+            )
+            usage = self._usage(response)
+            reason = stop_reason(choice.get("finish_reason"), has_tools=bool(message.tool_calls))
+            yield ModelStreamCompletions(
+                chunk=(f"<think>{message.reasoning}</think>" if message.reasoning else "") + message.content,
+                message=message,
+                usage=usage,
+                stop_reason=reason,
+                succeed=reason != "filtered",
+            )
+            return
 
-        response = cast(CallResponse, await RequestRetry(self.config).run(send_request))
+        buffer = ToolCallBuffer()
+        content = ""
+        reasoning = ""
+        thinking = False
+        finish = None
+        async for chunk in RequestRetry[Any](self.config).stream(send_request):
+            usage = self._usage(chunk)
+            if not chunk.output["choices"]:
+                continue
+            choice = chunk.output["choices"][0]
+            raw = choice["message"]
+            finish = choice.get("finish_reason") or finish
+            for index, call in enumerate(raw.get("tool_calls") or []):
+                delta = ToolDelta.model_validate({"index": index, **call})
+                buffer.add(delta, incremental=self.incremental_output)
+            thought = raw.get("reasoning_content") or ""
+            text = _text_content(raw.get("content"))
+            if not self.incremental_output:
+                thought, reasoning = thought[len(reasoning) :], thought
+                text, content = text[len(content) :], text
+            else:
+                reasoning += thought
+                content += text
+            if thought:
+                yield ModelStreamCompletions(chunk=("" if thinking else "<think>") + thought)
+                thinking = True
+            if text:
+                yield ModelStreamCompletions(chunk=("</think>" if thinking else "") + text)
+                thinking = False
+        if thinking:
+            yield ModelStreamCompletions(chunk="</think>")
+        message = ModelMessage(role="assistant", content=content, reasoning=reasoning, tool_calls=buffer.finish())
+        reason = stop_reason(finish, has_tools=bool(message.tool_calls))
+        yield ModelStreamCompletions(message=message, usage=usage, stop_reason=reason, succeed=reason != "filtered")
 
-        if isinstance(response, GenerationResponse) or isinstance(response, MultiModalConversationResponse):
-            return await self._GenerationResponse_handle(messages, tools, response_format, response, total_usage)
-        raise TypeError(f"Unexpected DashScope response: {type(response).__name__}")
+    @staticmethod
+    def _validate_response(response: GenerationResponse | MultiModalConversationResponse) -> None:
+        if response.status_code != 200:
+            raise error_from_status(response.status_code, str(response.message), code=str(response.code))
+
+    async def _validated_stream(self, response):
+        async for chunk in response:
+            self._validate_response(chunk)
+            yield chunk
+
+    @staticmethod
+    def _usage(response: GenerationResponse | MultiModalConversationResponse) -> Usage:
+        details = response.usage.get("prompt_tokens_details") or {}
+        return Usage(
+            input_tokens=response.usage.get("input_tokens", 0),
+            output_tokens=response.usage.get("output_tokens", 0),
+            cached_tokens=details.get("cached_tokens", 0),
+        )
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
@@ -450,35 +256,4 @@ class Dashscope(BaseLLM):
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        tools = request.tools if request.tools else []
-        messages = self._build_messages(request)
-        if request.format == "json" and request.json_schema:
-            # logger.warning("该模型加载器不支持传入 Json Schema 模型，请确保您已经在模型提示词中传入了相关 json 字段")
-            response_format = {"type": "json_object"}
-        else:
-            response_format = None
-
-        if stream:
-            return cast(
-                AsyncGenerator[ModelStreamCompletions, None],
-                await self._ask(messages, tools, response_format, True),
-            )
-        if self.config.stream:
-            response = cast(
-                AsyncGenerator[ModelStreamCompletions, None],
-                await self._ask(messages, tools, response_format, True),
-            )
-            return await self._collect_stream(response)
-        try:
-            return cast(
-                ModelCompletions,
-                await self._ask(messages, tools, response_format, False),
-            )
-        except LLMRequestError as exc:
-            if exc.kind != "timeout" or not self.config.stream_fallback_on_timeout:
-                raise
-            response = cast(
-                AsyncGenerator[ModelStreamCompletions, None],
-                await self._ask(messages, tools, response_format, True),
-            )
-            return await self._collect_stream(response)
+        return await self.run_conversation(request, stream=stream)

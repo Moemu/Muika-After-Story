@@ -7,6 +7,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from muika.core.self_mod.proposals import CoreProposalError, get_core_proposal_manager
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 
 
@@ -14,7 +15,7 @@ class CoreListParams(BaseModel):
     path: str = Field("muika", description="Core directory or file relative to the running MAS source root.")
 
 
-@on_function_call("List Python files in the approved Core observation scope.", params=CoreListParams)
+@on_function_call("List Python files in the approved Core observation scope.", params=CoreListParams, read_only=True)
 async def core_list(path: str = "muika") -> str:
     """列出 Core 观察范围内的 Python 文件。"""
     manager = get_core_proposal_manager()
@@ -26,7 +27,7 @@ async def core_list(path: str = "muika") -> str:
             resolved = manager.resolve_core_path(raw)
             return resolved.relative_to(manager.project_root).as_posix()
         if not candidate.is_dir():
-            return f"Path not found: {raw}"
+            return ToolError(f"Path not found: {raw}")
         results: list[str] = []
         for item in sorted(candidate.rglob("*.py")):
             try:
@@ -36,7 +37,7 @@ async def core_list(path: str = "muika") -> str:
             results.append(item.relative_to(manager.project_root).as_posix())
         return "\n".join(results) if results else "No Python files found."
     except CoreProposalError as exc:
-        return str(exc)
+        return ToolError(str(exc))
 
 
 class CoreReadParams(BaseModel):
@@ -45,7 +46,7 @@ class CoreReadParams(BaseModel):
     line_end: int = Field(200, ge=1, description="Last line, inclusive.")
 
 
-@on_function_call("Read a bounded line range from Core Python code.", params=CoreReadParams)
+@on_function_call("Read a bounded line range from Core Python code.", params=CoreReadParams, read_only=True)
 async def core_read(path: str, line_start: int = 1, line_end: int = 200) -> str:
     """读取 Core 文件的行区间。"""
     manager = get_core_proposal_manager()
@@ -53,14 +54,14 @@ async def core_read(path: str, line_start: int = 1, line_end: int = 200) -> str:
         manager._require_enabled()
         resolved = manager.resolve_core_path(path)
         if not resolved.is_file():
-            return f"File not found: {path}"
+            return ToolError(f"File not found: {path}")
         if line_end < line_start or line_end - line_start + 1 > 400:
-            return "The line range must contain 1 to 400 lines."
+            return ToolError("The line range must contain 1 to 400 lines.")
         lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
         selected = lines[line_start - 1 : line_end]
         return "\n".join(f"{number:5d} | {line}" for number, line in enumerate(selected, line_start))
     except CoreProposalError as exc:
-        return str(exc)
+        return ToolError(str(exc))
 
 
 class CoreSearchParams(BaseModel):
@@ -68,7 +69,9 @@ class CoreSearchParams(BaseModel):
     path: str = Field("muika", description="Core search path relative to the running MAS source root.")
 
 
-@on_function_call("Search exact text in Core Python code and return bounded matches.", params=CoreSearchParams)
+@on_function_call(
+    "Search exact text in Core Python code and return bounded matches.", params=CoreSearchParams, read_only=True
+)
 async def core_search(query: str, path: str = "muika") -> str:
     """搜索 Core Python 文件。"""
     manager = get_core_proposal_manager()
@@ -76,7 +79,7 @@ async def core_search(query: str, path: str = "muika") -> str:
         manager._require_enabled()
         candidate = manager.resolve_observation_path(path)
         if not candidate.exists():
-            return f"Path not found: {path}"
+            return ToolError(f"Path not found: {path}")
         files = [manager.resolve_core_path(path)] if candidate.is_file() else sorted(candidate.rglob("*.py"))
         matches: list[str] = []
         for item in files:
@@ -92,7 +95,7 @@ async def core_search(query: str, path: str = "muika") -> str:
                         return "\n".join(matches) + "\n...(match limit reached)"
         return "\n".join(matches) if matches else "No matches found."
     except (CoreProposalError, OSError) as exc:
-        return str(exc)
+        return ToolError(str(exc))
 
 
 class CoreReplacement(BaseModel):
@@ -127,4 +130,4 @@ async def propose_core_change(changes: list[CoreChange], reason: str) -> str:
             "Tell the user what you want to change and why. The user must review and decide."
         )
     except CoreProposalError as exc:
-        return f"Core proposal rejected: {exc}"
+        return ToolError(f"Core proposal rejected: {exc}")

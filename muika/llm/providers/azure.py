@@ -1,6 +1,6 @@
-import json
 import os
-from typing import Any, AsyncGenerator, List, Literal, Optional, Union, overload
+from collections.abc import Sequence
+from typing import Any, AsyncGenerator, List, Literal, Union, overload
 
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import (
@@ -9,7 +9,6 @@ from azure.ai.inference.models import (
     ChatCompletionsToolCall,
     ChatCompletionsToolDefinition,
     ChatRequestMessage,
-    CompletionsFinishReason,
     ContentItem,
     FunctionCall,
     FunctionDefinition,
@@ -24,7 +23,6 @@ from azure.ai.inference.models import (
     UserMessage,
 )
 from azure.core.credentials import AzureKeyCredential
-from azure.core.exceptions import HttpResponseError
 from pydantic import TypeAdapter
 
 from muika.utils.logger import logger
@@ -39,7 +37,8 @@ from .. import (
     register,
 )
 from .._retry import RequestRetry
-from ..utils.tools import function_call_handler
+from .._schema import ModelMessage
+from ..utils.protocol import ToolCallBuffer, ToolDelta, stop_reason
 
 
 @register("azure")
@@ -133,209 +132,93 @@ class Azure(BaseLLM):
 
         return messages
 
-    def _tool_messages_precheck(self, tool_calls: Optional[List[ChatCompletionsToolCall]] = None) -> bool:
-        if not (tool_calls and len(tool_calls) == 1):
-            return False
-
-        tool_call = tool_calls[0]
-
-        if isinstance(tool_call, ChatCompletionsToolCall):
-            return True
-
-        return False
-
-    async def _ask_sync(
-        self,
-        messages: List[ChatRequestMessage],
-        tools: List[ChatCompletionsToolDefinition],
-        response_format: Optional[JsonSchemaFormat],
-        total_usage: Usage | None = None,
-    ) -> ModelCompletions:
-        if total_usage is None:
-            total_usage = Usage()
-        client = ChatCompletionsClient(
-            endpoint=self.endpoint,
-            credential=AzureKeyCredential(self.token),
-            retry_total=0,
-        )
-
-        completions = ModelCompletions()
-
-        try:
-
-            async def send_request():
-                return await client.complete(
-                    messages=messages,
-                    model=self.model_name,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    frequency_penalty=self.frequency_penalty,
-                    presence_penalty=self.presence_penalty,
-                    stream=False,
-                    tools=tools,
-                    response_format=response_format,
-                )
-
-            response: Any = await RequestRetry(self.config).run(send_request)
-            finish_reason = response.choices[0].finish_reason
-            if response.usage:
-                total_usage.input_tokens += response.usage.prompt_tokens or 0
-                total_usage.output_tokens += response.usage.completion_tokens or 0
-                details = getattr(response.usage, "prompt_tokens_details", None)
-                total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
-
-            if finish_reason == CompletionsFinishReason.STOPPED:
-                completions.text = response.choices[0].message.content
-
-            elif finish_reason == CompletionsFinishReason.CONTENT_FILTERED:
-                completions.succeed = False
-                completions.text = "(模型内部错误: 被内容过滤器阻止)"
-
-            elif finish_reason == CompletionsFinishReason.TOKEN_LIMIT_REACHED:
-                completions.succeed = False
-                completions.text = "(模型内部错误: 达到了最大 token 限制)"
-
-            elif finish_reason == CompletionsFinishReason.TOOL_CALLS:
-                tool_calls = response.choices[0].message.tool_calls
-                messages.append(AssistantMessage(tool_calls=tool_calls))
-                if (tool_calls is None) or (not self._tool_messages_precheck(tool_calls=tool_calls)):
-                    completions.succeed = False
-                    completions.text = "(模型内部错误: tool_calls 内容为空)"
-                    completions.usage = total_usage
-                    return completions
-
-                tool_call = tool_calls[0]
-                function_args = json.loads(tool_call.function.arguments.replace("'", '"'))
-
-                function_return = await function_call_handler(tool_call.function.name, function_args)
-
-                # Append the function call result fo the chat history
-                messages.append(ToolMessage(tool_call_id=tool_call.id, content=function_return))
-
-                return await self._ask_sync(messages, tools, response_format, total_usage)
-
-            else:
-                completions.succeed = False
-                completions.text = "(模型内部错误: 达到了最大 token 限制)"
-
-        except HttpResponseError as e:
-            logger.error(f"模型响应失败: {e.status_code} ({e.reason})")
-            logger.error(f"{e.message}")
-            completions.succeed = False
-            completions.text = f"模型响应失败: {e.status_code} ({e.reason})"
-
-        finally:
-            await client.close()
-            completions.usage = total_usage
-        return completions
-
-    async def _ask_stream(
-        self,
-        messages: List[ChatRequestMessage],
-        tools: List[ChatCompletionsToolDefinition],
-        response_format: Optional[JsonSchemaFormat],
-        total_usage: Usage | None = None,
-    ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        if total_usage is None:
-            total_usage = Usage()
-        client = ChatCompletionsClient(
-            endpoint=self.endpoint,
-            credential=AzureKeyCredential(self.token),
-            retry_total=0,
-        )
-
-        try:
-
-            async def send_request():
-                return await client.complete(
-                    messages=messages,
-                    model=self.model_name,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    frequency_penalty=self.frequency_penalty,
-                    presence_penalty=self.presence_penalty,
-                    stream=True,
-                    tools=tools,
-                    model_extras={"stream_options": {"include_usage": True}},
-                    response_format=response_format,
-                )
-
-            tool_call_id: str = ""
-            function_name: str = ""
-            function_args: str = ""
-
-            async for chunk in RequestRetry[Any](self.config).stream(send_request):
-                stream_completions = ModelStreamCompletions()
-
-                if chunk.usage:  # chunk.usage 只会在最后一个包中被提供，此时choices为空
-                    total_usage.input_tokens += chunk.usage.prompt_tokens or 0
-                    total_usage.output_tokens += chunk.usage.completion_tokens or 0
-                    details = getattr(chunk.usage, "prompt_tokens_details", None)
-                    total_usage.cached_tokens += details.cached_tokens if details and details.cached_tokens else 0
-                    stream_completions.usage = total_usage
-
-                if not chunk.choices:
-                    yield stream_completions
-                    continue
-
-                finish_reason = chunk.choices[0].finish_reason
-
-                if chunk.choices and chunk.choices[0].get("delta", {}).get("content", ""):
-                    stream_completions.chunk = chunk["choices"][0]["delta"]["content"]
-
-                elif chunk.choices[0].delta.tool_calls is not None:
-                    tool_call = chunk.choices[0].delta.tool_calls[0]
-
-                    if tool_call.function.name is not None:
-                        function_name = tool_call.function.name
-                    if tool_call.id is not None:
-                        tool_call_id = tool_call.id
-                    function_args += tool_call.function.arguments or ""
-                    continue
-
-                elif finish_reason == CompletionsFinishReason.CONTENT_FILTERED:
-                    stream_completions.succeed = False
-                    stream_completions.chunk = "(模型内部错误: 被内容过滤器阻止)"
-
-                elif finish_reason == CompletionsFinishReason.TOKEN_LIMIT_REACHED:
-                    stream_completions.succeed = False
-                    stream_completions.chunk = "(模型内部错误: 达到了最大 token 限制)"
-
-                elif finish_reason == CompletionsFinishReason.TOOL_CALLS:
-                    messages.append(
-                        AssistantMessage(
-                            tool_calls=[
-                                ChatCompletionsToolCall(
-                                    id=tool_call_id, function=FunctionCall(name=function_name, arguments=function_args)
-                                )
-                            ]
-                        )
+    def _conversation_messages(self, request: ModelRequest, conversation: Sequence[ModelMessage]) -> list:
+        messages = self._build_messages(request)
+        for item in conversation:
+            if item.role == "assistant":
+                messages.append(
+                    AssistantMessage(
+                        content=item.content,
+                        tool_calls=[
+                            ChatCompletionsToolCall(
+                                id=call.id, function=FunctionCall(name=call.name, arguments=call.arguments)
+                            )
+                            for call in item.tool_calls
+                        ]
+                        or None,
                     )
+                )
+            elif item.role == "tool":
+                messages.append(ToolMessage(tool_call_id=item.tool_call_id or "", content=item.content))
+            elif item.resources:
+                messages.append(
+                    self.__build_multi_messages(
+                        ModelRequest(item.content, resources=[r.to_resource() for r in item.resources])
+                    )
+                )
+            else:
+                messages.append(UserMessage(item.content))
+        return messages
 
-                    function_arg = json.loads(function_args.replace("'", '"'))
+    async def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
+    ) -> AsyncGenerator[ModelStreamCompletions, None]:
+        response_format = None
+        if request.json_schema:
+            schema = (
+                request.json_schema.json_schema()
+                if isinstance(request.json_schema, TypeAdapter)
+                else request.json_schema.model_json_schema()
+            )
+            response_format = JsonSchemaFormat(name="response", schema=schema)
+        client = ChatCompletionsClient(endpoint=self.endpoint, credential=AzureKeyCredential(self.token), retry_total=0)
+        try:
 
-                    function_return = await function_call_handler(function_name, function_arg)
+            async def send_request():
+                return await client.complete(
+                    messages=self._conversation_messages(request, messages),
+                    model=self.model_name,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    frequency_penalty=self.frequency_penalty,
+                    presence_penalty=self.presence_penalty,
+                    stream=stream,
+                    tools=self.__build_tools_definition(request.tools) if request.tools else None,
+                    response_format=response_format,
+                )
 
-                    # Append the function call result fo the chat history
-                    messages.append(ToolMessage(tool_call_id=tool_call_id, content=function_return))
+            async def responses():
+                if stream:
+                    async for chunk in RequestRetry[Any](self.config).stream(send_request):
+                        yield chunk
+                else:
+                    yield await RequestRetry[Any](self.config).run(send_request)
 
-                    async for content in self._ask_stream(messages, tools, response_format, total_usage):
-                        yield content
-
-                    return
-
-                yield stream_completions
-
-        except HttpResponseError as e:
-            logger.error(f"模型响应失败: {e.status_code} ({e.reason})")
-            logger.error(f"{e.message}")
-            stream_completions = ModelStreamCompletions()
-            stream_completions.chunk = f"模型响应失败: {e.status_code} ({e.reason})"
-            stream_completions.succeed = False
-            yield stream_completions
-
+            buffer = ToolCallBuffer()
+            message = ModelMessage(role="assistant")
+            finish = None
+            usage = Usage()
+            async for response in responses():
+                if response.usage:
+                    usage.input_tokens = response.usage.prompt_tokens or 0
+                    usage.output_tokens = response.usage.completion_tokens or 0
+                    details = response.usage.get("prompt_tokens_details") or {}
+                    usage.cached_tokens = details.get("cached_tokens", 0)
+                if not response.choices:
+                    continue
+                choice = response.choices[0]
+                finish = choice.finish_reason or finish
+                raw = choice.delta if stream else choice.message
+                text = raw.get("content") or ""
+                message.content += text
+                if text:
+                    yield ModelStreamCompletions(chunk=text)
+                for index, call in enumerate(raw.get("tool_calls") or []):
+                    buffer.add(ToolDelta.model_validate({"index": index, **call.as_dict()}))
+            message.tool_calls = buffer.finish()
+            reason = stop_reason(finish, has_tools=bool(message.tool_calls))
+            yield ModelStreamCompletions(message=message, usage=usage, stop_reason=reason, succeed=reason != "filtered")
         finally:
             await client.close()
 
@@ -350,29 +233,4 @@ class Azure(BaseLLM):
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        messages = self._build_messages(request)
-
-        tools = self.__build_tools_definition(request.tools) if request.tools else []
-
-        if request.format == "json" and request.json_schema:
-            if isinstance(request.json_schema, TypeAdapter):
-                schema = request.json_schema.json_schema()
-            else:
-                schema = request.json_schema.model_json_schema()
-
-            response_format = JsonSchemaFormat(
-                name="Recipe_JSON_Schema",
-                schema=schema,
-                description=request.prompt,
-                strict=True,
-            )
-        else:
-            response_format = None
-
-        if stream:
-            return self._ask_stream(messages, tools, response_format)
-
-        return await self._complete_response(
-            lambda: self._ask_sync(messages, tools, response_format),
-            lambda: self._ask_stream(messages, tools, response_format),
-        )
+        return await self.run_conversation(request, stream=stream)

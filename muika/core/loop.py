@@ -4,10 +4,12 @@ import asyncio
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from random import random
 from typing import Coroutine, Literal, Optional, TypeVar
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from muika.config import mas_config
 from muika.models import AdapterInfo
@@ -17,6 +19,7 @@ from muika.utils.utils import parse_duration
 
 from .brain import MuikaBrain
 from .butler.agent import ButlerAgent
+from .butler.tasks import AgentTasks
 from .constants import (
     AUTO_SUMMARY_INTERVAL,
     AUTO_SUMMARY_MIN_TURNS,
@@ -28,7 +31,14 @@ from .constants import (
     SESSION_IDLE_TIMEOUT,
 )
 from .digest_agent import DigestAgent
-from .events import Event, SessionEndEvent, TimeoutEvent, TimeTickEvent
+from .events import (
+    AgentHandoffEvent,
+    AgentTaskEvent,
+    Event,
+    SessionEndEvent,
+    TimeoutEvent,
+    TimeTickEvent,
+)
 from .executor import Executor
 from .memory import (
     MemoryCategory,
@@ -37,12 +47,22 @@ from .memory import (
     MemoryRecord,
     SessionTurn,
 )
+from .processes import get_process_manager
 from .reflection import ReflectionAgent
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
 
 TaskResult = TypeVar("TaskResult")
+
+
+class AgentControl(BaseModel):
+    """主人格对已知行动任务的内部控制。"""
+
+    model_config = ConfigDict(extra="forbid")
+    task_id: str
+    action: Literal["continue", "cancel", "complete"] = "continue"
+    instruction: str = ""
 
 
 @dataclass
@@ -56,10 +76,12 @@ class ParsedReply:
     timeout: Optional[float] = None
     """用户回复等待超时（秒），来自 <timeout: 10min> 标签。"""
     god_mode: bool = False
-    """是否请求开启上帝模式（<enable_god_mode>），单次会话内开启后不可关闭。"""
+    """是否请求接手当前行动任务（<enable_god_mode>）。"""
     heart_cot: Optional[list[str]] = None
     do_nothing: bool = False
     """模型选择本轮沉默（<do_nothing>），不发消息不写 memory。"""
+    agent_controls: list[AgentControl] = field(default_factory=list)
+    agent_errors: list[str] = field(default_factory=list)
 
 
 class Muika:
@@ -77,6 +99,7 @@ class Muika:
 
         self.brain = MuikaBrain()
         self.butler_agent = ButlerAgent()
+        self.agent_tasks = AgentTasks(self.butler_agent, self.state, self.executor, self.event_queue)
         self.topic_manager = TopicManager()
         self.digest_agent = DigestAgent(self.topic_manager)
         self.reflection = ReflectionAgent(
@@ -95,6 +118,7 @@ class Muika:
         self._timeout_task: Optional[asyncio.Task] = None
         self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
+        self._god_mode_pending: bool = False
 
         self._tasks: set[asyncio.Task[object]] = set()
         self._summary_task: Optional[asyncio.Task[bool]] = None
@@ -152,6 +176,7 @@ class Muika:
     async def loop(self) -> None:
         """顺序处理事件，并隔离单次事件的失败。"""
         last_tick_time = time.time()
+        await self.agent_tasks.initialize()
 
         while self.is_alive:
             current_time = time.time()
@@ -166,6 +191,8 @@ class Muika:
             try:
                 await self._process_event(event, dt)
             except Exception as exc:
+                if isinstance(event, AgentTaskEvent):
+                    self.agent_tasks.defer_event(event)
                 logger.exception(f"[Loop] Event {event.type} failed: {exc}")
 
     async def _process_event(self, event: Event, dt: float) -> None:
@@ -175,8 +202,21 @@ class Muika:
         :param dt: 距上次循环的秒数
         """
         if is_core_maintenance_active():
+            if isinstance(event, AgentTaskEvent):
+                self.agent_tasks.defer_event(event)
             logger.debug(f"[Loop] Maintenance mode rejected new {event.type} work.")
             return
+        if event.type in {"user_message", "adapter_online"}:
+            await self.agent_tasks.notify_pending()
+        if isinstance(event, AgentTaskEvent):
+            if event.task_id != "control-error" and not self.agent_tasks.is_current_event(event):
+                return
+            self.memory.add_context("agent", f"[Action result] {event.task_id}: {event.report}")
+        elif isinstance(event, AgentHandoffEvent):
+            if not self._god_mode_pending:
+                return
+            self._god_mode = True
+            self._god_mode_pending = False
         think_mode = self.get_think_mode(event)
 
         if think_mode is None:
@@ -222,6 +262,8 @@ class Muika:
 
         injected_preferences = await self._fetch_preferences(event)
         await self._run_brain_pipeline(event, injected_preferences)
+        if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
+            await self.agent_tasks.delivered(event)
         self._save_last_connection_time()
 
     @staticmethod
@@ -298,11 +340,22 @@ class Muika:
         do_nothing = bool(re.search(r"<do_nothing\s*/?>", reply, re.IGNORECASE))
         reply = re.sub(r"<do_nothing\s*/?>", "", reply, flags=re.IGNORECASE).strip()
 
-        memory_contents = re.findall(r"<memory>(.*?)</memory>", reply, re.DOTALL)
-        reply = re.sub(r"<memory>.*?</memory>", "", reply, flags=re.DOTALL).strip()
-
-        agent_commands = re.findall(r"<agent>\s*(.*?)\s*</agent>", reply, re.DOTALL | re.IGNORECASE)
-        clean_reply = re.sub(r"<agent>.*?</agent>", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+        agent_commands = []
+        agent_controls = []
+        agent_errors = []
+        for match in re.finditer(r"<agent\b([^>]*)>(.*?)</agent\s*>", reply, re.DOTALL | re.IGNORECASE):
+            attributes, instruction = match.groups()
+            if not attributes.strip():
+                agent_commands.append(instruction.strip())
+                continue
+            values = {name: value for name, _, value in re.findall(r"(\w+)\s*=\s*([\"'])(.*?)\2", attributes)}
+            try:
+                agent_controls.append(AgentControl.model_validate({**values, "instruction": instruction.strip()}))
+            except ValidationError as exc:
+                agent_errors.append(f"Invalid task control: {exc}")
+        clean_reply = re.sub(r"<agent\b[^>]*>.*?(?:</agent\s*>|$)", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+        memory_contents = re.findall(r"<memory>(.*?)</memory>", clean_reply, re.DOTALL)
+        clean_reply = re.sub(r"<memory>.*?</memory>", "", clean_reply, flags=re.DOTALL).strip()
 
         target_match = re.findall(r"<target:\s*(.+?)>", clean_reply, re.DOTALL)
         target = target_match[-1].strip() if target_match else None
@@ -330,6 +383,8 @@ class Muika:
             god_mode=god_mode,
             heart_cot=heart_cot or None,
             do_nothing=do_nothing,
+            agent_controls=agent_controls,
+            agent_errors=agent_errors,
         )
 
     def _arm_timeout(self, seconds: float) -> None:
@@ -404,90 +459,67 @@ class Muika:
         injected_preferences: list[MemoryRecord],
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
-        max_inner_loops = 4
-        silent_turn = False
-        for loop_idx in range(max_inner_loops):
-            logger.debug(
-                f"[Brain] turn {loop_idx + 1}/{max_inner_loops} " f"| history_len={len(self.memory.recent_turns)}"
+        persona_task = self.agent_tasks.persona_task() if self._god_mode else None
+        with tool_context(
+            self.state,
+            self.executor,
+            task_id=persona_task.id if persona_task else None,
+            file_versions=persona_task.file_versions if persona_task else None,
+            execute_tool=self.agent_tasks.execute_persona_call if persona_task else None,
+        ) as context:
+            reply = await self.brain.generate_reply(
+                event=event,
+                state=self.state,
+                memory=self.memory,
+                injected_preferences=injected_preferences or None,
+                adapters=self.current_adapters,
+                god_mode=self._god_mode,
+                task_context=self.agent_tasks.describe(),
             )
-            with tool_context(self.state, self.executor) as context:
-                reply = await self.brain.generate_reply(
-                    event=event,
-                    state=self.state,
-                    memory=self.memory,
-                    injected_preferences=injected_preferences or None,
-                    adapters=self.current_adapters,
-                    god_mode=self._god_mode,
-                )
-                resources = context.resources
-
-            # 发送前只负责提取用户可见文本与路由目标，标签处理统一下移到发送之后
-            parsed = self._parse_reply_tags(reply)
-
-            # 模型选择沉默（<do_nothing>）：不发消息、不写 turns、跳过 god-mode 级联
-            # 与 Agent 执行；若同时携带 <memory> 标签则仍静默归档。
-            if parsed.do_nothing:
-                silent_turn = True
-                logger.info(f"[Loop] Muika chose silence (<do_nothing>) turn {loop_idx + 1}.")
-                if parsed.memory_contents:
-                    for content in parsed.memory_contents:
-                        await self.butler_agent.classify_and_store_memory(content, self.state)
-                break
-
-            # 检测 god mode 开关：开启后本回合内容照常处理，随后通知 LLM 并重跑
-            god_mode_just_enabled = parsed.god_mode and not self._god_mode
-            if god_mode_just_enabled:
-                logger.info("[Brain] God mode enabled by Muika.")
-                self._god_mode = True
-
-            if parsed.agent_commands:
-                logger.info(f"[Brain] intercepted {len(parsed.agent_commands)} agent command(s)")
-            if parsed.target:
-                logger.info(f"[Loop] Routing reply to target={parsed.target!r}")
-            if parsed.timeout is not None:
-                logger.info(f"[Brain] arming reply timeout of {parsed.timeout:.0f}s")
-                self._arm_timeout(parsed.timeout)
+            resources = context.resources
+        parsed = self._parse_reply_tags(reply)
+        silent_turn = parsed.do_nothing
+        if not silent_turn:
             if parsed.clean_reply:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
                 await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
-
             self.memory.add_context("muika", reply, resources=resources)
-
-            if god_mode_just_enabled:
-                self.memory.add_context("agent", "God mode enabled.")
-
-            # 记忆归档与 Agent 命令执行统一在消息发出之后进行
-            if parsed.memory_contents:
-                logger.info(f"[Brain] intercepted {len(parsed.memory_contents)} memory tag(s)")
-                for content in parsed.memory_contents:
-                    await self.butler_agent.classify_and_store_memory(content, self.state)
-
-            if not parsed.agent_commands and not god_mode_just_enabled:
-                logger.debug("[Brain] no agent commands, turn complete.")
-                break
-
-            any_observation = False
-            for cmd in parsed.agent_commands:
-                logger.info(f"[Agent <-] {cmd!r}")
-                agent_report, cmd_resources = await self.butler_agent.execute_command(cmd, self.state, self.executor)
-                if not agent_report:
-                    logger.debug(f"[Loop] Agent silent op complete -- no report injected for: {cmd[:60]!r}")
-                    continue
-                logger.info(f"[Agent ->] {agent_report!r}")
-                self.memory.add_context(
-                    content=f"[Agent reports] {cmd}\n{agent_report}",
-                    role="agent",
-                    resources=cmd_resources,
+            if parsed.timeout is not None:
+                self._arm_timeout(parsed.timeout)
+        for content in parsed.memory_contents:
+            await self.butler_agent.classify_and_store_memory(content, self.state)
+        if not silent_turn:
+            for control in parsed.agent_controls:
+                try:
+                    if control.action == "complete":
+                        await self.agent_tasks.complete_handoff(control.task_id, control.instruction)
+                        self._god_mode = False
+                    else:
+                        await self.agent_tasks.update(
+                            control.task_id, control.instruction, cancel=control.action == "cancel"
+                        )
+                        if control.action == "continue" and self._god_mode:
+                            self._god_mode = False
+                            await self.agent_tasks.release_persona()
+                except (KeyError, ValueError) as exc:
+                    parsed.agent_errors.append(f"Task control failed: {exc}")
+            for command in parsed.agent_commands:
+                if self._god_mode:
+                    self._god_mode = False
+                    await self.agent_tasks.release_persona()
+                original = (
+                    event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
                 )
-                any_observation = True
-
-            if not any_observation and not god_mode_just_enabled:
-                logger.debug("[Brain] All agent commands were silent -- turn complete.")
-                break
-        else:
-            logger.warning(
-                f"[Brain] reached max inner loops ({max_inner_loops}) without completing -- possible agent loop."
-            )
+                task = await self.agent_tasks.submit(command, original)
+                self.memory.add_context("agent", f"Task {task.id} queued. Follow this task for related updates.")
+            if parsed.god_mode and not self._god_mode and not self._god_mode_pending:
+                self._god_mode_pending = True
+                self.start_background_task(self._finish_agent_handoff())
+            for error in parsed.agent_errors:
+                self.memory.add_context("agent", error)
+                logger.warning(f"[AgentTask] {error}")
+                if not isinstance(event, AgentTaskEvent) or event.task_id != "control-error":
+                    await self.create_event(AgentTaskEvent("control-error", 0, "failed", error))
 
         # 主动发言（孤独驱动）后的情感释放
         # 说出来会好一点，但孤独本身不会因为说了一句话就消失
@@ -515,12 +547,20 @@ class Muika:
         if not task.cancelled() and (error := task.exception()) is not None:
             logger.error(f"[Loop] Background task failed: {error}")
 
+    async def _finish_agent_handoff(self) -> None:
+        snapshot = await self.agent_tasks.handoff()
+        if not self._god_mode_pending:
+            await self.agent_tasks.release_persona()
+            return
+        await self.create_event(AgentHandoffEvent(snapshot))
+
     def start(self) -> None:
         """启动主循环和定期自省任务。"""
         if self.is_alive:
             return
         logger.info("Muika is waking up...")
         self.is_alive = True
+        self.start_background_task(self.agent_tasks.run())
         self.start_background_task(self.loop())
         self._reflection_task = self.start_background_task(self.reflection.run_daily())
 
@@ -528,11 +568,13 @@ class Muika:
         """取消并等待所有核心任务结束。"""
         logger.info("Muika is going to sleep.")
         self.is_alive = False
+        await self.agent_tasks.close()
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        await get_process_manager().close()
         self._timeout_task = None
         self._reflection_task = None
         self._summary_task = None
@@ -612,6 +654,8 @@ class Muika:
         self.state.last_proactive_at = None
         self._cancel_timeout()
         self._god_mode = False
+        self._god_mode_pending = False
+        await self.agent_tasks.release_persona()
 
         self.memory.new_session()
         self._summary_retry_at = 0.0

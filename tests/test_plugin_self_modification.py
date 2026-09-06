@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -227,6 +228,7 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fak
         response=ModelCompletions(text='<agent_result status="completed">done</agent_result>')
     )
     agent = ButlerAgent.__new__(ButlerAgent)
+    agent.action_lock = asyncio.Lock()
     agent.model = fake_model
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""

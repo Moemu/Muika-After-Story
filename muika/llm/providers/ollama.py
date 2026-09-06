@@ -1,4 +1,7 @@
-from typing import Any, AsyncGenerator, List, Literal, Optional, Union, overload
+import json
+from collections.abc import Sequence
+from typing import Any, AsyncGenerator, Literal, Union, overload
+from uuid import uuid4
 
 import ollama
 from ollama import ResponseError
@@ -16,8 +19,9 @@ from .. import (
     register,
 )
 from .._retry import RequestRetry
+from .._schema import ModelMessage, ToolCall
 from ..utils.images import get_file_base64
-from ..utils.tools import function_call_handler
+from ..utils.protocol import json_arguments, stop_reason
 
 
 @register("ollama")
@@ -85,126 +89,100 @@ class Ollama(BaseLLM):
 
         return messages
 
-    async def _ask_sync(
-        self,
-        messages: list,
-        tools: List[dict[str, Any]],
-        response_format: Optional[dict[str, Any]],
-        total_usage: Usage | None = None,
-    ) -> ModelCompletions:
-        if total_usage is None:
-            total_usage = Usage()
-        completions = ModelCompletions()
-
-        try:
-
-            async def send_request():
-                return await self.client.chat(
-                    model=self.model,
-                    messages=messages,
-                    tools=tools,
-                    stream=False,
-                    format=response_format,
-                    options={
-                        "temperature": self.temperature,
-                        "top_k": self.top_k,
-                        "top_p": self.top_p,
-                        "repeat_penalty": self.repeat_penalty,
-                        "presence_penalty": self.presence_penalty,
-                        "frequency_penalty": self.frequency_penalty,
-                    },
+    def _conversation_messages(self, request: ModelRequest, conversation: Sequence[ModelMessage]) -> list:
+        messages = self._build_messages(request)
+        for item in conversation:
+            if item.role == "user" and item.resources:
+                messages.append(
+                    self.__build_multi_messages(
+                        ModelRequest(item.content, resources=[r.to_resource() for r in item.resources])
+                    )
                 )
+                continue
+            message: dict = {"role": item.role, "content": item.content}
+            if item.reasoning:
+                message["thinking"] = item.reasoning
+            if item.tool_calls:
+                message["tool_calls"] = [
+                    {"function": {"name": call.name, "arguments": json.loads(call.arguments)}}
+                    for call in item.tool_calls
+                ]
+            if item.role == "tool":
+                message["tool_name"] = item.name
+            messages.append(message)
+        return messages
 
-            response: Any = await RequestRetry(self.config).run(send_request)
-
-            tool_calls = response.message.tool_calls
-
-            if not tool_calls:
-                completions.text = response.message.content or "(警告：模型无返回)"
-                return completions
-
-            for tool in tool_calls:
-                function_name = tool.function.name
-                function_args = tool.function.arguments
-
-                function_return = await function_call_handler(function_name, dict(function_args))
-
-                messages.append(response.message)
-                messages.append({"role": "tool", "content": str(function_return), "name": tool.function.name})
-                return await self._ask_sync(messages, tools, response_format)
-
-            completions.text = "模型调用错误：未知错误"
-            completions.succeed = False
-            return completions
-
-        except ollama.ResponseError as e:
-            error_info = f"模型调用错误: {e.error}"
-            logger.error(error_info)
-            completions.succeed = False
-            completions.text = error_info
-            return completions
-
-    async def _ask_stream(
-        self,
-        messages: list,
-        tools: List[dict[str, Any]],
-        response_format: Optional[dict[str, Any]],
-        total_usage: Usage | None = None,
+    async def request_step(
+        self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        if total_usage is None:
-            total_usage = Usage()
-        try:
+        response_format = None
+        if request.format == "json":
+            response_format = (
+                request.json_schema.json_schema()
+                if isinstance(request.json_schema, TypeAdapter)
+                else request.json_schema.model_json_schema() if request.json_schema else "json"
+            )
 
-            async def send_request():
-                return await self.client.chat(
-                    model=self.model,
-                    messages=messages,
-                    tools=tools,
-                    stream=True,
-                    format=response_format,
-                    options={
-                        "temperature": self.temperature,
-                        "top_k": self.top_k,
-                        "top_p": self.top_p,
-                        "repeat_penalty": self.repeat_penalty,
-                        "presence_penalty": self.presence_penalty,
-                        "frequency_penalty": self.frequency_penalty,
-                    },
+        async def send_request():
+            return await self.client.chat(
+                model=self.model,
+                messages=self._conversation_messages(request, messages),
+                tools=request.tools,
+                stream=stream,
+                format=response_format,
+                options={
+                    "temperature": self.temperature,
+                    "top_p": self.top_p,
+                    "top_k": self.top_k,
+                    "repeat_penalty": self.repeat_penalty,
+                    "presence_penalty": self.presence_penalty,
+                    "frequency_penalty": self.frequency_penalty,
+                },
+            )
+
+        async def responses():
+            if stream:
+                async for chunk in RequestRetry[Any](self.config).stream(send_request):
+                    yield chunk
+            else:
+                yield await RequestRetry[Any](self.config).run(send_request)
+
+        message = ModelMessage(role="assistant")
+        calls: list[ToolCall] = []
+        usage = Usage()
+        thinking = False
+        finish = None
+        async for response in responses():
+            raw = response.message.model_dump(exclude_none=True)
+            text = raw.get("content", "")
+            thought = raw.get("thinking", "")
+            message.content += text
+            message.reasoning += thought
+            for call in raw.get("tool_calls", []):
+                function = call["function"]
+                calls.append(
+                    ToolCall(
+                        id=f"call_{uuid4().hex}",
+                        name=function["name"],
+                        arguments=json_arguments(function["arguments"]),
+                    )
                 )
-
-            async for chunk in RequestRetry[Any](self.config).stream(send_request):
-                stream_completions = ModelStreamCompletions()
-
-                tool_calls = chunk.message.tool_calls
-
-                if chunk.message.content:
-                    stream_completions.chunk = chunk.message.content
-                    yield stream_completions
-                    continue
-
-                if not tool_calls:
-                    continue
-
-                for tool in tool_calls:  # type: ignore
-                    function_name = tool.function.name
-                    function_args = tool.function.arguments
-
-                    function_return = await function_call_handler(function_name, dict(function_args))
-
-                    messages.append(chunk.message)  # type: ignore
-                    messages.append({"role": "tool", "content": str(function_return), "name": tool.function.name})
-
-                    async for content in self._ask_stream(messages, tools, response_format):
-                        yield content
-
-        except ollama.ResponseError as e:
-            stream_completions = ModelStreamCompletions()
-            error_info = f"模型调用错误: {e.error}"
-            logger.error(error_info)
-            stream_completions.chunk = error_info
-            stream_completions.succeed = False
-            yield stream_completions
-            return
+            if thought:
+                yield ModelStreamCompletions(chunk=("" if thinking else "<think>") + thought)
+                thinking = True
+            if text:
+                yield ModelStreamCompletions(chunk=("</think>" if thinking else "") + text)
+                thinking = False
+            if response.done:
+                finish = response.done_reason
+                usage.input_tokens = response.prompt_eval_count or 0
+                usage.output_tokens = response.eval_count or 0
+        if thinking:
+            yield ModelStreamCompletions(chunk="</think>")
+        message.tool_calls = calls
+        yield ModelStreamCompletions(
+            message=message, usage=usage, stop_reason=stop_reason(finish, has_tools=bool(message.tool_calls))
+        )
 
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
@@ -217,20 +195,4 @@ class Ollama(BaseLLM):
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
     ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        tools = request.tools if request.tools else []
-        messages = self._build_messages(request)
-        if request.format == "json" and request.json_schema:
-            if isinstance(request.json_schema, TypeAdapter):
-                format = request.json_schema.json_schema()
-            else:
-                format = request.json_schema.model_json_schema()
-        else:
-            format = None
-
-        if stream:
-            return self._ask_stream(messages, tools, format)
-
-        return await self._complete_response(
-            lambda: self._ask_sync(messages, tools, format),
-            lambda: self._ask_stream(messages, tools, format),
-        )
+        return await self.run_conversation(request, stream=stream)

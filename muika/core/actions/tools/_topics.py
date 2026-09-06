@@ -21,6 +21,7 @@ from muika.core.self_mod import SelfModError
 from muika.core.self_mod.manager import SelfModAction, get_self_mod_manager
 from muika.core.self_mod.validators import validate_topics
 from muika.core.topic_manager import BUILTIN_TOPICS_PATH, TOPICS_PATH, get_topic_manager
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -133,9 +134,9 @@ def _atomic_write_topics(content: str) -> None:
 def _disabled_or_reason_missing(reason: str) -> Optional[str]:
     """公共门控检查，返回错误提示或 None。"""
     if not mas_config.enable_self_modification:
-        return _DISABLED_MSG
+        return ToolError(_DISABLED_MSG)
     if not reason or not reason.strip():
-        return "A non-empty 'reason' is required: every change to your topic library is journaled."
+        return ToolError("A non-empty 'reason' is required: every change to your topic library is journaled.")
     return None
 
 
@@ -157,10 +158,10 @@ async def topic_list(category: str = "", keyword: str = "", limit: int = 30) -> 
     try:
         entries = _parse_topics(_read_topics_text())
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
     except Exception as e:
         logger.error(f"[Topics] Failed to read topic library: {e}")
-        return f"Failed to read topic library: {e}"
+        return ToolError(f"Failed to read topic library: {e}")
 
     kw = keyword.strip().lower()
     lines = []
@@ -210,34 +211,38 @@ async def topic_add(
 
     topic_id = id.strip()
     if not _ID_RE.match(topic_id):
-        return (
+        return ToolError(
             f"Invalid id {topic_id!r}: must start with a lowercase letter, then only letters/digits/'_' (1-64 chars)."
         )
     if topic_id.lower() in _YAML_RESERVED:
-        return f"Invalid id {topic_id!r}: this word has a special meaning in YAML and cannot be used as a topic id."
+        return ToolError(
+            f"Invalid id {topic_id!r}: this word has a special meaning in YAML and cannot be used as a topic id."
+        )
     if not _NAME_RE.match(category.strip()):
-        return f"Invalid category {category!r}: use lowercase letters and '_'."
+        return ToolError(f"Invalid category {category!r}: use lowercase letters and '_'.")
     if not concept.strip():
-        return "'concept' must not be empty."
+        return ToolError("'concept' must not be empty.")
     if not 1 <= int(cooldown_days) <= 365:
-        return "cooldown_days must be between 1 and 365."
+        return ToolError("cooldown_days must be between 1 and 365.")
     try:
         tag_list = _parse_tags(tags)
     except SelfModError as e:
-        return str(e)
+        return ToolError(str(e))
 
     async with _TOPICS_LOCK:
         try:
             text = _read_topics_text()
             entries = _parse_topics(text)
         except SelfModError as e:
-            return str(e)
+            return ToolError(str(e))
         except Exception as e:
             logger.error(f"[Topics] Failed to read topic library: {e}")
-            return f"Failed to read topic library: {e}"
+            return ToolError(f"Failed to read topic library: {e}")
 
         if any(entry.get("id") == topic_id for entry in entries):
-            return f"Topic id {topic_id!r} already exists. Choose another id, or use topic_update to change it."
+            return ToolError(
+                f"Topic id {topic_id!r} already exists. Choose another id, or use topic_update to change it."
+            )
 
         block = _format_entry(topic_id, category.strip(), concept.strip(), tag_list, cooldown_days)
         new_text = text.rstrip("\n") + "\n\n" + block
@@ -245,7 +250,7 @@ async def topic_add(
         try:
             await _apply_topics_change(new_text, reason.strip(), "topic_add")
         except SelfModError as e:
-            return f"The new topic was rejected: {e}"
+            return ToolError(f"The new topic was rejected: {e}")
 
     logger.info(f"[Topics] Added topic {topic_id!r}")
     return (
@@ -285,14 +290,14 @@ async def topic_update(
             text = _read_topics_text()
             entries = _parse_topics(text)
         except SelfModError as e:
-            return str(e)
+            return ToolError(str(e))
         except Exception as e:
             logger.error(f"[Topics] Failed to read topic library: {e}")
-            return f"Failed to read topic library: {e}"
+            return ToolError(f"Failed to read topic library: {e}")
 
         current = next((e for e in entries if e.get("id") == topic_id), None)
         if current is None:
-            return f"Topic {topic_id!r} not found. Use topic_list to see available ids."
+            return ToolError(f"Topic {topic_id!r} not found. Use topic_list to see available ids.")
 
         new_concept = concept.strip() or str(current.get("concept", ""))
         new_category = (category.strip() or str(current.get("category", "misc"))).lower()
@@ -300,18 +305,18 @@ async def topic_update(
         try:
             new_tags = _parse_tags(tags) if tags.strip() else list(current.get("tags") or [])
         except SelfModError as e:
-            return str(e)
+            return ToolError(str(e))
 
         if not new_concept:
-            return "'concept' cannot end up empty."
+            return ToolError("'concept' cannot end up empty.")
         if not _NAME_RE.match(new_category):
-            return f"Invalid category {new_category!r}: use lowercase letters and '_'."
+            return ToolError(f"Invalid category {new_category!r}: use lowercase letters and '_'.")
         if not 1 <= int(new_cooldown) <= 365:
-            return "cooldown_days must be between 1 and 365."
+            return ToolError("cooldown_days must be between 1 and 365.")
 
         spans_dict = dict((tid, (start, end)) for tid, start, end in _entry_spans(text))
         if topic_id not in spans_dict:
-            return _SPAN_LOOKUP_ERROR.format(id=topic_id)
+            return ToolError(_SPAN_LOOKUP_ERROR.format(id=topic_id))
         start, end = spans_dict[topic_id]
         block = _format_entry(topic_id, new_category, new_concept, new_tags, new_cooldown)
         separator = "\n" if end < len(text) else ""
@@ -320,7 +325,7 @@ async def topic_update(
         try:
             await _apply_topics_change(new_text, reason.strip(), "topic_update")
         except SelfModError as e:
-            return f"The change was rejected: {e}"
+            return ToolError(f"The change was rejected: {e}")
 
     logger.info(f"[Topics] Updated topic {topic_id!r}")
     return f"Topic {topic_id!r} updated. The new version is already active.\n{block.rstrip()}"
@@ -346,24 +351,24 @@ async def topic_delete(id: str, reason: str = "") -> str:
             text = _read_topics_text()
             entries = _parse_topics(text)
         except SelfModError as e:
-            return str(e)
+            return ToolError(str(e))
         except Exception as e:
             logger.error(f"[Topics] Failed to read topic library: {e}")
-            return f"Failed to read topic library: {e}"
+            return ToolError(f"Failed to read topic library: {e}")
 
         if not any(e.get("id") == topic_id for e in entries):
-            return f"Topic {topic_id!r} not found. Use topic_list to see available ids."
+            return ToolError(f"Topic {topic_id!r} not found. Use topic_list to see available ids.")
 
         spans_dict = dict((tid, (start, end)) for tid, start, end in _entry_spans(text))
         if topic_id not in spans_dict:
-            return _SPAN_LOOKUP_ERROR.format(id=topic_id)
+            return ToolError(_SPAN_LOOKUP_ERROR.format(id=topic_id))
         start, end = spans_dict[topic_id]
         new_text = (text[:start] + text[end:]).rstrip("\n") + "\n"
 
         try:
             await _apply_topics_change(new_text, reason.strip(), "topic_delete")
         except SelfModError as e:
-            return f"The deletion was rejected: {e}"
+            return ToolError(f"The deletion was rejected: {e}")
 
     logger.info(f"[Topics] Deleted topic {topic_id!r}")
     return f"Topic {topic_id!r} removed from the library ({len(entries) - 1} topics remaining)."
