@@ -28,6 +28,11 @@ class WindowsJob:
     """在关闭时终止本次执行的所有 Windows 子进程。"""
 
     def __init__(self, pid: int) -> None:
+        """将指定进程加入关闭时自动终止成员的 Windows 作业。
+
+        :param pid: 要加入作业的进程 ID。
+        :raises RuntimeError: 当前平台不是 Windows。
+        """
         if sys.platform != "win32":
             raise RuntimeError("Windows jobs are unavailable on this platform")
         self.handle = win32job.CreateJobObject(None, "")
@@ -41,6 +46,7 @@ class WindowsJob:
             process.Close()
 
     def close(self) -> None:
+        """关闭作业句柄并终止作业中的进程。"""
         self.handle.Close()
 
 
@@ -73,10 +79,12 @@ class ProcessManager:
     """拥有工具启动的进程，等待操作不会终止仍在运行的工作。"""
 
     def __init__(self) -> None:
+        """初始化当前运行期间的进程注册表。"""
         self._processes: dict[str, RunningProcess] = {}
 
     @staticmethod
     def _save_record(running: RunningProcess) -> None:
+        """将进程归属、状态和退出码原子写入执行记录。"""
         temporary = running.directory / "record.tmp"
         with temporary.open("w", encoding="utf-8") as file:
             json.dump(
@@ -101,7 +109,17 @@ class ProcessManager:
         stderr_offset: int = 0,
         max_bytes: int = 12000,
     ) -> dict[str, object]:
-        """读取持久执行证据，不恢复旧进程的控制权。"""
+        """读取保存的执行状态和输出，不恢复旧进程的控制权。
+
+        :param process_id: 执行记录的唯一标识。
+        :param owner: 请求任务的标识；为 None 时不检查归属。
+        :param stdout_offset: 标准输出的起始字节偏移。
+        :param stderr_offset: 标准错误的起始字节偏移。
+        :param max_bytes: 每个输出流的分页字节数。
+        :return: 执行记录、可控状态、输出内容和续读位置。
+        :raises ValueError: 标识、归属或分页参数无效。
+        :raises OSError: 无法读取记录或输出文件。
+        """
         if len(process_id) != 32 or any(char not in "0123456789abcdef" for char in process_id):
             raise ValueError("Invalid process ID")
         directory = mas_config.data_dir.resolve() / "agent_processes" / process_id
@@ -122,6 +140,16 @@ class ProcessManager:
     async def start(
         self, command: list[str], *, env: dict[str, str], cwd: str, owner: str | None, timeout: float
     ) -> str:
+        """启动子进程，将输出保存到文件并监控执行期限。
+
+        :param command: 可执行文件及其参数，不经过额外的 shell 解析。
+        :param env: 子进程的环境变量。
+        :param cwd: 子进程的工作目录。
+        :param owner: 所属任务的标识，无所属任务时为 None。
+        :param timeout: 执行期限，单位为秒。
+        :return: 本次执行的唯一标识。
+        :raises OSError: 创建输出文件或启动进程失败。
+        """
         process_id = uuid4().hex
         directory = mas_config.data_dir.resolve() / "agent_processes" / process_id
         directory.mkdir(parents=True)
@@ -149,6 +177,7 @@ class ProcessManager:
         return process_id
 
     async def _monitor(self, running: RunningProcess, timeout: float) -> None:
+        """等待进程退出或超时，清理进程树并保存最终状态。"""
         try:
             await asyncio.wait_for(running.process.wait(), timeout)
             if running.status == "running":
@@ -160,6 +189,7 @@ class ProcessManager:
             self._save_record(running)
 
     async def _terminate_tree(self, running: RunningProcess) -> None:
+        """终止受管进程树并等待主进程退出。"""
         if running.job is not None:
             running.job.close()
             running.job = None
@@ -173,6 +203,11 @@ class ProcessManager:
         await running.process.wait()
 
     def _get(self, process_id: str, owner: str | None) -> RunningProcess:
+        """获取当前运行期间的进程并检查任务归属。
+
+        :param owner: 请求任务的标识；为 None 时不检查归属。
+        :raises ValueError: 进程不存在或属于其他任务。
+        """
         running = self._processes.get(process_id)
         if running is None:
             raise ValueError("Unknown process ID in this runtime. Inspect saved outputs; do not relaunch blindly.")
@@ -190,6 +225,18 @@ class ProcessManager:
         stderr_offset: int = 0,
         max_bytes: int = 12000,
     ) -> ProcessResult:
+        """有限等待进程并读取一页输出，等待结束不会终止进程。
+
+        :param process_id: 当前运行期间的执行标识。
+        :param owner: 请求任务的标识；为 None 时不检查归属。
+        :param seconds: 等待秒数，最多 30 秒；非正数表示立即读取。
+        :param stdout_offset: 标准输出的起始字节偏移。
+        :param stderr_offset: 标准错误的起始字节偏移。
+        :param max_bytes: 每个输出流的分页字节数。
+        :return: 当前状态、退出码、输出内容和续读位置。
+        :raises ValueError: 进程不存在、归属不符或分页参数无效。
+        :raises OSError: 无法读取输出文件。
+        """
         running = self._get(process_id, owner)
         if running.monitor and not running.monitor.done() and seconds > 0:
             await asyncio.wait({running.monitor}, timeout=min(seconds, 30.0))
@@ -210,6 +257,15 @@ class ProcessManager:
 
     @staticmethod
     def _read(path: Path, offset: int, limit: int) -> tuple[str, int, bool]:
+        """按字节分页读取 UTF-8 输出，保留跨页字符的完整性。
+
+        :param path: 输出文件路径。
+        :param offset: 起始字节偏移。
+        :param limit: 分页字节数，上限为 100000；必要时补齐首个字符。
+        :return: 文本、下一字节偏移和是否仍有未读内容。
+        :raises ValueError: 偏移为负数或分页字节数小于 1。
+        :raises OSError: 无法读取输出文件。
+        """
         if offset < 0 or limit < 1:
             raise ValueError("Output offset must be nonnegative and max_bytes must be positive")
         with path.open("rb") as file:
@@ -226,6 +282,11 @@ class ProcessManager:
         return text, offset + len(data) - len(pending), bool(following or pending)
 
     async def stop(self, process_id: str, *, owner: str | None) -> ProcessResult:
+        """停止指定进程树，等待清理完成并返回状态和首屏输出。
+
+        :param owner: 请求任务的标识；为 None 时不检查归属。
+        :raises ValueError: 进程不存在或属于其他任务。
+        """
         running = self._get(process_id, owner)
         if running.status == "running":
             running.status = "stopped"
@@ -235,11 +296,13 @@ class ProcessManager:
         return await self.wait(process_id, owner=owner, seconds=0)
 
     async def stop_owner(self, owner: str) -> None:
+        """停止指定任务所属的所有运行中进程。"""
         for process_id, running in list(self._processes.items()):
             if running.owner == owner and running.status == "running":
                 await self.stop(process_id, owner=owner)
 
     def active_for(self, owner: str) -> list[str]:
+        """返回指定任务仍在运行或尚未完成退出清理的执行标识。"""
         return [
             key
             for key, item in self._processes.items()
@@ -248,6 +311,7 @@ class ProcessManager:
         ]
 
     async def close(self) -> None:
+        """停止所有受管进程，等待清理完成并清空注册表。"""
         for process_id in list(self._processes):
             await self.stop(process_id, owner=None)
         self._processes.clear()
@@ -257,5 +321,5 @@ _process_manager = ProcessManager()
 
 
 def get_process_manager() -> ProcessManager:
-    """返回当前核心进程的执行记录。"""
+    """返回当前核心进程共享的子进程管理器。"""
     return _process_manager

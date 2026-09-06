@@ -31,8 +31,9 @@ class FunctionCallValidationError(ValueError):
 class Caller:
     def __init__(self, description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False):
         self._name: str = ""
-        self.read_only = read_only
         """函数名称"""
+        self.read_only = read_only
+        """函数是否只读取数据而不修改外部状态"""
         self._description: str = description
         """函数描述"""
         self._parameters: dict[str, Parameter] = {}
