@@ -17,9 +17,9 @@ from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
 from muika.utils.utils import parse_duration
 
+from .agent.agent import Agent
+from .agent.tasks import AgentTasks
 from .brain import MuikaBrain
-from .butler.agent import ButlerAgent
-from .butler.tasks import AgentTasks
 from .constants import (
     AUTO_SUMMARY_INTERVAL,
     AUTO_SUMMARY_MIN_TURNS,
@@ -98,12 +98,12 @@ class Muika:
         self.current_adapters: list[AdapterInfo] = []
 
         self.brain = MuikaBrain()
-        self.butler_agent = ButlerAgent()
-        self.agent_tasks = AgentTasks(self.butler_agent, self.state, self.executor, self.event_queue)
+        self.agent = Agent()
+        self.agent_tasks = AgentTasks(self.agent, self.state, self.executor, self.event_queue)
         self.topic_manager = TopicManager()
         self.digest_agent = DigestAgent(self.topic_manager)
         self.reflection = ReflectionAgent(
-            butler_agent=self.butler_agent,
+            agent=self.agent,
             memory=self.memory,
             state=self.state,
             topic_manager=self.topic_manager,
@@ -327,8 +327,8 @@ class Muika:
         支持以下标签（标签的剥离顺序保证 heart 内容不误解析为其他标签）：
         - ``<heart>...</heart>``：私有内心独白，仅从用户可见文本剥离，不入 memory。
         - ``<do_nothing>``：本轮沉默，不发消息。
-        - ``<memory>...</memory>``：待归档记忆内容，交给 Butler 分类存储。
-        - ``<agent>...</agent>``：待执行的 Butler 命令，发送后执行。
+        - ``<memory>...</memory>``：待归档记忆内容，交给 Agent 分类存储。
+        - ``<agent>...</agent>``：待执行的 Agent 命令，发送后执行。
         - ``<target: name>``：目标路由目标，随消息一起发送。
         - ``<timeout: 10min>``：用户回复等待超时，解析为秒后由 Loop 计时。
         - ``<enable_god_mode>``：开启上帝模式，解锁本会话的直接工具调用。
@@ -441,14 +441,14 @@ class Muika:
         logger.info(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
     async def _fetch_preferences(self, event: Event) -> list[MemoryRecord]:
-        """通过 Butler 检索当前用户消息相关的 PreferenceProfile 条目。"""
+        """通过 Agent 检索当前用户消息相关的 PreferenceProfile 条目。"""
         if event.type != "user_message":
             return []
         all_prefs = self.memory.get_preference_records()
         if not all_prefs:
-            logger.debug("[Loop] Butler preprocess skipped -- no PREFERENCE records in memory.")
+            logger.debug("[Loop] Agent preprocess skipped -- no PREFERENCE records in memory.")
             return []
-        return await self.butler_agent.fetch_relevant_preferences(
+        return await self.agent.fetch_relevant_preferences(
             user_input=event.payload.message.message,
             preferences=all_prefs,
         )
@@ -487,7 +487,7 @@ class Muika:
             if parsed.timeout is not None:
                 self._arm_timeout(parsed.timeout)
         for content in parsed.memory_contents:
-            await self.butler_agent.classify_and_store_memory(content, self.state)
+            await self.agent.classify_and_store_memory(content, self.state)
         if not silent_turn:
             for control in parsed.agent_controls:
                 try:
@@ -593,7 +593,7 @@ class Muika:
             if time.monotonic() < self._summary_retry_at:
                 return False
             try:
-                summary = await self.butler_agent.summarize_session(turns)
+                summary = await self.agent.summarize_session(turns)
                 await self.memory.update_archive(
                     summary=summary,
                     period_start=self.memory.session.started_at,

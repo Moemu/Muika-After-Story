@@ -138,7 +138,7 @@ class TopicManager:
         self.store.reload()
 
     def enqueue_event(self, topic: EventTopic) -> None:
-        """从外部（如 DigestAgent / 管家）注入动态新闻。"""
+        """从外部（如 DigestAgent / 分身）注入动态新闻。"""
         self._event_queue.append(topic)
 
     async def _get_available_candidates(self) -> dict[str, list[tuple[StaticTopic, float]]]:

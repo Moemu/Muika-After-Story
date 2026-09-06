@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Sequence
 
-from muika.core.butler.task_store import TaskRecord
+from muika.core.agent.task_store import TaskRecord
 from muika.core.events import AgentHandoffEvent, AgentTaskEvent, Event
 from muika.core.loop import Muika
 from muika.core.memory import MemoryManager
@@ -77,7 +77,7 @@ class _TracingExecutor:
         self.trace.add("visible_message", message=message, target=target)
 
 
-class _FixtureButler:
+class _FixtureAgent:
     def __init__(
         self,
         trace: RunTrace,
@@ -117,8 +117,8 @@ class _FixtureButler:
 class _FixtureTasks:
     """Queue deterministic reports through the production task-event boundary."""
 
-    def __init__(self, butler: _FixtureButler, state: MuikaState, events: asyncio.Queue[Event]) -> None:
-        self.butler = butler
+    def __init__(self, agent: _FixtureAgent, state: MuikaState, events: asyncio.Queue[Event]) -> None:
+        self.agent = agent
         self.state = state
         self.events = events
         self.tasks: dict[str, TaskRecord] = {}
@@ -136,7 +136,7 @@ class _FixtureTasks:
         return task
 
     async def _complete(self, task: TaskRecord) -> None:
-        report, _ = await self.butler.execute_command(task.instruction, self.state, None)
+        report, _ = await self.agent.execute_command(task.instruction, self.state, None)
         task.status = "failed" if report.upper().startswith(("FAILED", "ERROR")) else "completed"
         if report:
             await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, report))
@@ -195,7 +195,7 @@ async def run_production_loop(
     repeat_last_agent_report: bool = False,
     fixed_now: datetime | None = None,
 ) -> RunTrace:
-    """Exercise ``Muika._run_brain_pipeline`` with deterministic Butler/Executor fixtures.
+    """Exercise ``Muika._run_brain_pipeline`` with deterministic Agent/Executor fixtures.
 
     No real tool is invoked.  The adapter preserves production ordering: visible text is sent,
     then memory tags and Agent commands are handled, and an Agent report may trigger another
@@ -204,7 +204,7 @@ async def run_production_loop(
     trace = RunTrace(HarnessMode.LOOP)
     engine: Any = Muika.__new__(Muika)
     engine.brain = _TracingBrain(brain, trace, fixed_now)
-    engine.butler_agent = _FixtureButler(
+    engine.agent = _FixtureAgent(
         trace,
         agent_reports,
         repeat_last_report=repeat_last_agent_report,
@@ -217,7 +217,7 @@ async def run_production_loop(
     engine._god_mode_pending = False
     engine._tasks = set()
     engine.event_queue = asyncio.Queue()
-    engine.agent_tasks = _FixtureTasks(engine.butler_agent, state, engine.event_queue)
+    engine.agent_tasks = _FixtureTasks(engine.agent, state, engine.event_queue)
     engine._timeout_task = None
     engine._arm_timeout = lambda seconds: trace.add("timeout", seconds=seconds)
 

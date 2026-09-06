@@ -44,7 +44,7 @@
 
 - [X] Session 生命周期管理: 空闲超时归档、跨 Session Resume 模式
 
-- [X] Muika 第四面墙窗口: Butler 管家 Agent，支持访问&写入硬盘文件；截取当前屏幕
+- [X] Muika 第四面墙窗口: 分身 Agent，支持访问&写入硬盘文件；截取当前屏幕
 
 - [X] Muika 主动对话系统：从 `configs/topics.yml` 抽取话题源或在线访问 RSS 获取筛选后的新闻流。
 
@@ -60,7 +60,7 @@
 
 ## Core Logic🧠
 
-### 大小姐——管家模型
+### 主人格——自分身模型
 
 Muika 的主人格负责对话，行动半身负责工具调用、记忆读写与信息检索。两者共享同一身份。内部标签 `<agent>指令</agent>` 创建后台任务，任务结果通过专用事件返回当前对话。执行期间，Muika 可以继续聊天。
 
@@ -73,11 +73,11 @@ Muika 的主人格负责对话，行动半身负责工具调用、记忆读写�
 ### 事件循环
 
 1. **启动阶段**：加载配置（模型 / MCP 等），初始化 LLM Provider、记忆层与数据库（SQLAlchemy），加载插件和注册工具。开放连接前完成历史记忆加载；首次适配器连接后创建 Session，并投递 `SessionBootstrapEvent`。
-2. **消息进入**：Nonebot2 收到平台消息后封装为 `UserMessageEvent` 投入事件队列；Butler 预处理层对用户输入做语义匹配，从 `PreferenceProfile` 层中筛选出相关偏好条目注入本轮推理。
-3. **核心模型内循环推理**：将系统提示、多层记忆摘要、注入偏好及对话历史拼装为请求，调用 LLM 生成回复；解析出 `<agent>...</agent>` 指令后交由 Butler 执行。
+2. **消息进入**：Nonebot2 收到平台消息后封装为 `UserMessageEvent` 投入事件队列；Agent 预处理层对用户输入做语义匹配，从 `PreferenceProfile` 层中筛选出相关偏好条目注入本轮推理。
+3. **核心模型内循环推理**：将系统提示、多层记忆摘要、注入偏好及对话历史拼装为请求，调用 LLM 生成回复；解析出 `<agent>...</agent>` 指令后交由 Agent 执行。
 4. **行动任务执行**：共享执行层按模型顺序派发每轮全部工具调用，并在动作前后保存检查点。Provider 只负责单次请求和协议转换。纠正与取消在动作边界生效，最终报告区分已完成工作、验证证据和剩余问题。
-5. **记忆沉淀**：记忆分四层持久化至 SQLAlchemy DB：`CORE`（稳定身份事实，每次均注入）、`STATE`（时效性上下文，Resume 时注入最近 3 条）、`PREFERENCE`（长期软偏好，由 Butler 预处理层按需注入）、`ARCHIVE`（Session 历史摘要，按需检索）。
-6. **Session 生命周期**：用户若干小时后无交流后触发 `SessionEndEvent`；Butler 对本次对话生成文字摘要写入 ARCHIVE，随后静默重置 Session（不主动发送消息），等待用户下次发言时以 Resume 模式响应。
+5. **记忆沉淀**：记忆分四层持久化至 SQLAlchemy DB：`CORE`（稳定身份事实，每次均注入）、`STATE`（时效性上下文，Resume 时注入最近 3 条）、`PREFERENCE`（长期软偏好，由 Agent 预处理层按需注入）、`ARCHIVE`（Session 历史摘要，按需检索）。
+6. **Session 生命周期**：用户若干小时后无交流后触发 `SessionEndEvent`；Agent 对本次对话生成文字摘要写入 ARCHIVE，随后静默重置 Session（不主动发送消息），等待用户下次发言时以 Resume 模式响应。
 7. **输出与调度**：最终消息经 Executor 回传至平台；`plan_future_event` 工具可创建单次或重复提醒。调度器与主循环共用事件队列；提醒只保存在内存中，Core 重启后失效。
 
 ## 内部接口迁移
@@ -113,9 +113,14 @@ Bootstrap 在开放连接前等待 `memory.load()`；直接创建 Muika 的调�
 
 插件可以返回 `ToolResult(text=..., is_error=True)`，或兼容字符串的 `ToolError(...)`，明确表示业务失败。普通字符串仍按成功结果处理，框架不根据任意插件文案猜测执行状态。
 
-Brain 和 Butler 每次请求调用 `get_tool_list()`，读取当前函数注册表和 MCP 工具列表。
-插件管理器不再绑定 Butler，也不再调用 `refresh_tools()` 或 `refresh_butler()`。
+Brain 和 Agent 每次请求调用 `get_tool_list()`，读取当前函数注册表和 MCP 工具列表。
+插件管理器通过注册表维护工具，无需刷新 Agent 实例。
 MCP 初始化时获取工具列表，清理时清空；`get_mcp_list()` 现在是同步读取接口。
+
+### 分身命名
+
+分身模块为 `muika.core.agent`，执行类为 `Agent`，核心实例通过 `Muika.agent` 访问。插件使用新类进行依赖注入。
+模型配置键使用 `agent_model`；旧键 `butler_model` 仍可读取，同时设置时优先使用新键。模型配置名是自定义名称，无需改名。
 
 ### 工具依赖注入
 
@@ -182,7 +187,7 @@ master_id="<your_qq_number>"
 enable_adapters = ["nonebot.adapters.onebot.v11"]
 enable_file_write=true
 FS_ALLOWED_PATHS=["C:/Users/Muika/Desktop", "D:/"]
-butler_model=butler
+agent_model=agent
 ```
 
 **configs/models.yml**
@@ -203,7 +208,7 @@ dashscope:
   content_security: false
   enable_thinking: false
 
-butler:
+agent:
   provider: Dashscope
   model_name: qwen-turbo
   default: false
@@ -255,7 +260,7 @@ Bot 启动只检查状态，不等待终端输入。启动器仍会在启动前�
 | 配置项                  | 类型(默认值)                              | 说明                                                         |
 | ----------------------- | ----------------------------------------- | ------------------------------------------------------------ |
 | `master_id`             | `str = SUPERUSERS[0]`                     | 对话目标 ID。目前仅支持一对一对话。                          |
-| `butler_model`          | `Optional[str] = None`                    | 管家 Agent 所用模型的配置名。留空则与核心模型共享 default 配置。 |
+| `agent_model`           | `Optional[str] = None`                    | 分身 Agent 所用模型的配置名。留空则与核心模型共享 default 配置。 |
 | `max_memory_records`    | `int = 100`                               | 单次会话最大记忆记录数(最近的N条对话)                        |
 | `INPUT_TIMEOUT`         | `int = 0`                                 | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用。 |
 | `LOG_LEVEL`             | `str = "INFO"`                            | 日志等级。                                                   |

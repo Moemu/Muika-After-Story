@@ -11,8 +11,8 @@ SESSION_IDLE_TIMEOUT: float = 60.0 * 30  # 会话无交互超时时长（秒，3
 AUTO_SUMMARY_INTERVAL: float = 60.0 * 5  # 自动摘要间隔（秒，5 分钟，无论是否有交互）
 AUTO_SUMMARY_MIN_TURNS: int = 6  # 自动摘要的最少对话轮数
 
-# Butler Agent 参数
-MAX_BUTLER_LOOPS: int = 10  # 管家 Agent 单次命令最大内循环次数
+# Agent Agent 参数
+MAX_AGENT_LOOPS: int = 10  # 分身 Agent 单次命令最大内循环次数
 
 # Digest Agent 参数
 DIGEST_MIN_SCORE: int = 55  # 话题评估最低分，低于该值不进入主动话题队列

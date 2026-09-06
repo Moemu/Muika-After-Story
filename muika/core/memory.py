@@ -24,10 +24,10 @@ class MemoryLayer(str, Enum):
     """RelationshipState：关系状态记忆。时间敏感，可过期。仅 Resume 模式下注入最近 ≤3 条。"""
 
     PREFERENCE = "preference"
-    """PreferenceProfile：长期偏好与事实。不默认注入，由 Butler 预处理层按需检索。"""
+    """PreferenceProfile：长期偏好与事实。不默认注入，由 Agent 预处理层按需检索。"""
 
     ARCHIVE = "archive"
-    """ArchiveMemory：历史 Session 摘要。不默认注入，由管家 Agent 按需提供。"""
+    """ArchiveMemory：历史 Session 摘要。不默认注入，由分身 Agent 按需提供。"""
 
 
 class MemoryCategory(str, Enum):
@@ -384,13 +384,13 @@ class MemoryManager:
         return "\n".join(lines)
 
     def get_preference_records(self) -> list[MemoryRecord]:
-        """返回所有 PreferenceProfile 条目，供 Butler 预处理层检索用。"""
+        """返回所有 PreferenceProfile 条目，供 Agent 预处理层检索用。"""
         prefs = list(self._iter_layer(MemoryLayer.PREFERENCE))
         logger.debug(f"[Memory] get_preference_records: {len(prefs)} PREFERENCE record(s) available.")
         return prefs
 
     def get_archives(self) -> list[ArchiveEntry]:
-        """返回所有历史摘要，供管家 Agent 按需提供。"""
+        """返回所有历史摘要，供分身 Agent 按需提供。"""
         return self.archives
 
     def get_memory_prompt(self) -> str:
@@ -398,7 +398,7 @@ class MemoryManager:
         构建注入 system prompt 的完整记忆上下文：
           - CORE 层：永久注入
           - STATE 层：Resume 模式下注入（最多 3 条）
-          - PREFERENCE: 不注入，由 Butler 按需检索
+          - PREFERENCE: 不注入，由 Agent 按需检索
           - ARCHIVE: 追加最近 3 条的对话摘要
         """
         parts: list[str] = []

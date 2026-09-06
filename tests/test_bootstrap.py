@@ -11,7 +11,7 @@ from muika.ipc.bootstrap import CoreBootstrap
 
 
 async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkeypatch):
-    for name in ("MuikaBrain", "ButlerAgent", "TopicManager", "DigestAgent", "ReflectionAgent"):
+    for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
     server = MagicMock()
     server.start = AsyncMock()
@@ -55,7 +55,7 @@ async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkey
 
 
 async def test_memory_load_failure_prevents_startup(monkeypatch):
-    for name in ("MuikaBrain", "ButlerAgent", "TopicManager", "DigestAgent", "ReflectionAgent"):
+    for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
     server = MagicMock(start=AsyncMock())
     monkeypatch.setattr("muika.ipc.bootstrap.CoreWsServer", MagicMock(return_value=server))

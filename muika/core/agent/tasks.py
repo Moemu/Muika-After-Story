@@ -19,7 +19,7 @@ from muika.plugin.func_call import get_function_calls
 from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
 
-from .agent import ButlerAgent
+from .agent import Agent
 from .report import parse_report
 from .task_store import CallRecord, TaskRecord, TaskStore
 
@@ -35,7 +35,7 @@ class RecoveryReport(BaseModel):
 class AgentTasks:
     """拥有单一执行任务、等待队列和恢复检查点。"""
 
-    def __init__(self, agent: ButlerAgent, state: MuikaState, executor: Executor, events: asyncio.Queue[Event]) -> None:
+    def __init__(self, agent: Agent, state: MuikaState, executor: Executor, events: asyncio.Queue[Event]) -> None:
         self.agent = agent
         self.state = state
         self.executor = executor

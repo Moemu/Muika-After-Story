@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from muika.config import mas_config
-from muika.core.butler._prompts import REFLECTION_PROMPT
-from muika.core.butler.agent import ButlerAgent
+from muika.core.agent._prompts import REFLECTION_PROMPT
+from muika.core.agent.agent import Agent
 from muika.core.executor import Executor
 from muika.core.memory import MemoryCategory, MemoryLayer, MemoryManager
 from muika.core.state import MuikaState
@@ -50,13 +50,13 @@ class ReflectionAgent:
 
     def __init__(
         self,
-        butler_agent: ButlerAgent,
+        agent: Agent,
         memory: MemoryManager,
         state: MuikaState,
         topic_manager: TopicManager,
         executor: Executor,
     ) -> None:
-        self._butler = butler_agent
+        self._agent = agent
         self._memory = memory
         self._state = state
         self._topics = topic_manager
@@ -96,7 +96,7 @@ class ReflectionAgent:
         return "\n".join(lines)
 
     async def _run_reflection(self, notify_user: bool = False) -> None:
-        """自省执行主体：审计快照 → Butler 执行 → 审计对比 → 记忆写入 → 用户通知。"""
+        """自省执行主体：审计快照 → Agent 执行 → 审计对比 → 记忆写入 → 用户通知。"""
         if self._running:
             logger.debug("[Reflection] another reflection already running, skipping")
             return
@@ -124,8 +124,8 @@ class ReflectionAgent:
             before_id = before_records[0].id if before_records else 0
 
         logger.info("[Reflection] starting reflection")
-        report, _ = await self._butler.execute_command(instruction, self._state, self._executor)
-        logger.info(f"[Reflection] Butler report ({len(report)} chars)")
+        report, _ = await self._agent.execute_command(instruction, self._state, self._executor)
+        logger.info(f"[Reflection] Agent report ({len(report)} chars)")
 
         async with get_session() as db_session:
             after_records = await SelfModificationCRUD.list_recent(db_session, limit=1)

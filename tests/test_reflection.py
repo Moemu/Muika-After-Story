@@ -19,8 +19,8 @@ from muika.core.reflection import (
 )
 
 
-class FakeButler:
-    """裸 Butler stub；只实现 ReflectionAgent 所需的 execute_command。"""
+class FakeAgent:
+    """裸 Agent stub；只实现 ReflectionAgent 所需的 execute_command。"""
 
     def __init__(self, report: str = "") -> None:
         self.report = report
@@ -46,12 +46,12 @@ class FakeTopicManager:
 
 def _make_agent(
     memory=None,
-    butler=None,
+    action_agent=None,
     executor=None,
     topic_manager=None,
 ):
     return ReflectionAgent(
-        butler_agent=butler or FakeButler(),
+        agent=action_agent or FakeAgent(),
         memory=memory or MemoryManager(max_turns=3),
         state=MagicMock(),
         topic_manager=topic_manager or FakeTopicManager(),
@@ -123,7 +123,7 @@ async def test_gate_self_mod_disabled(monkeypatch):
         _seed_archive(agent._memory, days_ago=MIN_PENDING_SESSIONS - i)
 
     await agent.maybe_reflect()
-    assert agent._butler.calls == []  # type: ignore[attr-defined]
+    assert agent._agent.calls == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_gate_auto_reflection_disabled(monkeypatch):
         _seed_archive(agent._memory, days_ago=MIN_PENDING_SESSIONS - i)
 
     await agent.maybe_reflect()
-    assert agent._butler.calls == []  # type: ignore[attr-defined]
+    assert agent._agent.calls == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -155,7 +155,7 @@ async def test_gate_cooldown_not_elapsed(monkeypatch):
 
     agent = _make_agent(memory=memory)
     await agent.maybe_reflect()
-    assert agent._butler.calls == []  # type: ignore[attr-defined]
+    assert agent._agent.calls == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -169,7 +169,7 @@ async def test_gate_pending_sessions_too_few(monkeypatch):
         _seed_archive(agent._memory, days_ago=3 - i)
 
     await agent.maybe_reflect()
-    assert agent._butler.calls == []  # type: ignore[attr-defined]
+    assert agent._agent.calls == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -181,13 +181,13 @@ async def test_gate_passes_all(monkeypatch, db_session, session_ctx_factory):
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
 
-    butler = FakeButler(report="I left my persona unchanged.")
-    agent = _make_agent(butler=butler)
+    action_agent = FakeAgent(report="I left my persona unchanged.")
+    agent = _make_agent(action_agent=action_agent)
     for i in range(MIN_PENDING_SESSIONS):
         _seed_archive(agent._memory, days_ago=MIN_PENDING_SESSIONS - i)
 
     await agent._run_reflection(notify_user=False)
-    assert len(butler.calls) == 1
+    assert len(action_agent.calls) == 1
     assert "core:self:self_reflection_last_at" in agent._memory.records
 
 
@@ -200,12 +200,12 @@ async def test_force_reflect_skips_gates(monkeypatch, db_session, session_ctx_fa
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
 
-    butler = FakeButler(report="Forced reflection done.")
+    action_agent = FakeAgent(report="Forced reflection done.")
     executor = FakeExecutor()
-    agent = _make_agent(butler=butler, executor=executor)
+    agent = _make_agent(action_agent=action_agent, executor=executor)
 
     await agent.force_reflect()
-    assert len(butler.calls) == 1
+    assert len(action_agent.calls) == 1
     assert "Forced reflection done." in executor.messages
 
 
@@ -216,9 +216,9 @@ async def test_force_reflect_sends_plain_report(monkeypatch, db_session, session
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
 
-    butler = FakeButler(report="Just some text without the outcome marker.")
+    action_agent = FakeAgent(report="Just some text without the outcome marker.")
     executor = FakeExecutor()
-    agent = _make_agent(butler=butler, executor=executor)
+    agent = _make_agent(action_agent=action_agent, executor=executor)
 
     await agent.force_reflect()
     assert len(executor.messages) == 1
@@ -262,7 +262,7 @@ async def test_run_reflection_not_concurrent(monkeypatch, db_session, session_ct
     factory = lambda: session_ctx_factory(db_session)  # noqa: E731
     monkeypatch.setattr("muika.core.reflection.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
-    butler = FakeButler(report="done")
+    action_agent = FakeAgent(report="done")
 
     import asyncio
 
@@ -270,9 +270,9 @@ async def test_run_reflection_not_concurrent(monkeypatch, db_session, session_ct
         await asyncio.sleep(0.1)
         return ("report", [])
 
-    butler.execute_command = slow_execute  # type: ignore[assignment]
+    action_agent.execute_command = slow_execute  # type: ignore[assignment]
 
-    agent = _make_agent(butler=butler)
+    agent = _make_agent(action_agent=action_agent)
     t1 = asyncio.create_task(agent._run_reflection())
     t2 = asyncio.create_task(agent._run_reflection())
     await asyncio.gather(t1, t2)

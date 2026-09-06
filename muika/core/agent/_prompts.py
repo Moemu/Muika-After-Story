@@ -1,6 +1,6 @@
 # flake8: noqa: E501
 """
-Butler Agent 所使用的所有 LLM 提示词。
+Agent Agent 所使用的所有 LLM 提示词。
 
 执行内联命令（<agent>...</agent> 标签）时的系统提示由模板 ``Muika.agent.jinja2`` 渲染
 （Muika 的行动半身人格；渲染与多级兜底见 :mod:`muika.template.loader`），

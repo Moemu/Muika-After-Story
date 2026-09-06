@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from muika.core.butler.task_store import CallRecord
-from muika.core.butler.tasks import AgentTasks
+from muika.core.agent.task_store import CallRecord
+from muika.core.agent.tasks import AgentTasks
 from muika.core.events import AgentTaskEvent
 from muika.core.state import MuikaState
 from muika.llm import ModelCompletions, ModelRequest
@@ -47,7 +47,7 @@ class StepModel:
 
 @pytest.fixture
 def factory(monkeypatch, db_session, session_ctx_factory):
-    monkeypatch.setattr("muika.core.butler.task_store.get_session", lambda: session_ctx_factory(db_session))
+    monkeypatch.setattr("muika.core.agent.task_store.get_session", lambda: session_ctx_factory(db_session))
     monkeypatch.setattr("muika.plugin.func_call.caller._caller_data", get_function_calls().copy())
 
     def create(script, queue=None):

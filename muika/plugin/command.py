@@ -250,8 +250,8 @@ class CommandDispatcher:
     def __init__(
         self, muika: Muika, command_reply: Callable[[str, Optional[list[dict]]], Coroutine[None, None, None]]
     ) -> None:
+        from muika.core.agent.agent import Agent
         from muika.core.brain import MuikaBrain
-        from muika.core.butler.agent import ButlerAgent
         from muika.core.executor import Executor
         from muika.core.loop import Muika as MuikaCls
         from muika.core.memory import MemoryManager
@@ -269,7 +269,7 @@ class CommandDispatcher:
             MemoryManager: muika.memory,
             Executor: muika.executor,
             TopicManager: muika.topic_manager,
-            ButlerAgent: muika.butler_agent,
+            Agent: muika.agent,
             ReflectionAgent: muika.reflection,
             PluginManager: get_plugin_manager(),
         }

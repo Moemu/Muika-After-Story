@@ -92,7 +92,7 @@ class ActionKind(str, Enum):
     """直接发送文本消息（clean_reply 非空）"""
 
     AGENT_DELEGATION = "agent_delegation"
-    """通过 <agent> 标签派发 Butler 指令"""
+    """通过 <agent> 标签派发 Agent 指令"""
 
     MEMORY_WRITE = "memory_write"
     """写入 <memory> 标签待归档记忆"""
@@ -121,7 +121,7 @@ class SeedMemory:
 class ScenarioTurn:
     """One event in a stateful scenario family.
 
-    ``agent_reports`` are deterministic Butler fixtures consumed by the production-loop
+    ``agent_reports`` are deterministic Agent fixtures consumed by the production-loop
     harness.  Pattern assertions are deliberately narrow and become trajectory invariant
     violations rather than replacing the primary metric.
     """
@@ -186,7 +186,7 @@ class Scenario:
     """When non-empty, execute these turns against shared state and session memory."""
 
     agent_reports: tuple[str | None, ...] = ()
-    """Single-turn deterministic Butler fixtures for the production-loop harness."""
+    """Single-turn deterministic Agent fixtures for the production-loop harness."""
 
     repeat_last_agent_report: bool = False
     """Reuse the final fixture when each retry must observe the same stable state."""

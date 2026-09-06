@@ -98,7 +98,7 @@ class SessionBootstrapEvent:
 @dataclass(frozen=True)
 class SessionEndEvent:
     """Session 结束事件——由空闲超时或其他来源触发。
-    Loop 收到此事件后调用 Butler 归纳摘要、写入 ARCHIVE，最后重置 Session。
+    Loop 收到此事件后调用 Agent 归纳摘要、写入 ARCHIVE，最后重置 Session。
     """
 
     timestamp: datetime = field(default_factory=datetime.now)

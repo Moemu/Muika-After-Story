@@ -220,19 +220,19 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fak
     assert target.read_text(encoding="utf-8") == old_code
     from unittest.mock import MagicMock
 
-    from muika.core.butler.agent import ButlerAgent
+    from muika.core.agent.agent import Agent
     from muika.core.state import MuikaState
     from muika.llm import ModelCompletions
 
     fake_model = fake_llm_factory(
         response=ModelCompletions(text='<agent_result status="completed">done</agent_result>')
     )
-    agent = ButlerAgent.__new__(ButlerAgent)
+    agent = Agent.__new__(Agent)
     agent.action_lock = asyncio.Lock()
     agent.model = fake_model
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""
-    monkeypatch.setattr("muika.core.butler.agent.generate_prompt_from_template", lambda *args: "system")
+    monkeypatch.setattr("muika.core.agent.agent.generate_prompt_from_template", lambda *args: "system")
     await agent.execute_command("test", MuikaState(), MagicMock())
     assert "restored_probe" in {t["function"]["name"] for t in fake_model.requests[-1].tools}
     assert fake.before[target] == []

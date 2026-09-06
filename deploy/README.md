@@ -6,7 +6,7 @@
 
 ```
 宿主机 (Windows)
-├── Muika Core                             ── AI 引擎（LLM / 记忆 / Butler Agent）
+├── Muika Core                             ── AI 引擎（LLM / 记忆 / Agent Agent）
 │   python -m muika.ipc.bootstrap
 │   ws://0.0.0.0:8765/ws
 │

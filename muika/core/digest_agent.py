@@ -96,14 +96,14 @@ class DigestAgent:
     def __init__(self, topic_manager: TopicManager):  # pragma: no cover
         self.topic_manager = topic_manager
         self._rss_fingerprints: dict[str, str] = {}  # source.id → md5(raw_xml)
-        butler_cfg = get_model_config(mas_config.butler_model) if mas_config.butler_model else None
-        self.model = load_model(butler_cfg)
-        if mas_config.butler_model:
-            logger.info(f"[DigestAgent] Using Butler model config: {mas_config.butler_model}")
+        agent_cfg = get_model_config(mas_config.agent_model) if mas_config.agent_model else None
+        self.model = load_model(agent_cfg)
+        if mas_config.agent_model:
+            logger.info(f"[DigestAgent] Using Agent model config: {mas_config.agent_model}")
         else:
             logger.warning(
-                "[DigestAgent] `butler_model` is not configured; DigestAgent is using default model config. "
-                "Set `butler_model` in plugin config to reduce digest cost."
+                "[DigestAgent] `agent_model` is not configured; DigestAgent is using default model config. "
+                "Set `agent_model` in plugin config to reduce digest cost."
             )
 
     @staticmethod

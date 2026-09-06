@@ -187,7 +187,7 @@ def test_incomplete_heart_hides_private_text_and_commands(opening):
 
 @pytest.fixture
 def engine(monkeypatch):
-    for name in ("MuikaBrain", "ButlerAgent", "TopicManager", "DigestAgent", "ReflectionAgent"):
+    for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
     return Muika(MagicMock(send_message=AsyncMock()), asyncio.Queue())
 
@@ -224,7 +224,7 @@ async def test_god_mode_enables_tools_and_isolates_resources(engine):
 
 
 async def test_chat_and_session_end_keep_background_task(engine, monkeypatch, db_session, session_ctx_factory):
-    monkeypatch.setattr("muika.core.butler.task_store.get_session", lambda: session_ctx_factory(db_session))
+    monkeypatch.setattr("muika.core.agent.task_store.get_session", lambda: session_ctx_factory(db_session))
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -233,9 +233,9 @@ async def test_chat_and_session_end_keep_background_task(engine, monkeypatch, db
         await release.wait()
         return ModelCompletions(text='<agent_result status="completed">Verified.</agent_result>')
 
-    engine.butler_agent.action_lock = asyncio.Lock()
-    engine.butler_agent.build_request = lambda command: ModelRequest(command, tools=[])
-    engine.butler_agent.model.step = step
+    engine.agent.action_lock = asyncio.Lock()
+    engine.agent.build_request = lambda command: ModelRequest(command, tools=[])
+    engine.agent.model.step = step
     engine.brain.generate_reply = AsyncMock(side_effect=["我去看看。<agent>Develop Daily</agent>", "我在呢。"])
     worker = asyncio.create_task(engine.agent_tasks.run())
     try:
@@ -273,7 +273,7 @@ async def test_failed_summary_preserves_session_and_can_retry(engine, monkeypatc
         engine.memory.add_context("user", str(index))
     turns = list(engine.memory.recent_turns)
     session_id = engine.memory.session.session_id
-    engine.butler_agent.summarize_session = AsyncMock(side_effect=RuntimeError("summary unavailable"))
+    engine.agent.summarize_session = AsyncMock(side_effect=RuntimeError("summary unavailable"))
     engine.memory.update_archive = AsyncMock()
     await engine._handle_session_end()
     assert list(engine.memory.recent_turns) == turns
@@ -282,11 +282,11 @@ async def test_failed_summary_preserves_session_and_can_retry(engine, monkeypatc
     engine.memory.update_archive.assert_not_awaited()
     await engine._handle_session_end()
     assert not await engine.update_session_memory()
-    engine.butler_agent.summarize_session.assert_awaited_once()
+    engine.agent.summarize_session.assert_awaited_once()
     clock[0] += AUTO_SUMMARY_INTERVAL
 
-    engine.butler_agent.summarize_session.side_effect = None
-    engine.butler_agent.summarize_session.return_value = "A shared memory."
+    engine.agent.summarize_session.side_effect = None
+    engine.agent.summarize_session.return_value = "A shared memory."
     engine.memory.update_archive.side_effect = RuntimeError("database unavailable")
     await engine._handle_session_end()
     assert list(engine.memory.recent_turns) == turns
@@ -335,28 +335,28 @@ async def test_idle_ticks_wait_for_failed_archive_retry(engine, monkeypatch):
     engine._last_digest_time = datetime.now().timestamp()
     for index in range(AUTO_SUMMARY_MIN_TURNS):
         engine.memory.add_context("user", str(index))
-    engine.butler_agent.summarize_session = AsyncMock(side_effect=RuntimeError("offline"))
+    engine.agent.summarize_session = AsyncMock(side_effect=RuntimeError("offline"))
     engine.memory.update_archive = AsyncMock()
     await engine._process_event(SessionEndEvent(), 0)
     for _ in range(3):
         await engine._tick_idle(TimeTickEvent(), 0)
     assert engine.event_queue.empty()
     assert not engine._tasks
-    engine.butler_agent.summarize_session.assert_awaited_once()
+    engine.agent.summarize_session.assert_awaited_once()
     clock[0] += AUTO_SUMMARY_INTERVAL
     await engine._tick_idle(TimeTickEvent(), 0)
     event = engine.event_queue.get_nowait()
     assert event.type == "session_end"
     await engine._process_event(event, 0)
-    assert engine.butler_agent.summarize_session.await_count == 2
+    assert engine.agent.summarize_session.await_count == 2
     assert engine.memory.recent_turns
 
 
 async def test_concurrent_archive_paths_share_failure_backoff(engine):
     engine.memory.add_context("user", "A memory to keep.")
-    engine.butler_agent.summarize_session = AsyncMock(side_effect=RuntimeError("offline"))
+    engine.agent.summarize_session = AsyncMock(side_effect=RuntimeError("offline"))
     engine.memory.update_archive = AsyncMock()
     results = await asyncio.gather(engine.update_session_memory(), engine.update_session_memory())
     assert results == [False, False]
-    engine.butler_agent.summarize_session.assert_awaited_once()
+    engine.agent.summarize_session.assert_awaited_once()
     engine.memory.update_archive.assert_not_awaited()

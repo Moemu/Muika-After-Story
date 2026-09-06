@@ -12,7 +12,7 @@ from muika.config import get_model_config, mas_config
 
 # 导入工具模块以完成注册。
 from muika.core.actions import tools as _tools  # noqa: F401
-from muika.core.butler._prompts import (
+from muika.core.agent._prompts import (
     MEMORY_CLASSIFICATION_PROMPT,
     PREFERENCE_MATCH_PROMPT,
     SESSION_SUMMARY_PROMPT,
@@ -42,14 +42,14 @@ def _parse_agent_report(text: str) -> str:
     return f"Agent stopped before reporting completion. Last output: {last_output}"
 
 
-class ButlerAgent:
+class Agent:
     """提供行动模型、执行提示及记忆处理能力。"""
 
     def __init__(self) -> None:
         self.action_lock = asyncio.Lock()
-        butler_cfg = get_model_config(mas_config.butler_model)
-        summarize_model_cfg = get_model_config(mas_config.session_summarize_model or mas_config.butler_model)
-        self.model = load_model(butler_cfg)
+        agent_cfg = get_model_config(mas_config.agent_model)
+        summarize_model_cfg = get_model_config(mas_config.session_summarize_model or mas_config.agent_model)
+        self.model = load_model(agent_cfg)
         self.summarize_model = load_model(summarize_model_cfg)
 
         # 技能管理器：启动时扫描技能目录并启动热重载监听
@@ -71,12 +71,11 @@ class ButlerAgent:
         若 preferences 为空则直接短路返回，不消耗任何推理资源。
         """
         if not preferences:
-            logger.debug("[Butler/Preprocess] No PREFERENCE records available, skipping LLM match.")
+            logger.debug("[Agent/Preprocess] No PREFERENCE records available, skipping LLM match.")
             return []
 
         logger.debug(
-            f"[Butler/Preprocess] Running preference match | "
-            f"input={user_input[:60]!r} candidates={len(preferences)}"
+            f"[Agent/Preprocess] Running preference match | " f"input={user_input[:60]!r} candidates={len(preferences)}"
         )
         records_text = "\n".join(
             f"- key={r.key!r}, category={r.category.value}, value={r.value!r}" for r in preferences
@@ -95,30 +94,30 @@ class ButlerAgent:
             relevant_keys: set[str] = set(data.get("relevant_keys", []))
             matched = [r for r in preferences if r.key in relevant_keys]
             logger.debug(
-                f"[Butler/Preprocess] Match result | "
+                f"[Agent/Preprocess] Match result | "
                 f"relevant_keys={sorted(relevant_keys)} "
                 f"matched={len(matched)}/{len(preferences)}"
             )
             if matched:
                 logger.info(
-                    f"[Butler/Preprocess] Injecting {len(matched)} preference(s): " f"{[r.key for r in matched]}"
+                    f"[Agent/Preprocess] Injecting {len(matched)} preference(s): " f"{[r.key for r in matched]}"
                 )
             return matched
         except Exception as e:
-            logger.warning(f"[Butler/Preprocess] Preference match failed: {e}")
+            logger.warning(f"[Agent/Preprocess] Preference match failed: {e}")
             return []
 
     async def summarize_session(self, turns: list[SessionTurn]) -> str:
         """
         对本次 Session 的对话记录生成一段简洁的文字摘要，供写入 ARCHIVE 层。
-        由 loop.py 在 session_end 事件时调用，不走 Butler 内循环。
+        由 loop.py 在 session_end 事件时调用，不走 Agent 内循环。
         """
         if not turns:
-            logger.debug("[Butler/Summary] No turns to summarize — returning empty string.")
+            logger.debug("[Agent/Summary] No turns to summarize — returning empty string.")
             return ""
 
         transcript = "\n".join(f"[{t.role.upper()}] {t.content}" for t in turns)
-        logger.info(f"[Butler/Summary] Summarizing {len(turns)} turns...")
+        logger.info(f"[Agent/Summary] Summarizing {len(turns)} turns...")
 
         request = ModelRequest(
             prompt=f"Session transcript:\n\n{transcript}",
@@ -133,11 +132,11 @@ class ButlerAgent:
             if not summary:
                 raise ValueError("Session summary is empty")
             logger.info(
-                f"[Butler/Summary] Done — {len(summary)} chars: {summary[:120]!r}{'...' if len(summary) > 120 else ''}"
+                f"[Agent/Summary] Done — {len(summary)} chars: {summary[:120]!r}{'...' if len(summary) > 120 else ''}"
             )
             return summary
         except Exception as e:
-            logger.error(f"[Butler/Summary] Summarization LLM failed: {e}")
+            logger.error(f"[Agent/Summary] Summarization LLM failed: {e}")
             raise
 
     async def classify_and_store_memory(
@@ -150,10 +149,10 @@ class ButlerAgent:
         对从 <memory> 标签提取的原始记忆内容进行分类并存入记忆系统。
         """
         if not content.strip():
-            logger.debug("[Butler/Memory] Empty content -- skipping.")
+            logger.debug("[Agent/Memory] Empty content -- skipping.")
             return
 
-        logger.info(f"[Butler/Memory] Classifying: {content[:80]!r}...")
+        logger.info(f"[Agent/Memory] Classifying: {content[:80]!r}...")
 
         request = ModelRequest(
             prompt=f"Raw memory note:\n\n{content}",
@@ -165,26 +164,26 @@ class ButlerAgent:
             completion = await self.model.ask(request=request, stream=False)
             data = json.loads(completion.text)
             if not data.get("should_store", True):
-                logger.info(f"[Butler/Memory] Classifier declined storage: {data.get('reason', 'no reason')}")
+                logger.info(f"[Agent/Memory] Classifier declined storage: {data.get('reason', 'no reason')}")
                 return
             layer = MemoryLayer(data["layer"])
             category = MemoryCategory(data["category"])
             key = data["key"]
             value = str(data["value"]).strip()
         except Exception as e:
-            logger.warning(f"[Butler/Memory] Classification LLM failed: {e}, retrying...")
+            logger.warning(f"[Agent/Memory] Classification LLM failed: {e}, retrying...")
             if max_retry > 0:
                 return await self.classify_and_store_memory(content, state, max_retry - 1)
             else:
-                logger.error("[Butler/Memory] Classification LLM failed, give up.")
+                logger.error("[Agent/Memory] Classification LLM failed, give up.")
                 return
 
         if state.memory is None:
-            logger.warning("[Butler/Memory] MemoryManager not on state -- cannot store.")
+            logger.warning("[Agent/Memory] MemoryManager not on state -- cannot store.")
             return
 
         if not value:
-            logger.warning("[Butler/Memory] Classifier returned an empty value -- skipping.")
+            logger.warning("[Agent/Memory] Classifier returned an empty value -- skipping.")
             return
 
         await state.memory.upsert_memory(
@@ -193,7 +192,7 @@ class ButlerAgent:
             key=key,
             value=value,
         )
-        logger.info(f"[Butler/Memory] Stored: [{layer.value}/{category.value}] " f"{key} = {value[:60]!r}...")
+        logger.info(f"[Agent/Memory] Stored: [{layer.value}/{category.value}] " f"{key} = {value[:60]!r}...")
 
     def build_request(self, command: str) -> ModelRequest:
         """组装当前模板、技能、工具和实际运行环境。"""
@@ -219,7 +218,7 @@ class ButlerAgent:
             return await self._execute_command(command, state, executor)
 
     async def _execute_command(self, command: str, state: MuikaState, executor: Executor) -> tuple[str, list[Resource]]:
-        logger.info(f"[Butler] Executing command: {command!r}")
+        logger.info(f"[Agent] Executing command: {command!r}")
 
         with tool_context(state, executor) as context:
             request = self.build_request(command)
@@ -230,15 +229,15 @@ class ButlerAgent:
                     raise RuntimeError(completion.text)
                 report = _parse_agent_report(completion.text)
             except Exception as e:
-                logger.error(f"[Butler] LLM error: {e}")
+                logger.error(f"[Agent] LLM error: {e}")
                 return (f"I encountered an error while executing the command: {e}", [])
 
             # 收集工具执行过程中产生的资源（图片等）
             resources = context.resources
 
             if report:
-                logger.info(f"[Butler] Report ready ({len(report)} chars): {report[:120]!r}")
+                logger.info(f"[Agent] Report ready ({len(report)} chars): {report[:120]!r}")
             else:
-                logger.debug("[Butler] Empty report (silent operation).")
+                logger.debug("[Agent] Empty report (silent operation).")
 
             return (report, resources)

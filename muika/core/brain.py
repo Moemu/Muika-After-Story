@@ -96,7 +96,7 @@ class MuikaBrain:
         adapters: Optional[List[AdapterInfo]] = None,
     ) -> str:
         """
-        Lightweight topic expansion using an isolated, Butler-free prompt.
+        Lightweight topic expansion using an isolated, Agent-free prompt.
         Called by the Dual-Pipeline path in loop.py when boredom/curiosity fires.
         Returns the expanded text ready to send, or empty string on failure.
         """
@@ -227,7 +227,7 @@ class MuikaBrain:
             adapters_info=self.generate_adapters_info(adapters, now=current_time),
         )
 
-        # 按需注入：Butler 预处理层匹配到的 PreferenceProfile 条目
+        # 按需注入：Agent 预处理层匹配到的 PreferenceProfile 条目
         if injected_preferences:
             logger.debug(
                 f"[Brain] Injecting {len(injected_preferences)} preference(s): "
