@@ -56,9 +56,15 @@ class PluginFileHandler(FileSystemEventHandler):
             return
 
         rel = src.relative_to(self._plugins_dir)
-        if any(p in {"_staging", "_quarantine", "__pycache__"} for p in rel.parts):
+        if any(p.startswith(".") or p in {"_staging", "_quarantine", "__pycache__", "node_modules"} for p in rel.parts):
             return
-        if src.suffix in {".pyc", ".tmp"} or src.name.startswith(".") or src.name.endswith("~"):
+        if src.suffix.lower() in {".pyc", ".tmp"} or src.name.endswith("~"):
+            return
+        if src.suffix.lower() in {"", ".md", ".rst", ".txt"} and src.stem.lower() in {"readme", "license", "changelog"}:
+            return
+        if src.name.lower() in {"package.json", "package-lock.json"}:
+            return
+        if not is_delete and src.is_dir():
             return
 
         package_name = self._derive_package_name(src)
@@ -116,11 +122,11 @@ class PluginFileHandler(FileSystemEventHandler):
         init = top / "__init__.py"
         if init.exists():
             return path_to_module_name(top, self._base_path)
-        if src.name == "__init__.py":
+        if src == init:
             return path_to_module_name(top, self._base_path)
         subdir_name = top.name.lower().replace("-", "_")
         subdir = top / subdir_name
-        if subdir.is_dir():
+        if subdir.is_dir() and src.is_relative_to(subdir):
             return path_to_module_name(subdir, self._base_path)
         return None
 

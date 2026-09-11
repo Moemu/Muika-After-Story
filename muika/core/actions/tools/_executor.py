@@ -90,7 +90,8 @@ async def _start(command: list[str], timeout: float, yield_time: float, cwd: str
 async def execute_python(code: str, timeout: float = _DEFAULT_TIMEOUT, yield_time: float = 1.0, cwd: str | None = None):
     if not mas_config.enable_code_execution:
         return ToolError("Code execution is disabled. Set ENABLE_CODE_EXECUTION=true to enable.")
-    return await _start([sys.executable, "-u", "-c", code], timeout, yield_time, cwd)
+    # 调试器会在源码前拼接分号语句，换行保留 try/with 等复合语句的语法。
+    return await _start([sys.executable, "-u", "-c", "\n" + code], timeout, yield_time, cwd)
 
 
 class ExecuteShellParams(ExecutionParams):

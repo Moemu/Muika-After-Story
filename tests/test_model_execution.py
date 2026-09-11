@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
-from muika.llm import ModelConfig, ModelRequest
+from muika.llm import ModelCompletions, ModelConfig, ModelRequest
 from muika.llm._execution import collect_step, run_conversation
 from muika.llm._schema import MediaReference, ModelMessage, ToolResult
 from muika.llm.providers.openai import Openai
@@ -25,6 +25,46 @@ def _response(message, finish_reason="stop"):
         choices=[{"index": 0, "finish_reason": finish_reason, "message": message}],
         usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
     )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_structured_content_preserves_json_and_private_reasoning(monkeypatch, stream):
+    provider = _provider()
+    provider.config.stream = stream
+    body = json.dumps({"value": "literal <think>text</think> and 'quotes'"})
+
+    async def chunks():
+        for delta, reason in [({"reasoning_content": "private"}, None), ({"content": body}, "stop")]:
+            yield ChatCompletionChunk(
+                id="test",
+                created=1,
+                model="test",
+                object="chat.completion.chunk",
+                choices=[{"index": 0, "delta": delta, "finish_reason": reason}],
+            )
+
+    async def create(**kwargs):
+        assert kwargs["response_format"] == {"type": "json_object"}
+        if kwargs["stream"]:
+            return chunks()
+        return _response({"role": "assistant", "content": body, "reasoning_content": "private"})
+
+    monkeypatch.setattr(provider.client.chat.completions, "create", create)
+    result = await provider._collect_stream(
+        run_conversation(provider, ModelRequest("classify", format="json"), stream=False)
+    )
+    assert result.require_content() == body
+    assert result.text == f"<think>private</think>{body}"
+    assert result.message.reasoning == "private"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [ModelCompletions(text="{}", succeed=False), ModelCompletions(text="{}", stop_reason="length")],
+)
+def test_structured_content_rejects_failed_or_incomplete_response(completion):
+    with pytest.raises(ValueError):
+        completion.require_content()
 
 
 async def test_tool_image_is_in_next_provider_request(monkeypatch, tmp_path):

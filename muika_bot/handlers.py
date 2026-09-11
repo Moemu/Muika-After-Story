@@ -49,9 +49,11 @@ _message_target = Target(id=mas_config.master_id, private=True)
 
 async def _is_master(event: Event) -> bool:
     """Rule: only respond to the configured master user."""
+    if event.get_type() != "message":
+        return False
     try:
         return event.get_user_id() == mas_config.master_id
-    except (AttributeError, NotImplementedError):
+    except (AttributeError, NotImplementedError, ValueError):
         return False
 
 

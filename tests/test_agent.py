@@ -21,6 +21,7 @@ from muika.core.memory import (
 )
 from muika.core.state import MuikaState
 from muika.llm import ModelCompletions
+from muika.llm._schema import ModelMessage
 
 
 def _agent(fake_model, fake_summarize=None) -> Agent:
@@ -44,7 +45,13 @@ async def test_fetch_preferences_empty_shortcircuit(fake_llm_factory):
 
 
 async def test_fetch_preferences_returns_matched(fake_llm_factory):
-    fake = fake_llm_factory(response=ModelCompletions(text='{"relevant_keys":["fav_drink"]}'))
+    body = '{"relevant_keys":["fav_drink"]}'
+    fake = fake_llm_factory(
+        response=ModelCompletions(
+            text=f"<think>Match the drink preference.</think>{body}",
+            message=ModelMessage(role="assistant", content=body, reasoning="Match the drink preference."),
+        )
+    )
     agent = _agent(fake)
     pref = _preference()
     result = await agent.fetch_relevant_preferences("drink?", [pref])
@@ -102,9 +109,11 @@ async def test_classify_state_memory_none(fake_llm_factory):
 
 
 async def test_classify_stores_record(fake_llm_factory, redirect_get_session):
+    body = '{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
     fake = fake_llm_factory(
         response=ModelCompletions(
-            text='{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
+            text=f"<think>Remember this preference.</think>{body}",
+            message=ModelMessage(role="assistant", content=body, reasoning="Remember this preference."),
         )
     )
     agent = _agent(fake)
@@ -128,7 +137,8 @@ async def test_classify_retries_then_gives_up(fake_llm_factory):
     fake = fake_llm_factory(error=RuntimeError("boom"))
     agent = _agent(fake)
     state = MuikaState(memory=MemoryManager())
-    await agent.classify_and_store_memory("x", state, max_retry=3)
+    with pytest.raises(RuntimeError, match="Memory classification failed"):
+        await agent.classify_and_store_memory("x", state, max_retry=3)
     assert fake.call_count == 4  # 初始 + 3 次重试
     assert len(state.memory.records) == 0
 

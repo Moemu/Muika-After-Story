@@ -216,6 +216,7 @@ async def run_production_loop(
     engine._god_mode = False
     engine._god_mode_pending = False
     engine._tasks = set()
+    engine._memory_lock = asyncio.Lock()
     engine.event_queue = asyncio.Queue()
     engine.agent_tasks = _FixtureTasks(engine.agent, state, engine.event_queue)
     engine._timeout_task = None

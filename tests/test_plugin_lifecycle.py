@@ -650,6 +650,63 @@ def test_watcher_derives_package_name_for_dir_plugin(tmp_path: Path):
     assert "my_pkg" in package
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "README.md",
+        "LICENSE",
+        "package.json",
+        "package-lock.json",
+        ".github/workflows/build.yaml",
+        "node_modules/tailwindcss/index.js",
+        "build.config.js",
+        "mas_plugin_daily/README.md",
+        "mas_plugin_daily/node_modules/tool/index.js",
+    ],
+)
+def test_watcher_ignores_docs_dependencies_and_build_files(tmp_path, relative):
+    from muika.plugin.watcher import PluginFileHandler
+
+    plugins = tmp_path / "plugins"
+    root = plugins / "MAS-Plugin-Daily"
+    package = root / "mas_plugin_daily"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    source = root / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("")
+    manager = MagicMock()
+    manager.is_watcher_suppressed.return_value = False
+    handler = PluginFileHandler(manager, plugins, tmp_path)
+    handler._handle_path(source, is_delete=False)
+    source.unlink()
+    handler._handle_path(source, is_delete=True)
+    manager.reload.assert_not_called()
+    manager.unload.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "relative", ["__init__.py", "info.py", "template/index.html.jinja", "static/css/output.css", "prompts/context.md"]
+)
+def test_watcher_keeps_runtime_code_and_resource_changes(tmp_path, relative):
+    from muika.plugin.watcher import PluginFileHandler
+
+    plugins = tmp_path / "plugins"
+    package = plugins / "MAS-Plugin-Daily" / "mas_plugin_daily"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    source = package / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("")
+    manager = MagicMock()
+    manager.is_watcher_suppressed.return_value = False
+    handler = PluginFileHandler(manager, plugins, tmp_path)
+    handler._handle_path(source.parent, is_delete=False)
+    manager.reload.assert_not_called()
+    handler._handle_path(source, is_delete=False)
+    manager.reload.assert_called_once_with("plugins.MAS-Plugin-Daily.mas_plugin_daily")
+
+
 async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monkeypatch, fake_llm_factory):
     from muika.core.agent.agent import Agent
     from muika.core.state import MuikaState

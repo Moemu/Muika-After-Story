@@ -146,9 +146,7 @@ class DigestAgent:
 
         try:
             resp = await self.model.ask(request)
-            if not resp.succeed:
-                return None
-            return TopicFitAssessment.model_validate_json(resp.text)
+            return TopicFitAssessment.model_validate_json(resp.require_content())
         except Exception as e:
             logger.warning(f"[DigestAgent] Topic fit evaluation failed: {e}")
             return None

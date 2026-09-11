@@ -113,6 +113,17 @@ class ModelCompletions:
     message: ModelMessage | None = None
     stop_reason: StopReason = "stop"
 
+    def require_content(self) -> str:
+        """读取完整响应的正文，保留原始文本和独立的思考字段。
+
+        :raises ValueError: 请求失败或响应未完整结束。
+        """
+        if not self.succeed:
+            raise ValueError(f"Model request failed: {self.text}")
+        if self.stop_reason != "stop":
+            raise ValueError(f"Model response did not complete: {self.stop_reason}")
+        return self.message.content if self.message is not None else self.text
+
 
 @dataclass
 class ModelStreamCompletions:

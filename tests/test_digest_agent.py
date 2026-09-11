@@ -4,6 +4,7 @@ import json
 
 from muika.core.digest_agent import DigestAgent
 from muika.llm import ModelCompletions
+from muika.llm._schema import ModelMessage
 
 
 def test_normalize_text():
@@ -11,9 +12,11 @@ def test_normalize_text():
 
 
 async def test_assess_entry_long_content_truncated(fake_llm_factory):
+    body = json.dumps({"score": 80, "keep": True, "reason": "good", "primary_theme": "tech", "summary": "s"})
     fake = fake_llm_factory(
         response=ModelCompletions(
-            text=json.dumps({"score": 80, "keep": True, "reason": "good", "primary_theme": "tech", "summary": "s"})
+            text=f"<think>Evaluate the article.</think>{body}",
+            message=ModelMessage(role="assistant", content=body, reasoning="Evaluate the article."),
         )
     )
     dg = DigestAgent.__new__(DigestAgent)

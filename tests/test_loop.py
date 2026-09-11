@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from muika.core.agent.task_store import TaskRecord
 from muika.core.events import TimeTickEvent, UserMessageEvent, UserMessagePayload
 from muika.core.loop import Muika, ParsedReply
 from muika.core.state import ActiveTopicState, MuikaState
@@ -319,6 +320,53 @@ async def test_shutdown_waits_for_background_cleanup(engine):
     assert cleaned.is_set()
     assert not engine._tasks
     assert engine._timeout_task is None
+
+
+async def test_memory_storage_does_not_block_task_controls_or_chat(engine):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    stored = []
+
+    async def store(content, state):
+        stored.append(content)
+        if content == "first":
+            entered.set()
+            await release.wait()
+
+    task = TaskRecord(instruction="work", original_request="work")
+    engine.agent_tasks.submit = AsyncMock(return_value=task)
+    engine.agent_tasks.update = AsyncMock()
+    engine.agent.classify_and_store_memory = store
+    engine.brain.generate_reply = AsyncMock(
+        side_effect=[
+            "I will check.<memory>first</memory><agent>work</agent>",
+            f'<memory>second</memory><agent task_id="{task.id}" action="cancel">stop</agent>',
+            "I hear you.",
+        ]
+    )
+    event = UserMessageEvent(payload=UserMessagePayload(message=Message(message="work")))
+    try:
+        await asyncio.wait_for(engine._run_brain_pipeline(event, []), 1)
+        await asyncio.wait_for(entered.wait(), 1)
+        engine.agent_tasks.submit.assert_awaited_once_with("work", "work")
+        await asyncio.wait_for(engine._run_brain_pipeline(event, []), 1)
+        engine.agent_tasks.update.assert_awaited_once_with(task.id, "stop", cancel=True)
+        await asyncio.wait_for(engine._run_brain_pipeline(event, []), 1)
+        assert engine.executor.send_message.await_args.args[0] == "I hear you."
+        assert stored == ["first"]
+    finally:
+        release.set()
+        await asyncio.gather(*list(engine._tasks))
+    assert stored == ["first", "second"]
+
+
+async def test_failed_memory_does_not_discard_following_silent_notes(engine):
+    engine.brain.generate_reply = AsyncMock(return_value="<do_nothing><memory>first</memory><memory>second</memory>")
+    engine.agent.classify_and_store_memory = AsyncMock(side_effect=[RuntimeError("offline"), None])
+    await engine._run_brain_pipeline(TimeTickEvent(), [])
+    await asyncio.gather(*list(engine._tasks))
+    assert [call.args[0] for call in engine.agent.classify_and_store_memory.await_args_list] == ["first", "second"]
+    engine.executor.send_message.assert_not_awaited()
 
 
 async def test_idle_ticks_wait_for_failed_archive_retry(engine, monkeypatch):

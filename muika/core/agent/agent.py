@@ -90,7 +90,7 @@ class Agent:
 
         try:
             completion = await self.model.ask(request=request, stream=False)
-            data = json.loads(completion.text)
+            data = json.loads(completion.require_content())
             relevant_keys: set[str] = set(data.get("relevant_keys", []))
             matched = [r for r in preferences if r.key in relevant_keys]
             logger.debug(
@@ -162,7 +162,7 @@ class Agent:
 
         try:
             completion = await self.model.ask(request=request, stream=False)
-            data = json.loads(completion.text)
+            data = json.loads(completion.require_content())
             if not data.get("should_store", True):
                 logger.info(f"[Agent/Memory] Classifier declined storage: {data.get('reason', 'no reason')}")
                 return
@@ -171,12 +171,10 @@ class Agent:
             key = data["key"]
             value = str(data["value"]).strip()
         except Exception as e:
-            logger.warning(f"[Agent/Memory] Classification LLM failed: {e}, retrying...")
             if max_retry > 0:
+                logger.warning(f"[Agent/Memory] Classification LLM failed: {e}, retrying...")
                 return await self.classify_and_store_memory(content, state, max_retry - 1)
-            else:
-                logger.error("[Agent/Memory] Classification LLM failed, give up.")
-                return
+            raise RuntimeError("Memory classification failed after retries") from e
 
         if state.memory is None:
             logger.warning("[Agent/Memory] MemoryManager not on state -- cannot store.")

@@ -7,7 +7,9 @@ import sys
 import psutil
 import pytest
 
-from muika.core.processes import ProcessManager
+from muika.config import mas_config
+from muika.core.actions.tools import _executor
+from muika.core.processes import ProcessManager, ProcessResult
 
 
 @pytest.fixture
@@ -19,6 +21,26 @@ async def processes():
 
 def _environment():
     return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+
+
+async def test_python_compound_statement_survives_debugger_prefix(processes, tmp_path, monkeypatch):
+    create_process = asyncio.create_subprocess_exec
+
+    async def debugger_create(*args, **kwargs):
+        command = list(args)
+        code_index = command.index("-c") + 1
+        command[code_index] = "import sys; " + command[code_index]
+        return await create_process(*command, **kwargs)
+
+    monkeypatch.setattr(mas_config, "enable_code_execution", True)
+    monkeypatch.setattr(_executor, "get_process_manager", lambda: processes)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", debugger_create)
+    result = await _executor.execute_python(
+        'try:\n    print("it works")\nexcept Exception:\n    raise\n', cwd=str(tmp_path), timeout=5, yield_time=3
+    )
+    execution = ProcessResult.model_validate_json(result.text)
+    assert execution.exit_code == 0
+    assert execution.stdout.strip() == "it works"
 
 
 async def test_wait_returns_running_and_later_reads_all_output(processes, tmp_path):

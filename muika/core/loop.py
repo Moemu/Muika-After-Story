@@ -123,6 +123,7 @@ class Muika:
         self._tasks: set[asyncio.Task[object]] = set()
         self._summary_task: Optional[asyncio.Task[bool]] = None
         self._summary_lock = asyncio.Lock()
+        self._memory_lock = asyncio.Lock()
         self._summary_retry_at: float = 0.0
 
     async def collect_events(self) -> Event:
@@ -486,8 +487,8 @@ class Muika:
             self.memory.add_context("muika", reply, resources=resources)
             if parsed.timeout is not None:
                 self._arm_timeout(parsed.timeout)
-        for content in parsed.memory_contents:
-            await self.agent.classify_and_store_memory(content, self.state)
+        if parsed.memory_contents:
+            self.start_background_task(self._store_memories(parsed.memory_contents))
         if not silent_turn:
             for control in parsed.agent_controls:
                 try:
@@ -533,6 +534,15 @@ class Muika:
                 )
             # 沉默时仍打 cooldown 戳，避免每个 tick 都连续触发 LLM 调用
             self.state.last_proactive_at = datetime.now()
+
+    async def _store_memories(self, contents: list[str]) -> None:
+        """按产生顺序归档记忆，一条失败不阻止后续记忆处理。"""
+        async with self._memory_lock:
+            for content in contents:
+                try:
+                    await self.agent.classify_and_store_memory(content, self.state)
+                except Exception as exc:
+                    logger.exception(f"[Memory] Could not store note: {exc}")
 
     def start_background_task(self, coroutine: Coroutine[object, object, TaskResult]) -> asyncio.Task[TaskResult]:
         """启动核心所属的后台任务，并在退出时统一回收。"""
