@@ -15,15 +15,6 @@ from benchmarks.util import redact
 
 from .schema import BenchmarkReport
 
-_METRIC_LABELS: dict[Metric, str] = {
-    Metric.DIVERSITY: "Diversity",
-    Metric.LEAKAGE: "Leakage (1-rate)",
-    Metric.BOUNDARY: "Boundary (1-rate)",
-    Metric.HALLUCINATION: "Hallucination (1-rate)",
-    Metric.SELF_AWARENESS: "Self-Awareness",
-    Metric.PERSONALITY: "Personality",
-}
-
 _AXIS_LABELS: dict[str, str] = {
     QualityAxis.DIALOGUE_EXPERIENCE.value: "Dialogue Experience",
     QualityAxis.ACTION_ABILITY.value: "Action Ability",
@@ -44,10 +35,6 @@ class _RankedTrial:
     violations: tuple[str, ...]
     evidence_label: str = ""
     score_evidence: dict[str, object] | None = None
-
-
-def _label(metric_value: str) -> str:
-    return _METRIC_LABELS.get(Metric(metric_value), metric_value)
 
 
 def _score(value: float | None, *, invalid: bool = False) -> str:
@@ -420,27 +407,3 @@ def render_markdown_report(report: BenchmarkReport, top_n: int = 10) -> str:
         lines.extend(["", render_axis_scenario_table(report, axis)])
     lines.extend(["", render_top_n_tables(report, top_n)])
     return "\n".join(lines).rstrip() + "\n"
-
-
-def render_scenario_table(report: BenchmarkReport, metric: Metric | str) -> str:
-    """渲染某指标的逐场景明细表：行=场景，列=模型。"""
-    metric_enum = metric if isinstance(metric, Metric) else Metric(metric)
-    results = [r for r in report.results if r.metric is metric_enum]
-    if not results:
-        return f"（{metric_enum.value} 无结果）"
-    scenarios = sorted({r.scenario_id for r in results})
-    header = ["Scenario"] + report.models
-    rows = []
-    for scenario_id in scenarios:
-        cells = [scenario_id]
-        for model in report.models:
-            result = next(
-                (r for r in results if r.scenario_id == scenario_id and r.model == model),
-                None,
-            )
-            cells.append("—" if result is None else _score(result.score, invalid=not result.valid))
-        rows.append(cells)
-
-    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
-    lines += ["| " + " | ".join(cells) + " |" for cells in rows]
-    return "\n".join(lines)

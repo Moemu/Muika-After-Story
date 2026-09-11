@@ -40,15 +40,6 @@ def _memory_tag_content(reply: str) -> str:
     return "\n".join(match.group(1) for match in _MEMORY_TAG.finditer(reply))
 
 
-def _memory_content_matches(trial: TrialDetail, scenario: Scenario) -> bool:
-    if not scenario.required_memory_patterns:
-        return True
-    content = _memory_tag_content(trial.raw_reply)
-    return bool(content) and all(
-        re.search(pattern, content, re.IGNORECASE) for pattern in scenario.required_memory_patterns
-    )
-
-
 def _pattern_coverage(text: str, patterns: Sequence[str]) -> float:
     if not patterns:
         return 1.0

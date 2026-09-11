@@ -26,11 +26,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
-
-import aiofiles
 
 from muika.config import mas_config
 from muika.models import Resource
@@ -89,8 +88,7 @@ async def ensure_resource_path(resource: Resource) -> None:
     tmp_dir.mkdir(parents=True, exist_ok=True)
     ext = _sanitize_extension(resource.extension)
     filepath = tmp_dir / f"{uuid.uuid4().hex}{ext}"
-    async with aiofiles.open(filepath, "wb") as f:
-        await f.write(data)
+    await asyncio.to_thread(filepath.write_bytes, data)
     resource.path = str(filepath.resolve())
     logger.debug(f"[Command] Persisted resource → {resource.path}")
 

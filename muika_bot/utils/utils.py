@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import base64
 import ssl
 import time
-from importlib.metadata import PackageNotFoundError, version
 from typing import Optional
 
 import httpx
 from nonebot import get_bot
 from nonebot.adapters import Event, MessageSegment
-from nonebot.internal.matcher import current_event
-from nonebot_plugin_userinfo import get_user_info
 
 from muika.config import mas_config
 from muika.utils.logger import logger
@@ -49,22 +45,6 @@ async def download_file(file_url: str, file_name: Optional[str] = None, proxy: O
         with open(local_path, "wb") as file:
             file.write(r.content)
         return str(local_path)
-
-
-async def save_image_as_base64(image_url: str, proxy: Optional[str] = None) -> str:
-    """
-    从在线 url 获取图像 Base64
-
-    :image_url: 图片在线地址
-    :return: 本地地址
-    """
-    ssl_context = ssl.create_default_context()
-    ssl_context.set_ciphers("DEFAULT")
-
-    async with httpx.AsyncClient(proxy=proxy, verify=ssl_context) as client:
-        r = await client.get(image_url, headers={"User-Agent": User_Agent})
-        image_base64 = base64.b64encode(r.content)
-    return image_base64.decode("utf-8")
 
 
 async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optional[str]:
@@ -111,36 +91,3 @@ async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optiona
         return await download_file(url, proxy=mas_config.telegram_proxy)
 
     return None
-
-
-def get_version() -> str:
-    """
-    获取当前版本号
-    """
-    package_name = "muika-after-story"
-
-    try:
-        return version(package_name)
-    except PackageNotFoundError:
-        pass
-
-    return "Unknown"
-
-
-async def get_username(user_id: Optional[str] = None, event: Optional[Event] = None) -> str:
-    """
-    获取当前对话的用户名，如果失败就返回用户id
-
-    :param user_id: 用户ID，如果空则从事件中获取
-    :param event: Nonebot 事件对象，如果空则从 Nonebot 上下文中获取
-    （注意：必须保证是在 MAS 事件处理流程[即普通对话事件]中才可为空）
-    """
-    bot = get_bot()
-    if not event:
-        try:
-            event = current_event.get()
-        except LookupError as exc:
-            raise RuntimeError("无法获取当前事件对象，当前有可能是自动发起对话") from exc
-    user_id = user_id if user_id else event.get_user_id()
-    user_info = await get_user_info(bot, event, user_id)
-    return user_info.user_name if user_info else user_id
