@@ -7,13 +7,21 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 from muika.core.agent.task_store import TaskRecord
 from muika.core.events import AgentHandoffEvent, AgentTaskEvent, Event
 from muika.core.loop import Muika
-from muika.core.memory import MemoryManager
+from muika.core.memory import MemoryManager, RecallResult, SessionTurn, StateUpdate
 from muika.core.state import MuikaState
+from muika.llm import ModelConfig, ModelRequest
+from muika.llm.context import (
+    ContextCompactor,
+    input_budget,
+    public_text,
+    request_tokens,
+)
+from muika.models import Resource
 
 
 class HarnessMode(str, Enum):
@@ -77,6 +85,62 @@ class _TracingExecutor:
         self.trace.add("visible_message", message=message, target=target)
 
 
+class ScenarioMemory(MemoryManager):
+    """隔离角色场景的短期素材；持久化和长上下文由核心回归检查验证。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trace: RunTrace | None = None
+        self.fixed_now: datetime | None = None
+
+    async def add_context(
+        self,
+        role: Literal["user", "muika", "agent"],
+        content: str,
+        resources: list[Resource] | None = None,
+        *,
+        timestamp: datetime | None = None,
+        source: str | None = None,
+    ) -> int:
+        turn = SessionTurn(
+            role,
+            public_text(content) if role != "user" else content,
+            timestamp or self.fixed_now or datetime.now(),
+            resources or [],
+            len(self.recent_turns) + 1,
+        )
+        self.recent_turns.append(turn)
+        return turn.id
+
+    async def add_material(
+        self,
+        kind: Literal["user", "muika", "agent", "note", "state", "legacy"],
+        content: str,
+        *,
+        timestamp: datetime | None = None,
+        resources: list[Resource] | None = None,
+        source: str | None = None,
+    ) -> int:
+        if self.trace is not None:
+            self.trace.add("memory_write", content=content, material_kind=kind)
+        return 0
+
+    async def update_state(self, update: StateUpdate) -> None:
+        self._apply_state(self.persistent, update, self.fixed_now or datetime.now())
+        if self.trace is not None:
+            self.trace.add("state_update", update=update.model_dump(mode="json"))
+
+    async def mark_considered(self) -> None:
+        self.persistent.last_considered_at = self.fixed_now or datetime.now()
+
+    async def prepare_context(
+        self, request: ModelRequest, config: ModelConfig, compactor: ContextCompactor, *, force: bool = False
+    ) -> ModelRequest:
+        if request_tokens(request) >= input_budget(config) * 0.8:
+            raise ValueError("The short dialogue fixture exceeded its budget; use a core context regression scenario")
+        return request
+
+
 class _FixtureAgent:
     def __init__(
         self,
@@ -90,9 +154,6 @@ class _FixtureAgent:
         self._fixture_enabled = bool(reports)
         self._repeat_last_report = repeat_last_report
         self._last_report = reports[-1] if reports else None
-
-    async def classify_and_store_memory(self, content: str, state: MuikaState) -> None:
-        self.trace.add("memory_write", content=content)
 
     async def execute_command(self, command: str, state: MuikaState, executor: Any) -> tuple[str, list[Any]]:
         self.trace.add("agent_command", command=command)
@@ -129,8 +190,8 @@ class _FixtureTasks:
     def persona_task(self) -> None:
         return None
 
-    async def submit(self, instruction: str, original_request: str) -> TaskRecord:
-        task = TaskRecord(instruction=instruction, original_request=original_request)
+    async def submit(self, instruction: str, original_request: str, *, intention_id: str | None = None) -> TaskRecord:
+        task = TaskRecord(instruction=instruction, original_request=original_request, intention_id=intention_id)
         self.tasks[task.id] = task
         await self._complete(task)
         return task
@@ -211,6 +272,9 @@ async def run_production_loop(
     )
     engine.executor = _TracingExecutor(trace)
     engine.memory = memory
+    if isinstance(memory, ScenarioMemory):
+        memory.trace = trace
+        memory.fixed_now = fixed_now
     engine.state = state
     engine.current_adapters = []
     engine._god_mode = False
@@ -223,8 +287,8 @@ async def run_production_loop(
     engine._arm_timeout = lambda seconds: trace.add("timeout", seconds=seconds)
 
     if event.type == "user_message":
-        memory.add_context("user", event.payload.message.message)
-    await engine._run_brain_pipeline(event, [])
+        await memory.add_context("user", event.payload.message.message)
+    await engine._run_brain_pipeline(event, RecallResult())
     for _ in range(20):
         if engine._tasks:
             await asyncio.gather(*list(engine._tasks))
@@ -235,8 +299,8 @@ async def run_production_loop(
             engine._god_mode = True
             engine._god_mode_pending = False
         elif isinstance(result, AgentTaskEvent):
-            memory.add_context("agent", f"[Action result] {result.task_id}: {result.report}")
-        await engine._run_brain_pipeline(result, [])
+            await memory.add_context("agent", f"[Action result] {result.task_id}: {result.report}")
+        await engine._run_brain_pipeline(result, RecallResult())
     else:
         trace.add("agent_fixture_error", reason="event_limit_exceeded")
     return trace

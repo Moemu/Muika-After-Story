@@ -18,10 +18,17 @@ from muika.core.events import (
     UserMessageEvent,
     UserMessagePayload,
 )
-from muika.core.memory import MemoryCategory, MemoryLayer, MemoryManager, MemoryRecord
+from muika.core.memory import (
+    Fact,
+    MemoryCategory,
+    MemoryManager,
+    RecallHit,
+    RecallResult,
+)
 from muika.core.state import MuikaState
 from muika.core.topic_manager import EventTopic, StaticTopic, TopicSource
-from muika.llm import ModelCompletions
+from muika.llm import ModelCompletions, ModelConfig
+from muika.llm.context import ContextCompactor
 from muika.models import AdapterInfo, Message
 
 
@@ -31,12 +38,25 @@ def _user_event(msg: str = "hello") -> UserMessageEvent:
 
 def _brain(fake_llm) -> MuikaBrain:
     brain = MuikaBrain.__new__(MuikaBrain)
+    brain.compactor = ContextCompactor(fake_llm)
     brain.model = fake_llm
     return brain
 
 
 def _memory() -> MemoryManager:
     return MemoryManager()
+
+
+def test_brain_reload_refreshes_its_working_summarizer(monkeypatch, fake_llm_factory):
+    old = fake_llm_factory()
+    brain = _brain(old)
+    summary_config = ModelConfig(provider="_echo", context_window=200000)
+    monkeypatch.setattr("muika.core.brain.get_model_config", lambda name: summary_config)
+    brain.reload_model(ModelConfig(provider="_echo", context_window=1000000), old.config)
+    assert brain.model.config.context_window == 1000000
+    assert brain.compactor.model.config == summary_config
+    assert brain.model.compactor is brain.compactor
+    assert old.config.context_window == 131072
 
 
 @pytest.fixture(autouse=True)
@@ -98,7 +118,7 @@ async def test_generate_reply_user_message_prompt(fake_llm_factory):
     req = fake.requests[0]
     assert req.prompt.startswith("["), req.prompt
     assert req.prompt.endswith("] [User] hello"), req.prompt
-    assert req.system == "SYSTEM"
+    assert req.system.startswith("SYSTEM\n[Lasting state")
     assert result == "Hi!"
 
 
@@ -125,10 +145,8 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     state = MuikaState()
     memory = _memory()
     memory.session.is_first_session = False
-    memory.records["core:user:name"] = MemoryRecord(
-        layer=MemoryLayer.CORE, category=MemoryCategory.USER, key="name", value="Alice"
-    )
-    pref = MemoryRecord(layer=MemoryLayer.PREFERENCE, category=MemoryCategory.USER, key="fav_drink", value="tea")
+    memory.facts[1] = Fact(id=1, category=MemoryCategory.USER, key="name", value="Alice")
+    recall = RecallResult(hits=[RecallHit(ref="fact:2", content="tea", occurred_at="2026-09-10")])
     captured = {}
 
     def _tmpl(name, data):
@@ -136,13 +154,13 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
         return "SYSTEM"
 
     with patch("muika.core.brain.generate_prompt_from_template", side_effect=_tmpl):
-        await brain.generate_reply(_user_event(), state, memory, injected_preferences=[pref])
+        await brain.generate_reply(_user_event(), state, memory, recalled_memories=recall)
 
     data = captured["data"]
     assert data.event_type == "user_message"
     assert data.is_chat is True
     assert data.memory_context == memory.get_memory_prompt()
-    assert data.injected_preferences == [pref]
+    assert data.recalled_memories == recall
     assert data.adapters_info is None
 
 
@@ -246,11 +264,11 @@ async def test_generate_reply_timeout_prompt(fake_llm_factory):
     assert "5 minutes" in fake.requests[0].prompt
 
 
-async def test_generate_reply_history_dedup(fake_llm_factory):
+async def test_generate_reply_history_dedup(fake_llm_factory, redirect_get_session):
     fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
     brain = _brain(fake)
     memory = _memory()
-    memory.add_context("user", "hello")
+    await memory.add_context("user", "hello")
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(_user_event("hello"), MuikaState(), memory)
     assert len(fake.requests[0].history) == 0

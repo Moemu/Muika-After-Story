@@ -27,6 +27,8 @@ from ._schema import (
 if TYPE_CHECKING:
     from muika.core.memory import SessionTurn
 
+    from .context import ContextCompactor, ContextPreparer
+
 
 def _stamp_user_turn(turn: "SessionTurn") -> "SessionTurn":
     """
@@ -54,6 +56,7 @@ class BaseLLM(ABC):
         self.config = model_config
         """模型配置"""
         self.is_running = False
+        self.compactor: ContextCompactor | None = None
         """模型状态"""
 
     def __init_subclass__(cls, **kwargs):
@@ -181,13 +184,19 @@ class BaseLLM(ABC):
         """执行一次提供者请求，不派发工具。"""
         raise NotImplementedError(f"Provider {self.config.provider} does not support step requests")
 
-    async def step(self, request: ModelRequest, messages: Sequence[ModelMessage]) -> ModelCompletions:
-        """执行并计量一个可恢复的模型步骤。"""
+    async def step(
+        self,
+        request: ModelRequest,
+        messages: Sequence[ModelMessage],
+        *,
+        prepare_context: ContextPreparer | None = None,
+    ) -> ModelCompletions:
+        """执行并计量一步；允许任务层在请求及长度重试前持久保存工作上下文。"""
         # 执行层和用量记录依赖插件模块，须在模型注册完成后导入。
         from ._execution import collect_step
         from ._wrapper import save_model_usage
 
-        completion = await collect_step(self, request, messages)
+        completion = await collect_step(self, request, messages, prepare_context=prepare_context)
         await save_model_usage(self, completion.usage)
         return completion
 

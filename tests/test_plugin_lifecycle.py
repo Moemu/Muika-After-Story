@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from muika.core.memory_reasoning import MemoryReasoner
 from muika.plugin import lifecycle as lifecycle_mod
 from muika.plugin import loader as loader_mod
 from muika.plugin import state as state_mod
@@ -723,6 +724,9 @@ async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monk
     agent = Agent.__new__(Agent)
     agent.action_lock = asyncio.Lock()
     agent.model = fake
+    agent.summarize_model = fake
+    agent.memory_reasoner = MemoryReasoner(fake, fake)
+    monkeypatch.setattr("muika.core.agent.agent.get_model_config", lambda name: fake.config)
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""
     monkeypatch.setattr("muika.core.agent.agent.generate_prompt_from_template", lambda *args: "system")

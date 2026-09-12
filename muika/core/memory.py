@@ -1,418 +1,819 @@
+"""持久素材、事实账本、日记与持续状态。"""
+
 from __future__ import annotations
 
-import uuid
+import asyncio
+import json
+import re
+import warnings
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import List, Literal, Optional
+from dataclasses import replace
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+from typing import Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from muika.config import mas_config
-from muika.database.crud import ArchiveCRUD, MemoryRecordCRUD
 from muika.database.db import get_session
+from muika.database.orm_models import (
+    ArchiveRecordORM,
+    DiaryORM,
+    ExperienceORM,
+    FactORM,
+    FactRecallORM,
+    MemoryRecordORM,
+    MemoryRuntimeORM,
+)
+from muika.llm._config import ModelConfig
+from muika.llm._schema import ModelRequest, ToolResult
+from muika.llm.context import (
+    ContextCompactor,
+    ContextOverflowWarning,
+    estimate_tokens,
+    input_budget,
+    public_text,
+    request_tokens,
+)
 from muika.models import Resource
-from muika.utils.logger import logger
+
+from .memory_models import (
+    Diary,
+    DreamResult,
+    Experience,
+    Fact,
+    MemoryCategory,
+    MemoryQuery,
+    MemorySnapshot,
+    PersistentState,
+    RecallHit,
+    RecallResult,
+    SessionState,
+    SessionTurn,
+    StateUpdate,
+)
+
+__all__ = [
+    "MemoryManager",
+    "MemoryCategory",
+    "Fact",
+    "Diary",
+    "SessionTurn",
+    "SessionState",
+    "Experience",
+    "DreamResult",
+    "StateUpdate",
+    "PersistentState",
+    "RecallHit",
+    "RecallResult",
+    "MemoryQuery",
+]
 
 
-class MemoryLayer(str, Enum):
-    CORE = "core"
-    """CoreIdentity：核心身份记忆。稳定、低变动。永久注入 system prompt。"""
-
-    STATE = "state"
-    """RelationshipState：关系状态记忆。时间敏感，可过期。仅 Resume 模式下注入最近 ≤3 条。"""
-
-    PREFERENCE = "preference"
-    """PreferenceProfile：长期偏好与事实。不默认注入，由 Agent 预处理层按需检索。"""
-
-    ARCHIVE = "archive"
-    """ArchiveMemory：历史 Session 摘要。不默认注入，由分身 Agent 按需提供。"""
+def _local(value: str) -> datetime:
+    stamp = datetime.fromisoformat(value)
+    return stamp.astimezone().replace(tzinfo=None) if stamp.tzinfo else stamp
 
 
-class MemoryCategory(str, Enum):
-    USER = "user"
-    """关于用户的事实"""
-
-    SELF = "self"
-    """关于 AI 自身的认知"""
-
-    WORLD = "world"
-    """世界 / 环境事实"""
-
-    RELATION = "relation"
-    """关系 / 交互状态（STATE 层专用）"""
-
-
-class MemoryRecord(BaseModel):
-    """CORE / STATE / PREFERENCE 层的单条记忆条目。"""
-
-    id: Optional[int] = None
-    layer: MemoryLayer
-    category: MemoryCategory
-    key: str
-    """语义唯一标识符，同 key + layer 的记录会被覆盖（upsert 语义）。"""
-    value: str
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
-    expires_at: Optional[datetime] = None
-    """过期时间，仅 STATE 层使用，过期后不再注入。"""
+def _fact(row: FactORM) -> Fact:
+    return Fact(
+        id=row.id,
+        category=MemoryCategory(row.category),
+        key=row.key,
+        value=row.value,
+        source_refs=json.loads(row.source_refs),
+        weight=row.weight,
+        weight_at=_local(row.weight_at),
+        observed_at=_local(row.observed_at),
+        last_recalled_at=_local(row.last_recalled_at),
+    )
 
 
-class ArchiveEntry(BaseModel):
-    """历史 Session 摘要（ARCHIVE 层）。"""
-
-    id: Optional[int] = None
-    session_id: str
-    summary: str
-    period_start: datetime
-    period_end: datetime
-    created_at: datetime = Field(default_factory=datetime.now)
-
-
-@dataclass
-class SessionTurn:
-    """Session 级单条对话记录"""
-
-    role: Literal["user", "muika", "agent"]
-    content: str
-    timestamp: datetime = field(default_factory=datetime.now)
-    resources: List[Resource] = field(default_factory=list)
+def _experience(row: ExperienceORM) -> Experience:
+    return Experience(
+        id=row.id,
+        session_id=row.session_id,
+        kind=row.kind,
+        content=row.content,
+        occurred_at=_local(row.occurred_at),
+        source=row.source,
+    )
 
 
-class SessionState(BaseModel):
-    """当前 Session 的元信息。"""
-
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    started_at: datetime = Field(default_factory=datetime.now)
-    is_first_session: bool = True
-    """True：系统首次对话。False：Resume 模式（已有历史记忆的新 Session）。"""
+def _diary(row: DiaryORM) -> Diary:
+    return Diary(
+        id=row.id,
+        day=date.fromisoformat(row.day),
+        content=row.content,
+        source=row.source,
+        source_refs=json.loads(row.source_refs),
+        covered_through=row.covered_through,
+        created_at=_local(row.created_at),
+    )
 
 
 class MemoryManager:
-    def __init__(self, max_turns: int = mas_config.max_memory_records):
-        self.recent_turns: deque[SessionTurn] = deque(maxlen=max_turns)
-        """Session 中的对话内容"""
+    """协调记忆事务和有预算的工作视图。"""
 
-        self.records: dict[str, MemoryRecord] = {}
-        """CORE / STATE / PREFERENCE 层。key 格式：'{layer}:{category}:{key}'"""
+    def __init__(self) -> None:
+        self.recent_turns: deque[SessionTurn] = deque()
+        self.facts: dict[int, Fact] = {}
+        self.snapshot = MemorySnapshot()
+        self._lock = asyncio.Lock()
+        self._context_lock = asyncio.Lock()
 
-        self.archives: list[ArchiveEntry] = []
-        """ARCHIVE 层 — 历史 Session 摘要。"""
+    @property
+    def session(self) -> SessionState:
+        return self.snapshot.session
 
-        self.session: SessionState = SessionState()
+    @property
+    def persistent(self) -> PersistentState:
+        return self.snapshot.state
+
+    @property
+    def has_history(self) -> bool:
+        return self.snapshot.first_interaction_at is not None or bool(self.facts)
+
+    async def _save_snapshot(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
+        await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
 
     async def load(self) -> None:
-        """完整加载历史记忆，加载失败时保留原状态并向调用者报告异常。"""
-        records: dict[str, MemoryRecord] = {}
-        archives: list[ArchiveEntry] = []
-        async with get_session() as session:
-            for record in await MemoryRecordCRUD.get_all(session):
-                storage_key = f"{record.layer}:{record.category}:{record.key}"
-                records[storage_key] = MemoryRecord(
-                    id=record.id,
-                    layer=MemoryLayer(record.layer),
-                    category=MemoryCategory(record.category),
-                    key=record.key,
-                    value=record.value,
-                    created_at=datetime.fromisoformat(record.created_at),
-                    updated_at=datetime.fromisoformat(record.updated_at),
-                    expires_at=datetime.fromisoformat(record.expires_at) if record.expires_at else None,
-                )
-            for archive in await ArchiveCRUD.list_all(session):
-                archives.append(
-                    ArchiveEntry(
-                        id=archive.id,
-                        session_id=archive.session_id,
-                        summary=archive.summary,
-                        period_start=datetime.fromisoformat(archive.period_start),
-                        period_end=datetime.fromisoformat(archive.period_end),
-                        created_at=datetime.fromisoformat(archive.created_at),
+        """恢复记忆；数据库失败时不替换当前状态。"""
+        async with self._lock:
+            async with get_session() as db:
+                saved = await db.get(MemoryRuntimeORM, 1)
+                snapshot = MemorySnapshot.model_validate_json(saved.payload) if saved else MemorySnapshot()
+                if not snapshot.legacy_imported:
+                    await self._import_legacy(db, snapshot)
+                facts = {
+                    row.id: _fact(row) for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
+                }
+                rows = list(
+                    await db.scalars(
+                        select(ExperienceORM)
+                        .where(
+                            ExperienceORM.session_id == snapshot.session.session_id,
+                            ExperienceORM.id > snapshot.summary_through,
+                            ExperienceORM.kind.in_(["user", "muika", "agent"]),
+                        )
+                        .order_by(ExperienceORM.id)
                     )
                 )
-        self.records = records
-        self.archives = archives
-        self.session.is_first_session = not (records or archives)
-        logger.info(f"[Memory] Loaded records={len(records)} archives={len(archives)}")
+                snapshot.session.is_first_session = snapshot.first_interaction_at is None and not facts
+                await self._save_snapshot(db, snapshot)
+            self.snapshot, self.facts = snapshot, facts
+            self.recent_turns = deque(self._turn(row) for row in rows)
 
-    def new_session(self):
-        """
-        创建新的 Session（通常由 bot_connect 事件触发）。
-        若已存在历史记忆，自动进入 Resume 模式（is_first_session=False）。
-        """
-        has_prior = bool(self.records) or bool(self.archives)
-        self.session = SessionState(is_first_session=not has_prior)
-        self.recent_turns.clear()
-        logger.info(
-            f"[Memory] New session — id={self.session.session_id[:8]}... "
-            f"mode={'resume' if has_prior else 'first'} "
-            f"prior_records={len(self.records)} prior_archives={len(self.archives)}"
-        )
-
-    def add_context(
-        self, role: Literal["user", "muika", "agent"], content: str, resources: Optional[list[Resource]] = None
-    ):
-        """记录一条 Session 级对话记录。"""
-        self.recent_turns.append(SessionTurn(role=role, content=content, resources=resources or []))
-
-    def _record_key(self, layer: MemoryLayer, category: MemoryCategory, key: str) -> str:
-        return f"{layer.value}:{category.value}:{key}"
-
-    async def upsert_memory(
-        self,
-        layer: MemoryLayer,
-        category: MemoryCategory,
-        key: str,
-        value: str,
-        expires_at: Optional[datetime] = None,
-    ) -> None:
-        """插入或覆盖一条记忆（CORE / STATE / PREFERENCE 层）。"""
-        storage_key = self._record_key(layer, category, key)
-        existing = self.records.get(storage_key)
-
-        try:
-            async with get_session() as db_session:
-                await MemoryRecordCRUD.upsert(
-                    db_session,
-                    layer=layer.value,
-                    category=category.value,
-                    key=key,
-                    value=value,
-                    expires_at=expires_at.isoformat() if expires_at else None,
-                )
-        except Exception as e:
-            logger.error(f"[Memory] DB upsert failed for {storage_key!r}: {e}")
-            raise
-
-        if existing:
-            logger.warning(f"Memory '{storage_key}' overwritten: {existing.value!r} → {value!r}")
-            existing.value = value
-            existing.updated_at = datetime.now()
-            existing.expires_at = expires_at
-        else:
-            self.records[storage_key] = MemoryRecord(
-                layer=layer,
-                category=category,
-                key=key,
-                value=value,
-                expires_at=expires_at,
+    async def _import_legacy(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
+        now = datetime.now().isoformat()
+        for row in await db.scalars(select(MemoryRecordORM).order_by(MemoryRecordORM.updated_at, MemoryRecordORM.id)):
+            if row.key in {"first_conversation_time", "self_reflection_last_at"}:
+                try:
+                    if row.key == "first_conversation_time":
+                        snapshot.first_interaction_at = _local(row.value)
+                    else:
+                        snapshot.last_dream_at = _local(row.value)
+                except ValueError:
+                    pass
+                continue
+            material = ExperienceORM(
+                session_id="legacy",
+                kind="legacy",
+                content=row.value,
+                occurred_at=_local(row.updated_at).isoformat(),
+                source=f"legacy_memory:{row.id}",
+                resources="[]",
             )
+            db.add(material)
+            await db.flush()
+            if row.layer not in {"core", "preference"}:
+                continue
+            existing = await db.scalar(
+                select(FactORM).where(
+                    FactORM.category == row.category, FactORM.key == row.key, FactORM.active.is_(True)
+                )
+            )
+            if existing is not None:
+                existing.active = False
+            db.add(
+                FactORM(
+                    category=row.category,
+                    key=row.key,
+                    value=row.value,
+                    active=True,
+                    forgotten=False,
+                    source_refs=json.dumps([f"experience:{material.id}"]),
+                    weight=1.0,
+                    weight_at=now,
+                    observed_at=_local(row.updated_at).isoformat(),
+                    last_recalled_at=_local(row.updated_at).isoformat(),
+                    created_at=row.created_at,
+                )
+            )
+        for row in await db.scalars(select(ArchiveRecordORM).order_by(ArchiveRecordORM.period_start)):
+            db.add(
+                DiaryORM(
+                    source=f"legacy_archive:{row.id}",
+                    day=row.period_start[:10],
+                    content=row.summary,
+                    source_refs="[]",
+                    covered_through=0,
+                    created_at=row.created_at,
+                )
+            )
+            if snapshot.first_interaction_at is None:
+                snapshot.first_interaction_at = _local(row.period_start)
+        snapshot.legacy_imported = True
 
-        logger.debug(f"[Memory] Upserted: {storage_key} = {value!r}")
-
-    async def forget_memory(
-        self,
-        layer: MemoryLayer,
-        category: MemoryCategory,
-        key: str,
-    ) -> None:
-        """删除一条记忆。"""
-        storage_key = self._record_key(layer, category, key)
-        if storage_key in self.records:
-            try:
-                async with get_session() as db_session:
-                    await MemoryRecordCRUD.delete(db_session, layer=layer.value, key=key)
-            except Exception as e:
-                logger.error(f"[Memory] DB delete failed for {storage_key!r}: {e}")
-                raise
-            del self.records[storage_key]
-        else:
-            logger.warning(f"[Memory] forget_memory: key not found — {storage_key}")
-
-    async def add_archive(
-        self,
-        summary: str,
-        period_start: datetime,
-        period_end: datetime,
-    ) -> None:
-        """添加一条历史 Session 摘要（ARCHIVE 层）。"""
-        entry = ArchiveEntry(
-            session_id=self.session.session_id,
-            summary=summary,
-            period_start=period_start,
-            period_end=period_end,
+    @staticmethod
+    def _turn(row: ExperienceORM) -> SessionTurn:
+        role: Literal["user", "muika", "agent"] = (
+            "user" if row.kind == "user" else "muika" if row.kind == "muika" else "agent"
+        )
+        return SessionTurn(
+            role, row.content, _local(row.occurred_at), [Resource(**item) for item in json.loads(row.resources)], row.id
         )
 
-        try:
-            async with get_session() as db_session:
-                await ArchiveCRUD.add(
-                    db_session,
-                    session_id=self.session.session_id,
-                    summary=summary,
-                    period_start=period_start.isoformat(),
-                    period_end=period_end.isoformat(),
-                )
-        except Exception as e:
-            logger.error(f"[Memory] DB archive insert failed: {e}")
-            raise
-        self.archives.append(entry)
+    def _preserve_resources(self, resources: list[Resource]) -> list[Resource]:
+        saved = []
+        for resource in resources:
+            directory = mas_config.data_dir.resolve() / "memory_resources"
+            directory.mkdir(parents=True, exist_ok=True)
+            if resource.path:
+                path = Path(resource.path).resolve()
+                content = path.read_bytes()
+            elif isinstance(resource.raw, bytes):
+                content = resource.raw
+            elif resource.raw is not None:
+                content = resource.raw.getvalue()
+            else:
+                raise ValueError("A memory resource needs local content before recording")
+            target = directory / (uuid4().hex + (resource.extension or ".bin"))
+            target.write_bytes(content)
+            saved.append(Resource(type=resource.type, path=str(target), mimetype=resource.mimetype))
+        return saved
 
-    async def update_archive(
+    async def add_context(
         self,
-        summary: str,
-        period_start: datetime,
-        period_end: datetime,
-    ) -> None:
-        """更新一条历史 Session 摘要（ARCHIVE 层）。"""
-        archive_entry = next((a for a in self.archives if a.session_id == self.session.session_id), None)
-        if archive_entry is None:
-            await self.add_archive(summary, period_start, period_end)
-            return
+        role: Literal["user", "muika", "agent"],
+        content: str,
+        resources: list[Resource] | None = None,
+        *,
+        timestamp: datetime | None = None,
+        source: str | None = None,
+    ) -> int:
+        """落库后添加工作上下文，不按条数删除原文。"""
+        return await self.add_material(role, content, timestamp=timestamp, resources=resources, source=source)
 
-        try:
-            async with get_session() as db_session:
-                await ArchiveCRUD.updated(
-                    db_session,
+    async def add_material(
+        self,
+        kind: Literal["user", "muika", "agent", "note", "state", "legacy"],
+        content: str,
+        *,
+        timestamp: datetime | None = None,
+        resources: list[Resource] | None = None,
+        source: str | None = None,
+    ) -> int:
+        """追加素材；来源标识防止事件重投产生重复记录。"""
+        now = _local((timestamp or datetime.now()).isoformat())
+        if kind in {"muika", "agent", "note"}:
+            content = public_text(content)
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            async with get_session() as db:
+                if source:
+                    existing = await db.scalar(select(ExperienceORM).where(ExperienceORM.source == source))
+                    if existing is not None:
+                        return existing.id
+                refs = self._preserve_resources(resources or [])
+                row = ExperienceORM(
                     session_id=self.session.session_id,
-                    summary=summary,
-                    period_start=period_start.isoformat(),
-                    period_end=period_end.isoformat(),
+                    kind=kind,
+                    content=content,
+                    occurred_at=now.isoformat(),
+                    resources=json.dumps([r.to_dict() for r in refs]),
+                    source=source,
                 )
-        except Exception as e:
-            logger.error(f"[Memory] DB archive update failed: {e}")
-            raise
-        archive_entry.summary = summary
-        archive_entry.period_start = period_start
-        archive_entry.period_end = period_end
+                db.add(row)
+                await db.flush()
+                if kind in {"user", "muika"} and snapshot.first_interaction_at is None:
+                    snapshot.first_interaction_at = now
+                await self._save_snapshot(db, snapshot)
+                turn = self._turn(row) if kind in {"user", "muika", "agent"} else None
+                row_id = row.id
+            self.snapshot = snapshot
+            if turn is not None:
+                self.recent_turns.append(turn)
+            return row_id
 
-    def _iter_layer(self, layer: MemoryLayer):
-        """遍历指定层的有效记忆（自动跳过已过期的 STATE 条目）。"""
+    async def new_session(self) -> None:
+        """开始新会话，保留经历和持续状态。"""
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            snapshot.session = SessionState(is_first_session=not self.has_history)
+            snapshot.working_summary, snapshot.summary_through = "", 0
+            async with get_session() as db:
+                await self._save_snapshot(db, snapshot)
+            self.snapshot = snapshot
+            self.recent_turns.clear()
+
+    def get_memory_prompt(self, budget: int = 2048) -> str:
+        """按回顾权重选择预算内最多二十条原子事实。"""
         now = datetime.now()
-        skipped = 0
-        for record in self.records.values():
-            if record.layer != layer:
+        records = sorted(
+            self.facts.values(), key=lambda fact: (fact.score(now), fact.last_recalled_at, -fact.id), reverse=True
+        )
+        lines: list[str] = []
+        for record in records:
+            line = record.describe()
+            if estimate_tokens("\n".join(lines + [line])) > budget:
                 continue
-            if record.expires_at and record.expires_at < now:
-                skipped += 1
-                logger.debug(
-                    f"[Memory] Skipping expired STATE record: key={record.key!r} "
-                    f"expired={record.expires_at.isoformat()}"
+            lines.append(line)
+            if len(lines) == 20:
+                break
+        return "\n".join(lines)
+
+    @staticmethod
+    def _apply_state(
+        state: PersistentState, update: StateUpdate, now: datetime, cutoff: datetime | None = None
+    ) -> None:
+        if update.mood is not None and (
+            cutoff is None or state.mood_updated_at is None or state.mood_updated_at <= cutoff
+        ):
+            state.mood, state.reason, state.mood_updated_at = update.mood, update.reason, now
+        by_id = {item.id: item for item in state.intentions}
+        for change in update.intentions:
+            previous = by_id.get(change.id)
+            if previous is not None and cutoff is not None and previous.updated_at > cutoff:
+                continue
+            item = change.model_copy(deep=True)
+            item.updated_at = now
+            item.task_id = previous.task_id if previous else None
+            if item.status in {"acting", "awaiting_feedback"}:
+                item.status = previous.status if previous else "open"
+            by_id[item.id] = item
+        state.intentions = list(by_id.values())
+
+    async def update_state(self, update: StateUpdate) -> None:
+        """原子保存白天情绪及素材，保留真实任务关联。"""
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            now = datetime.now()
+            self._apply_state(snapshot.state, update, now)
+            async with get_session() as db:
+                db.add(
+                    ExperienceORM(
+                        session_id=self.session.session_id,
+                        kind="state",
+                        content=update.model_dump_json(),
+                        occurred_at=now.isoformat(),
+                        resources="[]",
+                    )
                 )
-                continue
-            yield record
-        if skipped:
-            logger.debug(f"[Memory] _iter_layer({layer.value}): skipped {skipped} expired record(s)")
+                await self._save_snapshot(db, snapshot)
+            self.snapshot = snapshot
 
-    def get_core_prompt(self) -> str:
-        """
-        返回 CoreIdentity 层的结构化摘要，永久注入 system prompt。
-        按 category 分组，每组输出为 Markdown 列表。
-        """
-        records = list(self._iter_layer(MemoryLayer.CORE))
-        if not records:
-            logger.debug("[Memory] get_core_prompt: no CORE records, skipping injection.")
-            return ""
+    async def mark_considered(self) -> None:
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            snapshot.state.last_considered_at = datetime.now()
+            async with get_session() as db:
+                await self._save_snapshot(db, snapshot)
+            self.snapshot = snapshot
 
-        label_map = {
-            MemoryCategory.USER: "User",
-            MemoryCategory.SELF: "Self",
-            MemoryCategory.WORLD: "World",
-            MemoryCategory.RELATION: "Relation",
-        }
+    async def link_intention(self, intention_id: str, task_id: str) -> None:
+        """记录真实任务关联，防止同一意愿再次派发。"""
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            item = next((i for i in snapshot.state.intentions if i.id == intention_id), None)
+            if item is not None and item.task_id == task_id:
+                return
+            if item is None or item.task_id is not None or item.status != "open":
+                raise ValueError("The intention is missing, resolved or already linked to a task")
+            item.task_id, item.status, item.updated_at = task_id, "acting", datetime.now()
+            async with get_session() as db:
+                await self._save_snapshot(db, snapshot)
+            self.snapshot = snapshot
 
-        by_category: dict[MemoryCategory, list[MemoryRecord]] = {}
-        for r in records:
-            by_category.setdefault(r.category, []).append(r)
+    async def record_task_result(self, task_id: str, status: str) -> None:
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            for item in snapshot.state.intentions:
+                if item.task_id == task_id:
+                    item.status = "awaiting_feedback" if status == "completed" else "open"
+                    item.updated_at = datetime.now()
+            async with get_session() as db:
+                await self._save_snapshot(db, snapshot)
+            self.snapshot = snapshot
 
-        parts = []
-        for cat, items in by_category.items():
-            parts.append(f"## {label_map.get(cat, cat.value.capitalize())} (Core Facts)")
-            for item in items:
-                parts.append(f"- {item.key}: {item.value}")
+    async def forget_memory(self, category: MemoryCategory, key: str) -> None:
+        """撤下事实并保留遗忘标记，避免自动重新导入。"""
+        async with self._lock:
+            async with get_session() as db:
+                rows = list(
+                    await db.scalars(select(FactORM).where(FactORM.category == category.value, FactORM.key == key))
+                )
+                for row in rows:
+                    row.active, row.forgotten = False, True
+                ids = {row.id for row in rows}
+            self.facts = {key: fact for key, fact in self.facts.items() if key not in ids}
 
-        logger.debug(
-            "[Memory] get_core_prompt: injecting "
-            f"{len(records)} CORE record(s) across "
-            f"{len(by_category)} category/categories."
+    async def pending_days(self, now: datetime, *, include_today: bool = False) -> list[date]:
+        cutoff = now.date() if include_today or now.hour >= 5 else now.date() - timedelta(days=1)
+        async with get_session() as db:
+            days = (
+                await db.execute(
+                    select(func.substr(ExperienceORM.occurred_at, 1, 10), func.max(ExperienceORM.id))
+                    .where(ExperienceORM.kind != "legacy")
+                    .group_by(func.substr(ExperienceORM.occurred_at, 1, 10))
+                )
+            ).all()
+            diaries = {
+                row.day: row.covered_through
+                for row in await db.scalars(select(DiaryORM).where(DiaryORM.source.like("dream:%")))
+            }
+        return sorted(
+            date.fromisoformat(day)
+            for day, latest in days
+            if (date.fromisoformat(day) <= cutoff if include_today else date.fromisoformat(day) < cutoff)
+            and latest > diaries.get(day, 0)
         )
-        return "\n".join(parts)
 
-    def get_resume_context(self, max_items: int = 3) -> str:
-        """
-        返回 RelationshipState 层的最近条目，仅在 Resume 模式下注入。
-        按 updated_at 降序，最多返回 max_items 条。
-        """
-        if self.session.is_first_session:
-            logger.debug("[Memory] get_resume_context: first session, skipping STATE injection.")
-            return ""
+    async def day_material(self, day: date) -> list[Experience]:
+        async with get_session() as db:
+            rows = await db.scalars(
+                select(ExperienceORM)
+                .where(
+                    ExperienceORM.occurred_at >= day.isoformat(),
+                    ExperienceORM.occurred_at < (day + timedelta(days=1)).isoformat(),
+                )
+                .order_by(ExperienceORM.occurred_at, ExperienceORM.id)
+            )
+            return [_experience(row) for row in rows]
 
-        records = sorted(
-            self._iter_layer(MemoryLayer.STATE),
-            key=lambda r: r.updated_at,
-            reverse=True,
-        )[:max_items]
+    async def recent_diaries(self, before: date, limit: int = 5) -> list[Diary]:
+        async with get_session() as db:
+            rows = await db.scalars(
+                select(DiaryORM)
+                .where(DiaryORM.day <= before.isoformat())
+                .order_by(DiaryORM.day.desc(), DiaryORM.id.desc())
+                .limit(limit)
+            )
+            return [_diary(row) for row in rows]
 
-        if not records:
-            logger.debug("[Memory] get_resume_context: resume mode but no STATE records found.")
-            return ""
+    async def save_dream(self, day: date, result: DreamResult, through: int, allowed_refs: set[str]) -> bool:
+        """在同一事务提交日记、事实强化、状态和素材进度。"""
+        refs = {ref for fact in result.facts for ref in fact.source_refs} | set(result.tension_source_refs)
+        refs |= {f"fact:{fact_id}" for fact_id in result.recalled_fact_ids}
+        refs |= {ref for item in result.retractions for ref in item.source_refs}
+        refs |= {f"fact:{item.fact_id}" for item in result.retractions}
+        refs |= {f"fact:{fact_id}" for item in result.facts for fact_id in item.supersedes}
+        if not refs <= allowed_refs:
+            raise ValueError("Dream references material that was not supplied")
+        if result.dissonance_delta and (not result.tension_source_refs or not result.tension_reason):
+            raise ValueError("A tension change requires source material and a reason")
+        keys = [(item.category, item.key) for item in result.facts]
+        if len(keys) != len(set(keys)):
+            raise ValueError("The dream contains conflicting updates for the same fact key")
+        async with self._lock:
+            snapshot = self.snapshot.model_copy(deep=True)
+            now, day_end = datetime.now(), datetime.combine(day, time.max)
+            async with get_session() as db:
+                diary = await db.scalar(select(DiaryORM).where(DiaryORM.source == f"dream:{day}"))
+                if diary is not None and diary.covered_through >= through:
+                    return False
+                previous_through = diary.covered_through if diary is not None else 0
+                if diary is None:
+                    diary = DiaryORM(source=f"dream:{day}", day=day.isoformat(), created_at=now.isoformat())
+                    db.add(diary)
+                diary.content, diary.covered_through = public_text(result.diary), through
+                if not diary.content:
+                    raise ValueError("The dream contained no diary text")
+                diary.source_refs = json.dumps(sorted(allowed_refs))
+                evidence = list(
+                    await db.scalars(
+                        select(ExperienceORM).where(
+                            ExperienceORM.id <= through,
+                            ExperienceORM.occurred_at >= day.isoformat(),
+                            ExperienceORM.occurred_at < (day + timedelta(days=1)).isoformat(),
+                        )
+                    )
+                )
+                day_refs = {f"experience:{item.id}" for item in evidence}
+                evidence_dates = {f"experience:{item.id}": _local(item.occurred_at) for item in evidence}
+                new_refs = {f"experience:{item.id}" for item in evidence if item.id > previous_through}
+                if result.dissonance_delta and not set(result.tension_source_refs) & new_refs:
+                    raise ValueError("A tension change needs new evidence from this diary day")
+                if result.relief == "positive_feedback" and not any(
+                    item.kind == "user" and f"experience:{item.id}" in result.tension_source_refs for item in evidence
+                ):
+                    raise ValueError("Positive feedback requires a user experience reference")
+                for item in result.retractions:
+                    if not set(item.source_refs) & day_refs:
+                        raise ValueError("Fact retraction requires new source evidence")
+                    retired = await db.get(FactORM, item.fact_id)
+                    observed = max(evidence_dates[ref] for ref in item.source_refs if ref in evidence_dates)
+                    if retired is not None and _local(retired.observed_at) <= observed:
+                        retired.active = False
+                recalled = set(result.recalled_fact_ids)
+                for change in result.facts:
+                    new_evidence = bool(set(change.source_refs) & day_refs)
+                    observed = max(
+                        (evidence_dates[ref] for ref in change.source_refs if ref in evidence_dates), default=day_end
+                    )
+                    if not new_evidence:
+                        equivalents = [await db.get(FactORM, fact_id) for fact_id in change.supersedes]
+                        if not equivalents or not all(
+                            item is not None
+                            and item.active
+                            and item.category == change.category.value
+                            and item.value == change.value
+                            and f"fact:{item.id}" in change.source_refs
+                            for item in equivalents
+                        ):
+                            raise ValueError(
+                                "Fact updates require new evidence or equivalent source facts to consolidate"
+                            )
+                    rows = list(
+                        await db.scalars(
+                            select(FactORM).where(FactORM.category == change.category.value, FactORM.key == change.key)
+                        )
+                    )
+                    if any(row.forgotten for row in rows):
+                        continue
+                    current = next((row for row in rows if row.active), None)
+                    if current is not None and current.value != change.value and _local(current.observed_at) > observed:
+                        continue
+                    if current is None or current.value != change.value:
+                        if current is not None:
+                            current.active = False
+                        current = FactORM(
+                            category=change.category.value,
+                            key=change.key,
+                            value=change.value,
+                            active=True,
+                            forgotten=False,
+                            source_refs=json.dumps(change.source_refs),
+                            weight=0.0 if new_evidence else 1.0,
+                            weight_at=now.isoformat(),
+                            observed_at=observed.isoformat(),
+                            last_recalled_at=day_end.isoformat(),
+                            created_at=now.isoformat(),
+                        )
+                        db.add(current)
+                        await db.flush()
+                    else:
+                        current.source_refs = json.dumps(
+                            sorted(set(json.loads(current.source_refs)) | set(change.source_refs))
+                        )
+                        current.observed_at = max(_local(current.observed_at), observed).isoformat()
+                    for fact_id in change.supersedes:
+                        retired = await db.get(FactORM, fact_id)
+                        if retired is not None and retired.id != current.id and _local(retired.observed_at) <= observed:
+                            retired.active = False
+                    if new_evidence:
+                        recalled.add(current.id)
+                for fact_id in recalled:
+                    fact = await db.get(FactORM, fact_id)
+                    if fact is None or not fact.active:
+                        continue
+                    seen = await db.scalar(
+                        select(FactRecallORM).where(
+                            FactRecallORM.fact_id == fact_id, FactRecallORM.day == day.isoformat()
+                        )
+                    )
+                    if seen is not None:
+                        continue
+                    stamp = max(now, _local(fact.weight_at), day_end)
+                    fact.weight = _fact(fact).score(stamp) + 2 ** (
+                        -max(0, (stamp - day_end).total_seconds()) / (86400 * 90)
+                    )
+                    fact.weight_at = stamp.isoformat()
+                    fact.last_recalled_at = max(day_end, _local(fact.last_recalled_at)).isoformat()
+                    db.add(FactRecallORM(fact_id=fact_id, day=day.isoformat()))
+                delta = result.dissonance_delta
+                if result.relief == "action_without_feedback":
+                    delta = max(-0.05, delta)
+                snapshot.state.dissonance = max(0.0, min(1.0, snapshot.state.dissonance + delta))
+                if result.state_update is not None:
+                    observed = max(evidence_dates.values())
+                    self._apply_state(snapshot.state, result.state_update, observed, cutoff=observed)
+                snapshot.last_dream_at = now
+                snapshot.legacy_consolidated = True
+                await self._save_snapshot(db, snapshot)
+                await db.flush()
+                facts = {
+                    row.id: _fact(row) for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
+                }
+            self.snapshot, self.facts = snapshot, facts
+            return True
 
-        logger.debug(
-            f"[Memory] get_resume_context: injecting {len(records)} STATE record(s): {[r.key for r in records]}"
+    async def search(self, query: MemoryQuery, *, limit: int = 30) -> list[RecallHit]:
+        """按词和日期读取有限候选，供语义筛选和降级回查。"""
+        terms = [term.strip().casefold() for term in query.terms if term.strip()]
+        hits: list[RecallHit] = []
+        async with get_session() as db:
+            for model, content_column, date_column in (
+                (ExperienceORM, ExperienceORM.content, ExperienceORM.occurred_at),
+                (DiaryORM, DiaryORM.content, DiaryORM.day),
+                (FactORM, FactORM.value, FactORM.created_at),
+            ):
+                statement = select(model)
+                if terms:
+                    statement = statement.where(
+                        or_(*(func.lower(content_column).contains(term, autoescape=True) for term in terms))
+                    )
+                if query.start:
+                    statement = statement.where(date_column >= query.start.isoformat())
+                if query.end:
+                    statement = statement.where(date_column < (query.end + timedelta(days=1)).isoformat())
+                if model is FactORM:
+                    statement = statement.where(FactORM.active.is_(True))
+                rows = await db.scalars(statement.order_by(date_column.desc()).limit(limit))
+                for row in rows:
+                    if isinstance(row, ExperienceORM):
+                        hit = RecallHit(
+                            ref=f"experience:{row.id}", content=public_text(row.content), occurred_at=row.occurred_at
+                        )
+                    elif isinstance(row, DiaryORM):
+                        hit = RecallHit(
+                            ref=f"diary:{row.id}",
+                            content=("[Legacy session summary] " if row.source.startswith("legacy") else "")
+                            + public_text(row.content),
+                            occurred_at=row.day,
+                            source_refs=json.loads(row.source_refs),
+                        )
+                    else:
+                        hit = RecallHit(
+                            ref=f"fact:{row.id}",
+                            content=f"{row.category}/{row.key}: {public_text(row.value)}",
+                            occurred_at=row.created_at,
+                            source_refs=json.loads(row.source_refs),
+                        )
+                    if len(hit.content) > 2400:
+                        position = min(
+                            (hit.content.casefold().find(term) for term in terms if term in hit.content.casefold()),
+                            default=0,
+                        )
+                        start = max(0, position - 300)
+                        hit.content = (
+                            ("…" if start else "")
+                            + hit.content[start : start + 2400]
+                            + "… [Read source for full context]"
+                        )
+                    hits.append(hit)
+        hits.sort(
+            key=lambda item: (sum(term in item.content.casefold() for term in terms), item.occurred_at), reverse=True
         )
-        lines = ["## Recent Relationship State"]
-        for r in records:
-            lines.append(f"- {r.key}: {r.value}")
-        return "\n".join(lines)
+        return hits[:limit]
 
-    def get_archive_prompt(self, max_items: int = 3) -> str:
+    async def read_source(self, ref: str, *, offset: int = 0, limit: int = 6000) -> str:
+        """分页读取来源及相邻素材，不暴露私有思考。"""
+        if offset < 0 or not 1 <= limit <= 12000:
+            raise ValueError("Use offset >= 0 and limit 1..12000")
+        context_ref = re.fullmatch(r"context:([0-9a-f]{64})", ref)
+        task_ref = re.fullmatch(r"task_output:([0-9a-f]{32}):([0-9a-f]{32})", ref)
+        if context_ref or task_ref:
+            if context_ref:
+                path = mas_config.data_dir.resolve() / "context_sources" / (context_ref[1] + ".txt")
+                content = public_text(path.read_text(encoding="utf-8"))
+            else:
+                assert task_ref is not None
+                path = mas_config.data_dir.resolve() / "agent_tasks" / task_ref[1] / (task_ref[2] + ".json")
+                result = ToolResult.model_validate_json(path.read_text(encoding="utf-8"))
+                content = (
+                    public_text(result.text)
+                    + "\nResources: "
+                    + json.dumps([item.model_dump() for item in result.resources])
+                )
+            return self._page(ref, content, offset, limit)
+        match = re.fullmatch(r"(experience|diary|fact):(\d+)", ref)
+        if match is None or offset < 0 or not 1 <= limit <= 12000:
+            raise ValueError("Use experience:N, diary:N or fact:N, offset >= 0 and limit 1..12000")
+        kind, raw_id = match.groups()
+        async with get_session() as db:
+            if kind == "experience":
+                row = await db.get(ExperienceORM, int(raw_id))
+                if row is None:
+                    raise ValueError("Experience not found")
+                previous = list(
+                    await db.scalars(
+                        select(ExperienceORM)
+                        .where(ExperienceORM.session_id == row.session_id, ExperienceORM.id < row.id)
+                        .order_by(ExperienceORM.id.desc())
+                        .limit(2)
+                    )
+                )
+                following = list(
+                    await db.scalars(
+                        select(ExperienceORM)
+                        .where(ExperienceORM.session_id == row.session_id, ExperienceORM.id > row.id)
+                        .order_by(ExperienceORM.id)
+                        .limit(2)
+                    )
+                )
+                content = "\n".join(
+                    public_text(_experience(item).describe()) for item in [*reversed(previous), row, *following]
+                )
+                content += "\nResources: " + row.resources
+                if row.source:
+                    content += "\nOrigin: " + row.source
+            elif kind == "diary":
+                diary = await db.get(DiaryORM, int(raw_id))
+                if diary is None:
+                    raise ValueError("Diary not found")
+                content = f"[{diary.day} | {diary.source}] {public_text(diary.content)}\nSources: {diary.source_refs}"
+            else:
+                fact = await db.get(FactORM, int(raw_id))
+                if fact is None or fact.forgotten:
+                    raise ValueError("Fact is missing or forgotten")
+                content = "[Superseded or invalid fact] " if not fact.active else ""
+                content += public_text(_fact(fact).describe()) + "\nSources: " + fact.source_refs
+        return self._page(ref, content, offset, limit)
+
+    @staticmethod
+    def _page(ref: str, content: str, offset: int, limit: int) -> str:
+        page = content[offset : offset + limit]
+        if offset + limit < len(content):
+            page += f"\n[Continue {ref} at offset {offset + limit}]"
+        return page
+
+    async def prepare_context(
+        self, request: ModelRequest, config: ModelConfig, compactor: ContextCompactor, *, force: bool = False
+    ) -> ModelRequest:
+        """按模型预算整理工作历史，保存摘要与覆盖范围后才替换内存视图。
+
+        先注入已有摘要；输入达到预算的 80% 时，按完整用户回合划分新旧历史，
+        将旧摘要与旧回合一起压缩，目标是让整个请求回落到预算的 60%。
+        预算不足或摘要不可用时发出警告并保留历史，SQLite 原文始终保留。
+
+        :param request: 含当前输入、人格提示、检索内容及近期历史的请求。
+        :param config: 当前目标模型的上下文、输出和思考预算配置。
+        :param compactor: 使用摘要模型分块生成工作摘要的组件。
+        :param force: 将尝试压缩的触发线从 80% 降为 60%。
+        :return: 注入工作摘要并保留近期历史的请求；未能压缩时保留完整历史。
+        :raises RuntimeError: 摘要期间切换了会话，不能提交旧会话的覆盖范围。
         """
-        返回 ARCHIVE 层的最近条目，仅在 Resume 模式下注入。
-        按 period_end 降序，最多返回 max_items 条。
-        """
-        if self.session.is_first_session:
-            logger.debug("[Memory] get_archive_prompt: first session, skipping ARCHIVE injection.")
-            return ""
-
-        records = sorted(
-            self.archives,
-            key=lambda r: r.period_end,
-            reverse=True,
-        )[:max_items]
-
-        if not records:
-            logger.debug("[Memory] get_archive_prompt: resume mode but no ARCHIVE records found.")
-            return ""
-
-        logger.debug(
-            f"[Memory] get_archive_prompt: injecting {len(records)} ARCHIVE record(s):"
-            f" {[r.session_id for r in records]}"
-        )
-        lines = ["## Recent Session Archives"]
-        for r in records:
-            period_end_str = r.period_end.strftime("%Y-%m-%d %H:%M:%S")
-            lines.append(f"- Session {period_end_str}: {r.summary}")
-        return "\n".join(lines)
-
-    def get_preference_records(self) -> list[MemoryRecord]:
-        """返回所有 PreferenceProfile 条目，供 Agent 预处理层检索用。"""
-        prefs = list(self._iter_layer(MemoryLayer.PREFERENCE))
-        logger.debug(f"[Memory] get_preference_records: {len(prefs)} PREFERENCE record(s) available.")
-        return prefs
-
-    def get_archives(self) -> list[ArchiveEntry]:
-        """返回所有历史摘要，供分身 Agent 按需提供。"""
-        return self.archives
-
-    def get_memory_prompt(self) -> str:
-        """
-        构建注入 system prompt 的完整记忆上下文：
-          - CORE 层：永久注入
-          - STATE 层：Resume 模式下注入（最多 3 条）
-          - PREFERENCE: 不注入，由 Agent 按需检索
-          - ARCHIVE: 追加最近 3 条的对话摘要
-        """
-        parts: list[str] = []
-
-        core = self.get_core_prompt()
-        if core:
-            parts.append(core)
-
-        resume = self.get_resume_context()
-        if resume:
-            parts.append(resume)
-
-        archive = self.get_archive_prompt()
-        if archive:
-            parts.append(archive)
-
-        return "\n".join(parts)
+        async with self._context_lock:
+            session_id = self.session.session_id
+            base_system = request.system or ""
+            if self.snapshot.working_summary:
+                request = replace(
+                    request, system=base_system + "\n[Working context summary]\n" + self.snapshot.working_summary
+                )
+            budget = input_budget(config)
+            if request_tokens(request) < budget * (0.6 if force else 0.8):
+                return request
+            history = list(request.history)
+            # 保留完整的最近用户回合，不在 assistant 中间划分摘要范围。
+            boundaries = [i for i, turn in enumerate(history) if turn.role == "user" and i > 0]
+            boundary = next((i for i in reversed(boundaries) if len(history) - i >= 4), 0)
+            if not boundary and boundaries:
+                boundary = boundaries[-1]
+            for candidate in boundaries:
+                if candidate < boundary:
+                    continue
+                retained = replace(request, system=base_system, history=history[candidate:])
+                if request_tokens(retained) + 192 < budget * 0.6:
+                    boundary = candidate
+                    break
+            old, recent = history[:boundary], history[boundary:]
+            if not old and not self.snapshot.working_summary:
+                if request_tokens(request) > budget:
+                    warnings.warn(
+                        "The current input and persona exceed context_window", ContextOverflowWarning, stacklevel=2
+                    )
+                return request
+            base = replace(request, system=base_system, history=recent)
+            allowance = int(budget * 0.6) - request_tokens(base) - 64
+            if allowance < 128:
+                warnings.warn(
+                    "The current input leaves no room for a useful history summary; keeping history",
+                    ContextOverflowWarning,
+                    stacklevel=2,
+                )
+                return request
+            transcript = (
+                self.snapshot.working_summary
+                + "\n"
+                + "\n".join(
+                    f"[experience:{turn.id} | {turn.timestamp.isoformat()} | {turn.role}] {turn.content}"
+                    for turn in old
+                )
+            )
+            summary = await compactor.summarize(transcript, min(4096, allowance), available_tokens=allowance)
+            if summary is None:
+                return request
+            through = old[-1].id if old else self.snapshot.summary_through
+            async with self._lock:
+                if session_id != self.session.session_id:
+                    raise RuntimeError("The session changed during context compression")
+                snapshot = self.snapshot.model_copy(deep=True)
+                snapshot.working_summary, snapshot.summary_through = summary, through
+                async with get_session() as db:
+                    await self._save_snapshot(db, snapshot)
+                self.snapshot = snapshot
+                self.recent_turns = deque(turn for turn in self.recent_turns if turn.id > through)
+            return replace(base, system=base_system + "\n[Working context summary]\n" + summary)

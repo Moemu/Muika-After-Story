@@ -1,106 +1,66 @@
-from __future__ import annotations
+"""提交待整理笔记，检索记忆和读取原始来源。"""
 
-from typing import Literal, Optional
+from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from muika.core.memory import MemoryCategory, MemoryLayer, MemoryManager
+from muika.core.memory import MemoryCategory, MemoryManager, MemoryQuery
 from muika.plugin.func_call import on_function_call
-from muika.utils.logger import logger
 
 
 class MemoryParams(BaseModel):
-    type: Literal["remember", "forget", "read"] = Field(
-        ...,
-        description=(
-            "'remember': store a key-value fact; "
-            "'forget': delete a stored key; "
-            "'read': list stored memories (optionally filtered by category)."
-        ),
+    type: Literal["remember", "forget", "read", "source"]
+    category: MemoryCategory = MemoryCategory.USER
+    key: str | None = Field(None, description="Subject-qualified fact key for forgetting, or a note label.")
+    value: str | None = Field(None, description="A note to remember, or a keyword query for read.")
+    source: str | None = Field(
+        None, description="Inspect an experience:N, diary:N, fact:N, context:hash or task_output:task:call reference."
     )
-    category: MemoryCategory = Field(
-        MemoryCategory.USER,
-        description=(
-            "Memory category: 'user' for user facts, 'self' for self-knowledge, "
-            "'world' for world facts, 'relation' for relationship state."
-        ),
+    offset: int = Field(0, ge=0)
+    terms: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Related short keywords or names for recall. Expand synonyms when useful.",
     )
-    layer: MemoryLayer = Field(
-        MemoryLayer.PREFERENCE,
-        description=(
-            "Which memory layer to write to. Choose carefully:\n"
-            "'core'= CoreIdentity. Use for stable, high-confidence facts that define who the user IS "
-            "or critical relationship anchors. Always injected into every system prompt. "
-            "Examples: user's preferred name/nickname, confirmed occupation, confirmed daily schedule, "
-            "first conversation date, a firmly stated long-term preference.\n"
-            "'state'= RelationshipState. Use for recent, time-sensitive context that matters "
-            "only for the current resumption of conversation. Expires naturally. "
-            "Examples: topic of last conversation, recent emotional tone, an unresolved question, "
-            "a recent disagreement.\n"
-            "'preference' = PreferenceProfile. Use for long-term soft preferences and lifestyle facts "
-            "that are useful but NOT identity-defining. Retrieved on demand, not always injected. "
-            "Examples: favourite music genre, preferred coffee type, hobbies, sleep habits.\n"
-            "'archive'= ArchiveMemory. Reserved for session summaries - do NOT use directly.\n"
-            "RULE: If in doubt between 'core' and 'preference', ask: "
-            "'Would forgetting this change how I should address or understand this person fundamentally?' "
-            "If yes -> 'core'. If no -> 'preference'."
-        ),
-    )
-    key: Optional[str] = Field(
-        None,
-        description="Memory key, required for 'remember' and 'forget'.",
-    )
-    value: Optional[str] = Field(
-        None,
-        description="Memory value, required for 'remember'.",
-    )
+    start: date | None = Field(None, description="Inclusive local date YYYY-MM-DD; resolve relative dates first.")
+    end: date | None = None
 
 
 @on_function_call(
-    "Read, write, or forget a fact in Muika's long-term memory.",
+    "Record a note for your next dream, recall memories by keyword, inspect original sources, or forget a fact.",
     params=MemoryParams,
 )
 async def memory(
     type: str,
     memory: MemoryManager,
     category: str = "user",
-    layer: str = "preference",
-    key: Optional[str] = None,
-    value: Optional[str] = None,
+    key: str | None = None,
+    value: str | None = None,
+    source: str | None = None,
+    offset: int = 0,
+    terms: list[str] | None = None,
+    start: date | None = None,
+    end: date | None = None,
 ) -> str:
-    """读取、保存或删除指定层的长期记忆。"""
-
-    mem_category = MemoryCategory(category)
-    mem_layer = MemoryLayer(layer)
-
-    if type == "read":
-        mem = memory.records
-        if not mem:
-            return "No memories stored yet."
-        lines = [
-            f"[{v.layer.value}/{v.category.value}] {v.key}: {v.value}"
-            for _, v in sorted(mem.items(), key=lambda x: x[1].layer.value)
-            if mem_category is None or v.category == mem_category
-        ]
-        return "\n".join(lines) if lines else "No matching memories found."
-
+    """读写记忆素材；写笔记不会立刻形成事实或增加权重。"""
     if type == "remember":
-        if not key or value is None:
-            return "'key' and 'value' are required for 'remember'."
-        await memory.upsert_memory(
-            layer=mem_layer,
-            category=mem_category,
-            key=key,
-            value=value,
-        )
-        logger.info(f"[Memory] Saved [{mem_layer.value}/{mem_category.value}] {key} = {value!r}")
-        return ""
-
+        if not value:
+            return "A note value is required."
+        ref = await memory.add_material("note", f"{category}/{key or 'note'}: {value}")
+        return f"Note saved as experience:{ref}; it will be reviewed in your diary."
     if type == "forget":
         if not key:
-            return "'key' is required for 'forget'."
-        await memory.forget_memory(layer=mem_layer, category=mem_category, key=key)
-        logger.info(f"[Memory] Forgot [{mem_layer.value}/{mem_category.value}] {key}")
-        return ""
-
-    return f"Unknown memory operation: {type!r}"
+            return "A fact key is required."
+        await memory.forget_memory(MemoryCategory(category), key)
+        return "The fact has been withdrawn from the fact ledger and resident summary."
+    if type == "source":
+        return await memory.read_source(source or "", offset=offset)
+    if type == "read":
+        hits = await memory.search(MemoryQuery(terms=terms or ([value] if value else []), start=start, end=end))
+        return (
+            "\n".join(hit.describe() for hit in hits)
+            or "No keyword matches. Try other words or a source reference; "
+            "this does not establish that the experience never happened."
+        )
+    raise ValueError(f"Unknown memory operation: {type}")

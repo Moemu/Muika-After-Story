@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import replace
+from time import perf_counter
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from muika.plugin.command import ensure_resource_path
 from muika.plugin.func_call.context import ToolContext, get_dependencies
+from muika.utils.logger import logger
 
 from ._retry import LLMRequestError
 from ._schema import (
@@ -20,21 +23,104 @@ from ._schema import (
     ToolResult,
     Usage,
 )
+from .context import ContextPreparer, prepare_request, request_tokens
 from .utils.tools import dispatch_tool
 
 if TYPE_CHECKING:
     from ._base import BaseLLM
 
 
-async def collect_step(model: BaseLLM, request: ModelRequest, messages: Sequence[ModelMessage]) -> ModelCompletions:
+async def _timed_model_step(
+    model: BaseLLM, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
+) -> AsyncGenerator[ModelStreamCompletions, None]:
+    """记录提供者请求的等待和用量，不记录提示或私有思考正文。"""
+    request_id = uuid4().hex[:8]
+    started = perf_counter()
+    first_chunk: float | None = None
+    usage = Usage()
+    status = "interrupted"
+    logger.debug(
+        f"[Model] start | request={request_id} model={model.config.model_name or model.config.provider} "
+        f"messages={len(messages)} estimated_input={request_tokens(request, messages)} stream={stream}"
+    )
+    try:
+        async for chunk in model.request_step(request, messages, stream=stream):
+            if first_chunk is None:
+                first_chunk = perf_counter() - started
+            usage = chunk.usage
+            status = chunk.stop_reason if chunk.succeed else "error"
+            yield chunk
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        first = f"{first_chunk:.3f}" if first_chunk is not None else "none"
+        logger.debug(
+            f"[Model] end | request={request_id} seconds={perf_counter() - started:.3f} "
+            f"first_chunk_seconds={first} status={status} input_tokens={usage.input_tokens} "
+            f"output_tokens={usage.output_tokens} cached_tokens={usage.cached_tokens}"
+        )
+
+
+async def budgeted_step(
+    model: BaseLLM,
+    request: ModelRequest,
+    messages: Sequence[ModelMessage],
+    *,
+    stream: bool,
+    prepare_context: ContextPreparer | None = None,
+) -> AsyncGenerator[ModelStreamCompletions, None]:
+    """检查预算；服务明确拒绝长度时只重试模型请求一次。"""
+
+    async def prepare(request: ModelRequest, messages: Sequence[ModelMessage], force: bool):
+        started = perf_counter()
+        before = request_tokens(request, messages)
+        prepared = (
+            await prepare_context(request, messages, force)
+            if prepare_context is not None
+            else await prepare_request(model, request, messages, force=force)
+        )
+        logger.debug(
+            f"[Context] prepared | seconds={perf_counter() - started:.3f} force={force} "
+            f"input_before={before} input_after={request_tokens(*prepared)}"
+        )
+        return prepared
+
+    request, current = await prepare(request, messages, False)
+    received = False
+    try:
+        async for chunk in _timed_model_step(model, request, current, stream=stream):
+            received = True
+            yield chunk
+    except LLMRequestError as exc:
+        if exc.kind != "context_length" or received:
+            raise
+        smaller, compacted = await prepare(request, current, True)
+        if request_tokens(smaller, compacted) >= request_tokens(request, current):
+            raise
+        async for chunk in _timed_model_step(model, smaller, compacted, stream=stream):
+            yield chunk
+
+
+async def collect_step(
+    model: BaseLLM,
+    request: ModelRequest,
+    messages: Sequence[ModelMessage],
+    *,
+    prepare_context: ContextPreparer | None = None,
+) -> ModelCompletions:
     """收集单步响应，仅在尚未执行工具时切换传输方式。"""
     try:
         try:
-            return await model._collect_stream(model.request_step(request, messages, stream=model.config.stream))
+            return await model._collect_stream(
+                budgeted_step(model, request, messages, stream=model.config.stream, prepare_context=prepare_context)
+            )
         except LLMRequestError as exc:
             if model.config.stream or exc.kind != "timeout" or not model.config.stream_fallback_on_timeout:
                 raise
-            return await model._collect_stream(model.request_step(request, messages, stream=True))
+            return await model._collect_stream(
+                budgeted_step(model, request, messages, stream=True, prepare_context=prepare_context)
+            )
     except LLMRequestError as exc:
         return ModelCompletions(text=str(exc), succeed=False, stop_reason="error")
 
@@ -99,7 +185,7 @@ async def run_conversation(
         completion = ModelCompletions()
         if stream:
             try:
-                async for chunk in model.request_step(request, messages, stream=True):
+                async for chunk in budgeted_step(model, request, messages, stream=True):
                     completion.text += chunk.chunk
                     completion.usage = chunk.usage
                     completion.message = chunk.message or completion.message

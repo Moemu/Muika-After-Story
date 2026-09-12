@@ -18,7 +18,7 @@ session_cmd = on_alconna(
     Alconna(
         "session",
         Subcommand("new", help_text="结束当前会话并开始新会话", dest="new"),
-        Subcommand("summarize", help_text="立即保存当前会话摘要", dest="summarize"),
+        Subcommand("summarize", help_text="整理已有素材为日记", dest="summarize"),
     )
 )
 new_cmd = on_alconna(Alconna("new", meta=CommandMeta("结束当前会话并开始新会话")), aliases={"clear"})
@@ -33,9 +33,6 @@ async def _session_new(muika: Muika) -> str:
 
 @session_cmd.assign("summarize")
 async def _session_summarize(muika: Muika) -> str:
-    """保存当前摘要，并如实报告等待重试的状态。"""
-    if not any(turn.role == "user" for turn in muika.memory.recent_turns):
-        return "[System] 当前没有需要保存的对话"
-    if not await muika.update_session_memory():
-        return "[System] 摘要暂未保存，当前对话已保留，请稍后重试"
-    return "[System] 会话摘要已保存"
+    """手动整理当前已有素材。"""
+    await muika.reflection.force_reflect()
+    return ""

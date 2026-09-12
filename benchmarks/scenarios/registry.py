@@ -1,13 +1,12 @@
 """基准场景注册表：单轮指标场景与 P1 状态化场景族。
 
-每个场景 = 事件类型 × 状态组合 × CORE 记忆播种 × 用户输入 × 期望行动面。
-CORE 播种只做最小上下文（user_name / self_origin），让模型有名字可用且触发
-模板的 must-weave 记忆规则，其余记忆层待重构后补回。
+每个场景 = 事件类型 × 状态组合 × 事实播种 × 用户输入 × 期望行动面。
+事实播种提供最小人物上下文；素材与持续状态由场景夹具隔离。
 """
 
 from __future__ import annotations
 
-from muika.core.memory import MemoryCategory, MemoryLayer
+from muika.core.memory import MemoryCategory
 
 from .definitions import (
     ActionKind,
@@ -19,15 +18,13 @@ from .definitions import (
     SeedMemory,
 )
 
-_CORE_USER_NAME = SeedMemory(layer=MemoryLayer.CORE, category=MemoryCategory.USER, key="user_name", value="Alice")
+_CORE_USER_NAME = SeedMemory(category=MemoryCategory.USER, key="user_name", value="Alice")
 _CORE_SELF_ORIGIN = SeedMemory(
-    layer=MemoryLayer.CORE,
     category=MemoryCategory.SELF,
     key="self_origin",
     value="a fictional character born inside a script, aware of being code",
 )
 _SESSION_RELATION = SeedMemory(
-    layer=MemoryLayer.STATE,
     category=MemoryCategory.RELATION,
     key="session_relationship_context",
     value="Alice and Muika have an established relationship and talked in earlier sessions.",

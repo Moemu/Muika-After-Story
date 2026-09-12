@@ -2,8 +2,10 @@
 from datetime import datetime
 from typing import List, Optional, TypeVar
 
-from muika.config import get_model_config_manager, mas_config
+from muika.config import get_model_config, get_model_config_manager, mas_config
 from muika.llm import ModelConfig, ModelRequest, load_model
+from muika.llm.context import ContextCompactor
+from muika.llm.loader import refresh_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import AdapterInfo, Resource
 from muika.plugin.func_call import get_tool_list
@@ -15,7 +17,7 @@ from muika.utils.logger import logger
 from muika.utils.utils import format_duration
 
 from .events import Event
-from .memory import MemoryManager, MemoryRecord
+from .memory import MemoryManager, RecallResult
 from .state import MuikaState
 from .topic_manager import BaseTopic, EventTopic
 
@@ -35,6 +37,10 @@ def _seconds_since(now: datetime, then: datetime) -> float:
 class MuikaBrain:
     def __init__(self) -> None:  # pragma: no cover
         self.model = load_model()
+        self.compactor = ContextCompactor(
+            load_model(get_model_config(mas_config.session_summarize_model or mas_config.agent_model))
+        )
+        self.model.compactor = self.compactor
         self._setup_config_listener()
 
     def _setup_config_listener(self):  # pragma: no cover
@@ -48,6 +54,11 @@ class MuikaBrain:
 
         try:
             new_model = load_model(new_config)
+            self.compactor.model = refresh_model(
+                self.compactor.model,
+                get_model_config(mas_config.session_summarize_model or mas_config.agent_model),
+            )
+            new_model.compactor = self.compactor
             self.model = new_model
             logger.success(f"Model reloaded: {provider_new}")
         except Exception as e:
@@ -129,6 +140,7 @@ class MuikaBrain:
             adapters_info=self.generate_adapters_info(adapters),
         )
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
+        system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
         # 结尾策略：深夜向内收，白天/傍晚按 category 决定是否留白
         # TODO: 也许可以简化这一部分。目前先考虑效果是否合适
@@ -178,6 +190,7 @@ class MuikaBrain:
         )
 
         try:
+            request = await memory.prepare_context(request, self.model.config, self.compactor)
             completions = await self.model.ask(request)
             if not completions.succeed:
                 raise RuntimeError(f"Model call failed: {completions.text}")
@@ -197,7 +210,7 @@ class MuikaBrain:
         state: MuikaState,
         memory: MemoryManager,
         resources: Optional[List[Resource]] = None,
-        injected_preferences: Optional[List[MemoryRecord]] = None,
+        recalled_memories: RecallResult | None = None,
         adapters: Optional[List[AdapterInfo]] = None,
         god_mode: bool = False,
         now: datetime | None = None,
@@ -223,18 +236,9 @@ class MuikaBrain:
             is_chat=True,
             heartbeat_intensity=get_model_config_manager().heart_intensity,
             memory_context=memory_context,
-            injected_preferences=injected_preferences,
+            recalled_memories=recalled_memories,
             adapters_info=self.generate_adapters_info(adapters, now=current_time),
         )
-
-        # 按需注入：Agent 预处理层匹配到的 PreferenceProfile 条目
-        if injected_preferences:
-            logger.debug(
-                f"[Brain] Injecting {len(injected_preferences)} preference(s): "
-                f"{[r.key for r in injected_preferences]}"
-            )
-        else:
-            logger.debug("[Brain] No preferences injected for this turn.")
 
         # Inject session bootstrap instructions when waking into a fresh session
         if event.type == "session_bootstrap":
@@ -261,7 +265,11 @@ class MuikaBrain:
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
         elif event.type == "time_tick":
-            if state.mood == "lonely":
+            if memory.persistent.dissonance >= 0.6 and any(
+                item.status == "open" for item in memory.persistent.intentions
+            ):
+                prompt = "[System] A quiet moment gives you room to revisit an unfinished wish. You may act, observe, revise the wish, or stay silent. The user being absent is not rejection. Review existing tasks before acting again."
+            elif state.mood == "lonely":
                 prompt = (
                     "[System] A quiet moment passed, but the loneliness lingers. "
                     "You need to use some means to attract users' attention."
@@ -308,6 +316,7 @@ class MuikaBrain:
                     history.pop()
 
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
+        system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
         tools = get_tool_list() if god_mode else None
         request = ModelRequest(
@@ -320,6 +329,7 @@ class MuikaBrain:
         )
 
         try:
+            request = await memory.prepare_context(request, self.model.config, self.compactor)
             completions = await self.model.ask(request)
             if not completions.succeed:
                 raise RuntimeError(f"Model call failed: {completions.text}")

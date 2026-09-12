@@ -38,6 +38,9 @@ class TaskRecord(BaseModel):
     acceptance: str = "Complete the requested work and report what was actually verified."
     corrections: list[str] = Field(default_factory=list)
     messages: list[ModelMessage] = Field(default_factory=list)
+    context_messages: list[ModelMessage] = Field(default_factory=list)
+    context_through: int = 0
+    intention_id: str | None = None
     report: AgentReport | None = None
     report_error: str | None = None
     error: str | None = None
@@ -64,6 +67,7 @@ class CallRecord(BaseModel):
     result: ToolResult | None = None
     output_path: str | None = None
     recovery_evidence: str | None = None
+    completed_at: datetime | None = None
 
 
 class TaskStore:
@@ -148,20 +152,7 @@ class TaskStore:
         return MediaReference(type=resource.type, path=str(target), mimetype=resource.mimetype)
 
     def model_messages(self, task: TaskRecord) -> list[ModelMessage]:
-        """压缩较早的工具正文，完整轨迹和协议字段仍留在持久记录中。"""
-        messages = [message.model_copy(deep=True) for message in task.messages]
-        budget = mas_config.agent_tool_context_chars
-        total = sum(len(m.content) for m in messages if m.role == "tool")
-        if total <= budget:
-            return messages
-        recent = max((i for i, m in enumerate(messages) if m.tool_calls), default=len(messages))
-        for index, message in enumerate(messages):
-            if index >= recent or total <= budget:
-                break
-            if message.role != "tool" or len(message.content) < 1800:
-                continue
-            path = self.save_output(task.id, f"message-{index}.txt", message.content)
-            shortened = message.content[:1200] + f"\n[Earlier observation abridged. Full content: {path}]"
-            total -= len(message.content) - len(shortened)
-            message.content = shortened
-        return messages
+        """返回已保存工作视图和后续消息，完整轨迹仍在 messages 中。"""
+        return [
+            message.model_copy(deep=True) for message in task.context_messages + task.messages[task.context_through :]
+        ]

@@ -12,6 +12,8 @@ class ModelConfig(BaseModel):
 
     max_tokens: int = 4096
     """最大回复 Tokens """
+    context_window: int = 131072
+    """模型服务的上下文预算，包含输入与输出。"""
     temperature: float = 0.75
     """模型的温度系数"""
     top_p: float = 0.95
@@ -126,4 +128,11 @@ class ModelConfig(BaseModel):
     def check_request_timeout(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("request_timeout_seconds must be greater than zero")
+        return value
+
+    @field_validator("context_window")
+    @classmethod
+    def check_context_window(cls, value: int) -> int:
+        if value < 1024:
+            raise ValueError("context_window must be at least 1024")
         return value

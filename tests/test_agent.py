@@ -11,17 +11,16 @@ from unittest.mock import patch
 
 import pytest
 
+from muika.config import mas_config
 from muika.core.agent.agent import Agent
-from muika.core.memory import (
-    MemoryCategory,
-    MemoryLayer,
-    MemoryManager,
-    MemoryRecord,
-    SessionTurn,
-)
+from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.state import MuikaState
-from muika.llm import ModelCompletions
-from muika.llm._schema import ModelMessage
+from muika.llm import ModelCompletions, ModelConfig
+
+
+@pytest.fixture(autouse=True)
+def model_configs(monkeypatch):
+    monkeypatch.setattr("muika.core.agent.agent.get_model_config", lambda name: ModelConfig(provider="_echo"))
 
 
 def _agent(fake_model, fake_summarize=None) -> Agent:
@@ -29,118 +28,9 @@ def _agent(fake_model, fake_summarize=None) -> Agent:
     agent.action_lock = asyncio.Lock()
     agent.model = fake_model
     agent.summarize_model = fake_summarize or fake_model
+    agent.memory_reasoner = MemoryReasoner(agent.model, agent.summarize_model)
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: ""))
     return agent
-
-
-def _preference() -> MemoryRecord:
-    return MemoryRecord(layer=MemoryLayer.PREFERENCE, category=MemoryCategory.USER, key="fav_drink", value="tea")
-
-
-async def test_fetch_preferences_empty_shortcircuit(fake_llm_factory):
-    agent = _agent(fake_llm_factory())
-    result = await agent.fetch_relevant_preferences("hi", [])
-    assert result == []
-    assert agent.model.call_count == 0
-
-
-async def test_fetch_preferences_returns_matched(fake_llm_factory):
-    body = '{"relevant_keys":["fav_drink"]}'
-    fake = fake_llm_factory(
-        response=ModelCompletions(
-            text=f"<think>Match the drink preference.</think>{body}",
-            message=ModelMessage(role="assistant", content=body, reasoning="Match the drink preference."),
-        )
-    )
-    agent = _agent(fake)
-    pref = _preference()
-    result = await agent.fetch_relevant_preferences("drink?", [pref])
-    assert result == [pref]
-    assert agent.model.requests[0].format == "json"
-
-
-async def test_fetch_preferences_llm_failure_empty(fake_llm_factory):
-    fake = fake_llm_factory(error=RuntimeError("boom"))
-    agent = _agent(fake)
-    result = await agent.fetch_relevant_preferences("hi", [_preference()])
-    assert result == []
-
-
-async def test_summarize_session_empty(fake_llm_factory):
-    agent = _agent(fake_llm_factory())
-    result = await agent.summarize_session([])
-    assert result == ""
-    assert agent.summarize_model.call_count == 0
-
-
-async def test_summarize_session_returns_stripped(fake_llm_factory):
-    summarize = fake_llm_factory(response=ModelCompletions(text="A good day. <think>x</think>"))
-    agent = _agent(fake_llm_factory(), fake_summarize=summarize)
-    turns = [SessionTurn(role="user", content="hello"), SessionTurn(role="muika", content="hi")]
-    result = await agent.summarize_session(turns)
-    assert result == "A good day."
-    assert agent.model.call_count == 0  # 走 summarize_model
-    assert summarize.call_count == 1
-
-
-async def test_summarize_session_llm_failure(fake_llm_factory):
-    summarize = fake_llm_factory(error=RuntimeError("boom"))
-    agent = _agent(fake_llm_factory(), fake_summarize=summarize)
-    with pytest.raises(RuntimeError, match="boom"):
-        await agent.summarize_session([SessionTurn(role="user", content="x")])
-
-
-async def test_classify_empty_content(fake_llm_factory):
-    agent = _agent(fake_llm_factory())
-    await agent.classify_and_store_memory("   ", MuikaState())
-    assert agent.model.call_count == 0
-
-
-async def test_classify_state_memory_none(fake_llm_factory):
-    fake = fake_llm_factory(
-        response=ModelCompletions(
-            text='{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
-        )
-    )
-    agent = _agent(fake)
-    state = MuikaState()  # memory 未注入
-    await agent.classify_and_store_memory("likes tea", state)
-    assert agent.model.call_count == 1  # 解析成功但 state.memory 为 None 时不写
-
-
-async def test_classify_stores_record(fake_llm_factory, redirect_get_session):
-    body = '{"should_store":true,"layer":"core","category":"user","key":"fav_drink","value":"tea"}'
-    fake = fake_llm_factory(
-        response=ModelCompletions(
-            text=f"<think>Remember this preference.</think>{body}",
-            message=ModelMessage(role="assistant", content=body, reasoning="Remember this preference."),
-        )
-    )
-    agent = _agent(fake)
-    state = MuikaState(memory=MemoryManager())
-    await agent.classify_and_store_memory("likes tea", state)
-    assert "core:user:fav_drink" in state.memory.records
-    assert state.memory.records["core:user:fav_drink"].value == "tea"
-
-
-async def test_classify_can_decline_task_storage(fake_llm_factory):
-    fake = fake_llm_factory(response=ModelCompletions(text='{"should_store":false,"reason":"task plan"}'))
-    agent = _agent(fake)
-    memory = MemoryManager()
-
-    await agent.classify_and_store_memory("请实现一个插件", MuikaState(memory=memory))
-
-    assert memory.records == {}
-
-
-async def test_classify_retries_then_gives_up(fake_llm_factory):
-    fake = fake_llm_factory(error=RuntimeError("boom"))
-    agent = _agent(fake)
-    state = MuikaState(memory=MemoryManager())
-    with pytest.raises(RuntimeError, match="Memory classification failed"):
-        await agent.classify_and_store_memory("x", state, max_retry=3)
-    assert fake.call_count == 4  # 初始 + 3 次重试
-    assert len(state.memory.records) == 0
 
 
 def _cmd_patches():
@@ -204,3 +94,34 @@ async def test_execute_command_reports_blocked_status(fake_llm_factory):
     with _cmd_patches()[0], _cmd_patches()[1]:
         report, _ = await agent.execute_command("cmd", MuikaState(), executor=None)
     assert report == "Agent blocked: No access."
+
+
+def test_named_models_refresh_at_request_boundary_including_summary_only_changes(monkeypatch, fake_llm_factory):
+    action = fake_llm_factory()
+    summary = fake_llm_factory()
+    agent = _agent(action, summary)
+    monkeypatch.setattr(mas_config, "agent_model", "action")
+    monkeypatch.setattr(mas_config, "session_summarize_model", "summary")
+    configs = {"action": action.config, "summary": summary.config}
+    monkeypatch.setattr("muika.core.agent.agent.get_model_config", configs.__getitem__)
+
+    def load(config):
+        model = fake_llm_factory()
+        model.config = config
+        return model
+
+    monkeypatch.setattr("muika.llm.loader.load_model", load)
+    with _cmd_patches()[0], _cmd_patches()[1]:
+        agent.build_request("unchanged")
+        assert agent.model is action and agent.summarize_model is summary
+        configs["summary"] = summary.config.model_copy(update={"context_window": 200000})
+        agent.build_request("summary changed")
+        assert agent.model is action and agent.summarize_model is not summary
+        assert agent.memory_reasoner.compactor.model.config.context_window == 200000
+        assert summary.config.context_window == 131072
+        configs["action"] = action.config.model_copy(update={"context_window": 1000000})
+        agent.build_request("action changed")
+    assert agent.model is not action and action.config.context_window == 131072
+    assert agent.memory_reasoner.model is agent.model
+    assert agent.memory_reasoner.summarize_model is agent.summarize_model
+    assert agent.model.compactor is agent.memory_reasoner.compactor

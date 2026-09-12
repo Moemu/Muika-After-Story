@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import warnings
+from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime, timezone
+from time import perf_counter
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -12,8 +17,10 @@ from muika.core.events import AgentTaskEvent, Event
 from muika.core.executor import Executor
 from muika.core.processes import get_process_manager
 from muika.core.state import MuikaState
+from muika.llm import BaseLLM, ModelConfig, ModelRequest
 from muika.llm._execution import dispatch_call, observation_message, result_message
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
+from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
 from muika.llm.utils.thought_processor import general_processor
 from muika.plugin.func_call import get_function_calls
 from muika.plugin.func_call.context import tool_context
@@ -52,6 +59,7 @@ class AgentTasks:
         self._persona_owner = False
         self._storage_error: str | None = None
         self._notifications: set[tuple[str, int, str]] = set()
+        self._compaction_failures: dict[str, tuple[ModelConfig, ModelConfig, int]] = {}
 
     async def _save(self, task: TaskRecord, call: CallRecord | None = None) -> None:
         try:
@@ -68,7 +76,12 @@ class AgentTasks:
             records = await self.store.load()
             for task in records:
                 self.tasks[task.id] = task
-                pending = any(call.status == "pending" for call in await self.store.calls(task.id))
+                if task.intention_id and self.state.memory is not None:
+                    await self.state.memory.link_intention(task.intention_id, task.id)
+                calls = await self.store.calls(task.id)
+                for call in calls:
+                    await self._remember_call(call)
+                pending = any(call.status == "pending" for call in calls)
                 if task.status in {"running", "recovering"} or task.handoff or pending and task.status != "cancelled":
                     task.status = "recovering"
                     task.handoff = False
@@ -77,15 +90,25 @@ class AgentTasks:
             self._initialized = True
             self._wake.set()
 
-    async def submit(self, instruction: str, original_request: str) -> TaskRecord:
+    async def submit(self, instruction: str, original_request: str, *, intention_id: str | None = None) -> TaskRecord:
         """保存新任务，执行工作由后台循环负责。"""
         await self.initialize()
         async with self._lock:
             if self._storage_error:
                 raise RuntimeError(self._storage_error)
-            task = TaskRecord(instruction=instruction, original_request=original_request)
+            if intention_id:
+                existing = next((task for task in self.tasks.values() if task.intention_id == intention_id), None)
+                if existing is not None:
+                    return existing
+                if self.state.memory is not None:
+                    intention = next((i for i in self.state.memory.persistent.intentions if i.id == intention_id), None)
+                    if intention is None or intention.task_id is not None or intention.status != "open":
+                        raise ValueError("The intention is missing, resolved or already linked to a task")
+            task = TaskRecord(instruction=instruction, original_request=original_request, intention_id=intention_id)
             await self._save(task)
             self.tasks[task.id] = task
+            if intention_id and self.state.memory is not None:
+                await self.state.memory.link_intention(intention_id, task.id)
             self._wake.set()
             return task
 
@@ -94,6 +117,7 @@ class AgentTasks:
         await self.initialize()
         async with self._lock:
             task = self.tasks[task_id]
+            self._compaction_failures.pop(task_id, None)
             task.revision += 1
             task.report = None
             task.report_error = None
@@ -157,6 +181,7 @@ class AgentTasks:
                         self._storage_error = f"Task storage is unavailable: {storage_exc}"
                         logger.error(f"[AgentTask] {self._storage_error}")
                 finally:
+                    self._compaction_failures.pop(task.id, None)
                     self.active_id = None
                     self._boundary.set()
 
@@ -213,7 +238,8 @@ class AgentTasks:
                 applied_revision = task.revision
                 await self._save(task)
             request = self.agent.build_request(
-                f"{task.instruction}\n\nOriginal request:\n{task.original_request}\n\nAcceptance:\n{task.acceptance}"
+                f"{task.instruction}\n\nOriginal request:\n{task.original_request}\n\nAcceptance:\n{task.acceptance}",
+                self.state,
             )
             if uncertain:
                 safe = {name for name, caller in get_function_calls().items() if caller.read_only}
@@ -233,8 +259,19 @@ class AgentTasks:
             if task.format_retry:
                 request = replace(request, tools=[])
             revision = task.revision
+            model = self.agent.model
+
+            async def prepare_context(request: ModelRequest, messages: Sequence[ModelMessage], force: bool):
+                return await self._prepare_context(task, model, request, messages, force)
+
+            started = perf_counter()
+            logger.debug(f"[AgentTask] step_start | task={task.id} revision={revision} messages={len(task.messages)}")
             with tool_context(self.state, self.executor, task_id=task.id):
-                completion = await self.agent.model.step(request, self.store.model_messages(task))
+                completion = await model.step(request, self.store.model_messages(task), prepare_context=prepare_context)
+            logger.debug(
+                f"[AgentTask] step_end | task={task.id} seconds={perf_counter() - started:.3f} "
+                f"status={completion.stop_reason}"
+            )
             if task.revision != revision or task.cancel_requested or self._persona_owner:
                 self.store.save_output(task.id, f"superseded-{len(task.messages)}.txt", completion.text)
                 continue
@@ -319,6 +356,47 @@ class AgentTasks:
             if await self._finish_report(task, completion.text):
                 return
 
+    async def _prepare_context(
+        self,
+        task: TaskRecord,
+        model: BaseLLM,
+        request: ModelRequest,
+        messages: Sequence[ModelMessage],
+        force: bool,
+    ) -> tuple[ModelRequest, list[ModelMessage]]:
+        """在单一入口压缩并保存工作视图，失败后等待明显新增内容或模型配置变化。"""
+        current = list(messages) if force else self.store.model_messages(task)
+        compactor = self.agent.memory_reasoner.compactor
+        summary_config = compactor.model.config
+        budget = input_budget(model.config)
+        tokens = request_tokens(request, current)
+        previous = self._compaction_failures.get(task.id)
+        if not force and previous is not None:
+            failed_model, failed_summary, retry_tokens = previous
+            if (
+                model.config.model_dump() == failed_model.model_dump()
+                and summary_config.model_dump() == failed_summary.model_dump()
+                and tokens < retry_tokens
+            ):
+                logger.debug(f"[Context] deferred | task={task.id} input_tokens={tokens} retry_at={retry_tokens}")
+                if tokens > budget:
+                    warnings.warn(
+                        "The retained action context exceeds context_window", ContextOverflowWarning, stacklevel=2
+                    )
+                return request, current
+
+        revision = task.revision
+        compacted, _, _ = await compactor.compact_messages(request, current, model.config, force=force)
+        if task.revision != revision:
+            return request, current
+        if compacted != current:
+            task.context_messages, task.context_through = compacted, len(task.messages)
+            await self._save(task)
+            self._compaction_failures.pop(task.id, None)
+        elif tokens >= budget * 0.8:
+            self._compaction_failures[task.id] = (model.config, summary_config, math.ceil(tokens * 1.2))
+        return request, compacted
+
     @staticmethod
     def _complete_interrupted_batch(task: TaskRecord, calls: list[CallRecord]) -> None:
         """为中断批次补齐协议结果，不重新执行工具。"""
@@ -348,6 +426,8 @@ class AgentTasks:
                         is_error=True,
                     )
                     rebuilt.append(result_message(call, result))
+        if task.messages != rebuilt:
+            task.context_messages, task.context_through = [], 0
         task.messages = rebuilt
 
     async def _record_call(self, task: TaskRecord, call: ToolCall, message_index: int) -> ToolResult:
@@ -381,8 +461,24 @@ class AgentTasks:
             task.messages.append(result_message(call, result))
             task.resources.extend(ref for ref in result.resources if ref not in task.resources)
             record.status = "completed"
+            record.completed_at = datetime.now(timezone.utc)
             await self._save(task, record)
+        await self._remember_call(record)
         return result
+
+    async def _remember_call(self, record: CallRecord) -> None:
+        """补齐已完成动作的素材，以来源去重且不重放动作。"""
+        result = record.result
+        if result is not None and record.completed_at is not None and self.state.memory is not None:
+            await self.state.memory.add_material(
+                "agent",
+                f"Task {record.task_id}, call {record.call.id} ({record.call.name}), "
+                f"error={result.is_error}:\n{result.text}\n"
+                f"Full result: task_output:{record.task_id}:{record.id}",
+                source=f"task_call:{record.id}",
+                timestamp=record.completed_at,
+                resources=[ref.to_resource() for ref in result.resources],
+            )
 
     async def _finish_report(self, task: TaskRecord, text: str) -> bool:
         report = parse_report(text)
@@ -477,7 +573,8 @@ class AgentTasks:
             return
         self._notifications.add(key)
         body = task.report.describe() if task.report else task.error or task.report_error or "Task cancelled."
-        await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, body))
+        completed_at = datetime.fromisoformat(task.updated_at).astimezone().replace(tzinfo=None)
+        await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, body, timestamp=completed_at))
 
     def is_current_event(self, event: AgentTaskEvent) -> bool:
         task = self.tasks.get(event.task_id)

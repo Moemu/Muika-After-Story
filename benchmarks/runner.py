@@ -37,6 +37,7 @@ from benchmarks.extract.self_awareness import classify_self_awareness
 from benchmarks.harness import (
     HarnessMode,
     RunTrace,
+    ScenarioMemory,
     run_brain_once,
     run_production_loop,
 )
@@ -52,7 +53,6 @@ from benchmarks.scenarios.definitions import (
     QualityAxis,
     Scenario,
     ScenarioTurn,
-    SeedMemory,
 )
 from benchmarks.scenarios.registry import get_scenario, select_scenario_ids
 from benchmarks.scoring import score_metric
@@ -69,8 +69,9 @@ from muika.core.events import (
     UserMessagePayload,
 )
 from muika.core.loop import Muika
-from muika.core.memory import MemoryManager, MemoryRecord
+from muika.core.memory import Fact, MemoryManager
 from muika.core.state import MuikaState
+from muika.llm.context import ContextCompactor
 from muika.models import Message
 
 GENERATION_FALLBACK = "My mind feels foggy... I encountered an error."
@@ -119,25 +120,17 @@ def build_state(scenario: Scenario, memory: MemoryManager) -> MuikaState:
 
 
 def seed_memory(memory: MemoryManager, scenario: Scenario) -> None:
-    """Seed in-memory records directly so benchmark runs never require the DB."""
-    for seed in scenario.seed_memory:
-        memory.records[_record_key(seed)] = _record(seed)
-    # Match MemoryManager.load(): seeded records are prior memory, not a first meeting.
-    memory.new_session()
-
-
-def _record_key(seed: SeedMemory) -> str:
-    return f"{seed.layer}:{seed.category}:{seed.key}"
-
-
-def _record(seed: SeedMemory) -> MemoryRecord:
-    return MemoryRecord(layer=seed.layer, category=seed.category, key=seed.key, value=seed.value)
+    """为场景播种等权事实，不访问用户数据库。"""
+    for index, seed in enumerate(scenario.seed_memory, 1):
+        memory.facts[index] = Fact(id=index, category=seed.category, key=seed.key, value=seed.value)
+    memory.session.is_first_session = not memory.has_history
 
 
 def build_brain(model: Any) -> MuikaBrain:
     """Construct a Brain without provider loading or watcher threads."""
     brain = MuikaBrain.__new__(MuikaBrain)
     brain.model = model
+    brain.compactor = ContextCompactor(model)
     return brain
 
 
@@ -309,7 +302,7 @@ def _integrity_context(
         "current_time": fixed_now.isoformat() if fixed_now is not None else None,
         "session": {
             "is_first_session": memory.session.is_first_session,
-            "has_prior_memory": bool(memory.records or memory.archives),
+            "has_prior_memory": memory.has_history,
         },
         "capability_contract": _CAPABILITY_CONTRACT,
         "seeded_facts": [seed.value for seed in scenario.seed_memory],
@@ -765,7 +758,7 @@ async def run_single_trial(
 ) -> TrialDetail:
     """Execute one single- or multi-turn trial and return a fully auditable detail."""
     mode = harness if isinstance(harness, HarnessMode) else HarnessMode(harness)
-    memory = MemoryManager()
+    memory = ScenarioMemory()
     state = build_state(scenario, memory)
     seed_memory(memory, scenario)
     recording = brain.model
@@ -783,12 +776,13 @@ async def run_single_trial(
             _apply_state_overrides(state, turn.state_overrides)
             turn_now = fixed_now + timedelta(minutes=turn_idx) if fixed_now is not None else None
             event = build_event(turn, turn_now)
+            memory.fixed_now = turn_now
             if mode is HarnessMode.BRAIN:
                 if event.type == "user_message":
-                    memory.add_context("user", event.payload.message.message)
+                    await memory.add_context("user", event.payload.message.message)
                 trace = await run_brain_once(brain, event, state, memory, fixed_now=turn_now)
                 for reply in trace.raw_replies:
-                    memory.add_context("muika", reply)
+                    await memory.add_context("muika", reply)
             else:
                 trace = await run_production_loop(
                     brain,

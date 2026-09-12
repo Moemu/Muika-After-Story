@@ -219,7 +219,6 @@ class CoreBootstrap:
 
             if not self.is_bootstraped:
                 self.is_bootstraped = True
-                self._muika.memory.new_session()
                 await self._muika.create_event(SessionBootstrapEvent())
 
             # 标记适配器为已引导

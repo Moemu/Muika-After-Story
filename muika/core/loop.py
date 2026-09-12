@@ -21,8 +21,6 @@ from .agent.agent import Agent
 from .agent.tasks import AgentTasks
 from .brain import MuikaBrain
 from .constants import (
-    AUTO_SUMMARY_INTERVAL,
-    AUTO_SUMMARY_MIN_TURNS,
     CURIOSITY_THRESHOLD,
     DIGEST_INTERVAL_SECONDS,
     DIGEST_STARTUP_DELAY,
@@ -40,13 +38,7 @@ from .events import (
     TimeTickEvent,
 )
 from .executor import Executor
-from .memory import (
-    MemoryCategory,
-    MemoryLayer,
-    MemoryManager,
-    MemoryRecord,
-    SessionTurn,
-)
+from .memory import MemoryManager, RecallResult, StateUpdate
 from .processes import get_process_manager
 from .reflection import ReflectionAgent
 from .self_mod.proposals import is_core_maintenance_active
@@ -82,6 +74,8 @@ class ParsedReply:
     """模型选择本轮沉默（<do_nothing>），不发消息不写 memory。"""
     agent_controls: list[AgentControl] = field(default_factory=list)
     agent_errors: list[str] = field(default_factory=list)
+    state_updates: list[StateUpdate] = field(default_factory=list)
+    intention_ids: list[str | None] = field(default_factory=list)
 
 
 class Muika:
@@ -106,25 +100,19 @@ class Muika:
             agent=self.agent,
             memory=self.memory,
             state=self.state,
-            topic_manager=self.topic_manager,
             executor=self.executor,
         )
 
         self._session_end_triggered: bool = False
         self._is_collecting_event: bool = False
         self._last_digest_time: float = 0.0
-        self._last_summary_turn: Optional[SessionTurn] = None
-        self._last_summary_time: float = datetime.now().timestamp()
         self._timeout_task: Optional[asyncio.Task] = None
         self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
         self._god_mode_pending: bool = False
 
         self._tasks: set[asyncio.Task[object]] = set()
-        self._summary_task: Optional[asyncio.Task[bool]] = None
-        self._summary_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
-        self._summary_retry_at: float = 0.0
 
     async def collect_events(self) -> Event:
         """等待队列事件，空闲超时则生成时间事件。"""
@@ -153,6 +141,19 @@ class Muika:
 
         if self.state.active_topic is not None:
             return None
+
+        persistent = self.memory.persistent
+        considered = max(
+            (stamp for stamp in (persistent.last_considered_at, self.state.last_proactive_at) if stamp is not None),
+            default=None,
+        )
+        if (
+            persistent.dissonance >= 0.6
+            and any(item.status == "open" for item in persistent.intentions)
+            and (datetime.now() - self.state.last_interaction).total_seconds() >= 60
+            and (considered is None or (datetime.now() - considered).total_seconds() >= PROACTIVE_COOLDOWN)
+        ):
+            return "emotional"
 
         if self.state.loneliness > 0.8:
             if self.state.last_proactive_at is not None:
@@ -212,7 +213,13 @@ class Muika:
         if isinstance(event, AgentTaskEvent):
             if event.task_id != "control-error" and not self.agent_tasks.is_current_event(event):
                 return
-            self.memory.add_context("agent", f"[Action result] {event.task_id}: {event.report}")
+            await self.memory.add_context(
+                "agent",
+                f"[Action result] {event.task_id}: {event.report}",
+                source=f"task:{event.task_id}:{event.revision}:{event.status}",
+                timestamp=event.timestamp,
+            )
+            await self.memory.record_task_result(event.task_id, event.status)
         elif isinstance(event, AgentHandoffEvent):
             if not self._god_mode_pending:
                 return
@@ -227,7 +234,12 @@ class Muika:
         self._is_collecting_event = False
         self._log_event(event)
         if event.type == "user_message":
-            self.memory.add_context("user", event.payload.message.message)
+            await self.memory.add_context(
+                "user",
+                event.payload.message.message,
+                resources=event.payload.message.resources,
+                timestamp=event.timestamp,
+            )
             self._cancel_timeout()
 
         self.state.tick_state(event, dt)
@@ -242,9 +254,6 @@ class Muika:
             self._session_end_triggered = False
             await self._handle_session_end()
             return
-
-        if event.type == "session_bootstrap" and self.memory.session.is_first_session:
-            await self._record_first_conversation()
 
         if event.type == "adapter_online":
             self.current_adapters.append(event.adapter)
@@ -261,8 +270,8 @@ class Muika:
             await self._run_topic_pipeline()
             return
 
-        injected_preferences = await self._fetch_preferences(event)
-        await self._run_brain_pipeline(event, injected_preferences)
+        recalled_memories = await self._fetch_memories(event)
+        await self._run_brain_pipeline(event, recalled_memories)
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
         self._save_last_connection_time()
@@ -288,7 +297,7 @@ class Muika:
             self._last_digest_time = current_time
             self.start_background_task(self.digest_agent.fetch_and_digest())
 
-        if not self._session_end_triggered and self.memory.recent_turns and time.monotonic() >= self._summary_retry_at:
+        if not self._session_end_triggered and self.memory.recent_turns:
             last_activity = self.state.last_interaction
             if self.state.active_topic is not None:
                 last_activity = max(last_activity, self.state.active_topic.started_at)
@@ -298,28 +307,7 @@ class Muika:
                 self._session_end_triggered = True
                 await self.create_event(SessionEndEvent())
 
-            summary_idle_seconds = current_time - self._last_summary_time
-            latest_turn = self.memory.recent_turns[-1] if self.memory.recent_turns else None
-            if (
-                summary_idle_seconds >= AUTO_SUMMARY_INTERVAL
-                and len(self.memory.recent_turns) >= AUTO_SUMMARY_MIN_TURNS
-                and latest_turn != self._last_summary_turn
-                and (self._summary_task is None or self._summary_task.done())
-            ):
-                self._last_summary_time = current_time
-                logger.info(f"[Loop] Auto summary triggered after {summary_idle_seconds / 60:.1f} min of idle.")
-                self._summary_task = self.start_background_task(self.update_session_memory())
-
-    async def _record_first_conversation(self) -> None:
-        """首次 session 时将 first_conversation_time 写入 CoreIdentity 记忆。"""
-        first_time = datetime.now().isoformat()
-        await self.memory.upsert_memory(
-            layer=MemoryLayer.CORE,
-            category=MemoryCategory.USER,
-            key="first_conversation_time",
-            value=first_time,
-        )
-        logger.info(f"[Memory] Recorded first_conversation_time: {first_time}")
+        self.start_background_task(self.reflection.maybe_reflect())
 
     @staticmethod
     def _parse_reply_tags(reply: str) -> ParsedReply:
@@ -341,6 +329,14 @@ class Muika:
         do_nothing = bool(re.search(r"<do_nothing\s*/?>", reply, re.IGNORECASE))
         reply = re.sub(r"<do_nothing\s*/?>", "", reply, flags=re.IGNORECASE).strip()
 
+        state_updates = []
+        for raw in re.findall(r"<state\b[^>]*>(.*?)</state\s*>", reply, re.DOTALL | re.IGNORECASE):
+            try:
+                state_updates.append(StateUpdate.model_validate_json(raw))
+            except ValidationError as exc:
+                logger.warning(f"[Memory] Invalid state update: {exc}")
+        reply = re.sub(r"<state\b[^>]*>.*?(?:</state\s*>|$)", "", reply, flags=re.DOTALL | re.IGNORECASE)
+        intention_ids: list[str | None] = []
         agent_commands = []
         agent_controls = []
         agent_errors = []
@@ -348,15 +344,22 @@ class Muika:
             attributes, instruction = match.groups()
             if not attributes.strip():
                 agent_commands.append(instruction.strip())
+                intention_ids.append(None)
                 continue
             values = {name: value for name, _, value in re.findall(r"(\w+)\s*=\s*([\"'])(.*?)\2", attributes)}
+            if set(values) == {"intention_id"}:
+                agent_commands.append(instruction.strip())
+                intention_ids.append(values["intention_id"])
+                continue
             try:
                 agent_controls.append(AgentControl.model_validate({**values, "instruction": instruction.strip()}))
             except ValidationError as exc:
                 agent_errors.append(f"Invalid task control: {exc}")
         clean_reply = re.sub(r"<agent\b[^>]*>.*?(?:</agent\s*>|$)", "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
-        memory_contents = re.findall(r"<memory>(.*?)</memory>", clean_reply, re.DOTALL)
-        clean_reply = re.sub(r"<memory>.*?</memory>", "", clean_reply, flags=re.DOTALL).strip()
+        memory_contents = re.findall(r"<memory\s*>(.*?)</memory\s*>", clean_reply, re.DOTALL | re.IGNORECASE)
+        clean_reply = re.sub(
+            r"<memory\s*>.*?(?:</memory\s*>|$)", "", clean_reply, flags=re.DOTALL | re.IGNORECASE
+        ).strip()
 
         target_match = re.findall(r"<target:\s*(.+?)>", clean_reply, re.DOTALL)
         target = target_match[-1].strip() if target_match else None
@@ -386,6 +389,8 @@ class Muika:
             do_nothing=do_nothing,
             agent_controls=agent_controls,
             agent_errors=agent_errors,
+            state_updates=state_updates,
+            intention_ids=intention_ids,
         )
 
     def _arm_timeout(self, seconds: float) -> None:
@@ -423,6 +428,10 @@ class Muika:
         if not expanded:
             return
         parsed = self._parse_reply_tags(expanded)
+        for update in parsed.state_updates:
+            await self.memory.update_state(update)
+        if parsed.memory_contents:
+            await self._store_memories(parsed.memory_contents)
         if parsed.do_nothing:
             logger.info("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
             return
@@ -431,8 +440,8 @@ class Muika:
         if parsed.timeout is not None:
             self._arm_timeout(parsed.timeout)
         await self.executor.send_message(parsed.clean_reply, target=parsed.target)
-        logger.info(f"[Topic] Sent: {parsed.clean_reply!r}")
-        self.memory.add_context("muika", parsed.clean_reply)
+        logger.info(f"Muika: {parsed.clean_reply}")
+        await self.memory.add_context("muika", parsed.clean_reply)
         self.state.active_topic = ActiveTopicState(
             topic_id=topic.id,
             topic_seed=topic.content,
@@ -441,25 +450,21 @@ class Muika:
         self.state.boredom = 0.0
         logger.info(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
-    async def _fetch_preferences(self, event: Event) -> list[MemoryRecord]:
-        """通过 Agent 检索当前用户消息相关的 PreferenceProfile 条目。"""
+    async def _fetch_memories(self, event: Event) -> RecallResult:
+        """检索当前消息相关的日记、事实及原文。"""
         if event.type != "user_message":
-            return []
-        all_prefs = self.memory.get_preference_records()
-        if not all_prefs:
-            logger.debug("[Loop] Agent preprocess skipped -- no PREFERENCE records in memory.")
-            return []
-        return await self.agent.fetch_relevant_preferences(
-            user_input=event.payload.message.message,
-            preferences=all_prefs,
-        )
+            return RecallResult()
+        self.agent.refresh_models()
+        return await self.agent.memory_reasoner.recall(event.payload.message.message, self.memory)
 
     async def _run_brain_pipeline(
         self,
         event: Event,
-        injected_preferences: list[MemoryRecord],
+        recalled_memories: RecallResult,
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
+        if event.type == "time_tick":
+            await self.memory.mark_considered()
         persona_task = self.agent_tasks.persona_task() if self._god_mode else None
         with tool_context(
             self.state,
@@ -472,23 +477,26 @@ class Muika:
                 event=event,
                 state=self.state,
                 memory=self.memory,
-                injected_preferences=injected_preferences or None,
+                recalled_memories=recalled_memories or None,
                 adapters=self.current_adapters,
                 god_mode=self._god_mode,
+                resources=event.payload.message.resources if event.type == "user_message" else None,
                 task_context=self.agent_tasks.describe(),
             )
             resources = context.resources
         parsed = self._parse_reply_tags(reply)
+        for update in parsed.state_updates:
+            await self.memory.update_state(update)
         silent_turn = parsed.do_nothing
         if not silent_turn:
             if parsed.clean_reply:
                 logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
                 await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
-            self.memory.add_context("muika", reply, resources=resources)
+            await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
             if parsed.timeout is not None:
                 self._arm_timeout(parsed.timeout)
         if parsed.memory_contents:
-            self.start_background_task(self._store_memories(parsed.memory_contents))
+            await self._store_memories(parsed.memory_contents)
         if not silent_turn:
             for control in parsed.agent_controls:
                 try:
@@ -504,20 +512,27 @@ class Muika:
                             await self.agent_tasks.release_persona()
                 except (KeyError, ValueError) as exc:
                     parsed.agent_errors.append(f"Task control failed: {exc}")
-            for command in parsed.agent_commands:
+            for index, command in enumerate(parsed.agent_commands):
+                intention_id = parsed.intention_ids[index] if index < len(parsed.intention_ids) else None
+                intention = next((item for item in self.memory.persistent.intentions if item.id == intention_id), None)
+                if intention_id and (intention is None or intention.task_id or intention.status != "open"):
+                    parsed.agent_errors.append("Intention already acted on or unavailable; review its existing task.")
+                    continue
                 if self._god_mode:
                     self._god_mode = False
                     await self.agent_tasks.release_persona()
                 original = (
                     event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
                 )
-                task = await self.agent_tasks.submit(command, original)
-                self.memory.add_context("agent", f"Task {task.id} queued. Follow this task for related updates.")
+                task = await self.agent_tasks.submit(command, original, intention_id=intention_id)
+                await self.memory.add_context(
+                    "agent", f"Task {task.id} queued. Intent: {command}", source=f"task:{task.id}:intent"
+                )
             if parsed.god_mode and not self._god_mode and not self._god_mode_pending:
                 self._god_mode_pending = True
                 self.start_background_task(self._finish_agent_handoff())
             for error in parsed.agent_errors:
-                self.memory.add_context("agent", error)
+                await self.memory.add_context("agent", error)
                 logger.warning(f"[AgentTask] {error}")
                 if not isinstance(event, AgentTaskEvent) or event.task_id != "control-error":
                     await self.create_event(AgentTaskEvent("control-error", 0, "failed", error))
@@ -540,7 +555,7 @@ class Muika:
         async with self._memory_lock:
             for content in contents:
                 try:
-                    await self.agent.classify_and_store_memory(content, self.state)
+                    await self.memory.add_material("note", content)
                 except Exception as exc:
                     logger.exception(f"[Memory] Could not store note: {exc}")
 
@@ -587,66 +602,9 @@ class Muika:
         await get_process_manager().close()
         self._timeout_task = None
         self._reflection_task = None
-        self._summary_task = None
-
-    async def update_session_memory(self) -> bool:
-        """尝试归档当前对话，失败后保留会话并等待下一个摘要间隔。
-
-        :return: 对话已归档或无需归档时返回 True，等待重试时返回 False。
-        """
-        async with self._summary_lock:
-            turns = list(self.memory.recent_turns)
-            if not turns or not any(turn.role == "user" for turn in turns):
-                return True
-            if self._last_summary_turn == turns[-1]:
-                return True
-            if time.monotonic() < self._summary_retry_at:
-                return False
-            try:
-                summary = await self.agent.summarize_session(turns)
-                await self.memory.update_archive(
-                    summary=summary,
-                    period_start=self.memory.session.started_at,
-                    period_end=datetime.now(),
-                )
-            except Exception as error:
-                self._summary_retry_at = time.monotonic() + AUTO_SUMMARY_INTERVAL
-                logger.warning(
-                    f"[Memory] Session archive failed; keeping turns and retrying "
-                    f"after {AUTO_SUMMARY_INTERVAL:.0f}s: {error}"
-                )
-                return False
-            self._last_summary_turn = turns[-1]
-            self._last_summary_time = datetime.now().timestamp()
-            self._summary_retry_at = 0.0
-            return True
 
     async def _handle_session_end(self) -> None:
-        """
-        Session 结束处理流程：归纳摘要 → 写入 ARCHIVE → 记录话题历史 → 重置 Session。
-        """
-        logger.info("[Loop] Session ending — starting summarization...")
-        turns = list(self.memory.recent_turns)
-
-        # 仅在用户实际参与过对话时才归档：纯 Muika 独白无需写入长期记忆
-        has_user_turn = any(t.role == "user" for t in turns)
-        has_summarized_latest_turn = (self._last_summary_turn == self.memory.recent_turns[-1]) if turns else True
-        reached_min_turns = len(turns) >= AUTO_SUMMARY_MIN_TURNS
-
-        if turns and has_user_turn and reached_min_turns and not has_summarized_latest_turn:
-            if not await self.update_session_memory():
-                return
-            summary = self.memory.archives[-1].summary if self.memory.archives else ""
-            logger.info(
-                f"[Loop] Session archived -- "
-                f"session_id={self.memory.session.session_id[:8]}... "
-                f"summary_len={len(summary)}"
-            )
-        elif turns:
-            logger.debug("[Loop] No new summary needed for this session.")
-        else:
-            logger.debug("[Loop] No turns in this session -- skipping archive.")
-
+        """结束工作会话；素材继续等待按自然日整理。"""
         # 话题使用记录：Session 结束时与 TopicHistory 同步
         if self.state.active_topic is not None:
             await self.topic_manager.record_topic_used(
@@ -667,10 +625,8 @@ class Muika:
         self._god_mode_pending = False
         await self.agent_tasks.release_persona()
 
-        self.memory.new_session()
-        self._summary_retry_at = 0.0
-        self._last_summary_turn = None
-        self._last_summary_time = datetime.now().timestamp()
+        await self.memory.new_session()
+        self.start_background_task(self.reflection.maybe_reflect())
 
         logger.info("[Loop] Session reset complete -- waiting for next user interaction silently.")
 

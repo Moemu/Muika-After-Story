@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -129,4 +129,71 @@ class AgentCallORM(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     task_id: Mapped[str] = mapped_column(String, index=True)
     status: Mapped[str] = mapped_column(String, index=True)
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class ExperienceORM(Base):
+    """保存逐轮素材及其原始来源。"""
+
+    __tablename__ = "experience"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String, index=True)
+    kind: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text)
+    occurred_at: Mapped[str] = mapped_column(String, index=True)
+    resources: Mapped[str] = mapped_column(Text, default="[]")
+    source: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
+
+
+class DiaryORM(Base):
+    """保存日记及其已处理素材范围。"""
+
+    __tablename__ = "diary"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String, unique=True)
+    day: Mapped[str] = mapped_column(String, index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_refs: Mapped[str] = mapped_column(Text, default="[]")
+    covered_through: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[str] = mapped_column(String)
+
+
+class FactORM(Base):
+    """保存原子事实的版本和回顾权重。"""
+
+    __tablename__ = "fact"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String, index=True)
+    key: Mapped[str] = mapped_column(String, index=True)
+    value: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(default=True)
+    forgotten: Mapped[bool] = mapped_column(default=False)
+    source_refs: Mapped[str] = mapped_column(Text, default="[]")
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+    weight_at: Mapped[str] = mapped_column(String)
+    observed_at: Mapped[str] = mapped_column(String)
+    last_recalled_at: Mapped[str] = mapped_column(String)
+    created_at: Mapped[str] = mapped_column(String)
+
+
+class FactRecallORM(Base):
+    """确保一个事实每个日记日只强化一次。"""
+
+    __tablename__ = "fact_recall"
+    __table_args__ = (UniqueConstraint("fact_id", "day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    fact_id: Mapped[int] = mapped_column(Integer, index=True)
+    day: Mapped[str] = mapped_column(String)
+
+
+class MemoryRuntimeORM(Base):
+    """保存持续状态、会话和工作摘要的单例检查点。"""
+
+    __tablename__ = "memory_runtime"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
     payload: Mapped[str] = mapped_column(Text)

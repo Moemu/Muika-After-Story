@@ -10,6 +10,7 @@ from muika.config import get_model_config, mas_config
 from muika.database.crud import RssDigestCacheCRUD, TopicHistoryCRUD
 from muika.database.db import get_session
 from muika.llm import ModelRequest, load_model
+from muika.llm.loader import refresh_model
 from muika.utils.logger import logger
 
 from .actions.tools.rss._parser import (
@@ -118,6 +119,7 @@ class DigestAgent:
         content: str,
     ) -> Optional[TopicFitAssessment]:
         """使用一次 LLM 调用同时完成：Muika 话题适配评估 + 摘要生成。"""
+        self.model = refresh_model(self.model, get_model_config(mas_config.agent_model))
         if len(content) > _MAX_CONTENT_CHARS:
             content = content[:_MAX_CONTENT_CHARS] + "\n...(truncated)"
 

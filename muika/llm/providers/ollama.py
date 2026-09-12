@@ -131,6 +131,8 @@ class Ollama(BaseLLM):
                 stream=stream,
                 format=response_format,
                 options={
+                    "num_ctx": self.config.context_window,
+                    "num_predict": self.config.max_tokens,
                     "temperature": self.temperature,
                     "top_p": self.top_p,
                     "top_k": self.top_k,
