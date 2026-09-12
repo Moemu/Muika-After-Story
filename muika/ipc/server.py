@@ -106,7 +106,7 @@ class CoreWsServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
-        logger.success(f"[CoreWsServer] Listening on ws://{self._host}:{self._port}/ws")
+        logger.debug(f"[CoreWsServer] Listening on ws://{self._host}:{self._port}/ws")
 
     async def stop(self) -> None:
         """优雅关闭 WebSocket 服务器。"""
@@ -123,7 +123,7 @@ class CoreWsServer:
             await self._runner.cleanup()
             self._runner = None
 
-        logger.info("[CoreWsServer] Server stopped")
+        logger.debug("[CoreWsServer] Server stopped")
 
     @property
     def has_connection(self) -> bool:
@@ -204,7 +204,7 @@ class CoreWsServer:
                 self._pending.appendleft(msg)
                 break
         if sent:
-            logger.info(f"[CoreWsServer] Flushed {sent} pending message(s)")
+            logger.debug(f"[CoreWsServer] Flushed {sent} pending message(s)")
         return sent
 
     def set_triggering_adapter(self, client_name: str) -> None:
@@ -273,7 +273,7 @@ class CoreWsServer:
             ws=ws,
         )
         self._connections[client_name] = connection
-        logger.success(f"[CoreWsServer] Adapter connected: {client_name!r}")
+        logger.success(f"Chat connected: {client_name}")
 
         # 通知回调
         if self._on_adapter_connected:
@@ -294,7 +294,7 @@ class CoreWsServer:
                     logger.error(f"[CoreWsServer] WebSocket error on {client_name!r}: {ws.exception()}")
                     break
                 elif msg.type == WSMsgType.CLOSE:
-                    logger.info(f"[CoreWsServer] Adapter {client_name!r} disconnected (code={ws.close_code})")
+                    logger.debug(f"[CoreWsServer] Adapter {client_name!r} disconnected (code={ws.close_code})")
                     break
         except Exception as e:
             logger.error(f"[CoreWsServer] Unexpected error in WS handler for {client_name!r}: {e}")
@@ -303,7 +303,7 @@ class CoreWsServer:
             self._connections.pop(client_name, None)
             if self._last_triggering_adapter == client_name:
                 self._last_triggering_adapter = None
-            logger.info(f"[CoreWsServer] Adapter {client_name!r} connection closed")
+            logger.info(f"Chat disconnected: {client_name}")
 
             # 通知回调
             if self._on_adapter_disconnected:

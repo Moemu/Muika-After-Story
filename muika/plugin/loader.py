@@ -86,7 +86,7 @@ def load_plugin(module_name: str) -> Plugin:
         _plugins[plugin.package_name] = plugin
         phase = "load hook"
         run_load_hooks(module_name)
-        logger.success(f"插件 '{plugin.name}' ({module_name}) 已加载")
+        logger.success(f"Plugin loaded: {module_name}")
 
         return plugin
 
@@ -132,7 +132,7 @@ def unload_plugin(package_name: str) -> bool:
     del _plugins[package_name]
     _declared_plugins.discard(package_name)
 
-    logger.success(f"[PluginLoader] Plugin {package_name!r} unloaded")
+    logger.success(f"Plugin unloaded: {package_name}")
     return True
 
 

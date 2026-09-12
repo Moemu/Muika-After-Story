@@ -143,7 +143,7 @@ class MASConfig(BaseSettings):
 
         env_path.write_text(env_data, encoding="utf-8")
 
-        logger.info(f"[Config] Auto-generated IPC secret and wrote to {env_path}")
+        logger.debug(f"[Config] Auto-generated IPC secret and wrote to {env_path}")
         return token
 
     @field_validator("ipc_secret")

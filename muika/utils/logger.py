@@ -52,7 +52,7 @@ def init_logger():
         sys.stdout,
         level=console_handler_level,
         diagnose=True,
-        format="<lvl>[{level}] {function}: {message}</lvl>",
+        format="<lvl>[{level}] {message}</lvl>",
         filter=_mas_filter,
         colorize=True,
     )

@@ -96,7 +96,7 @@ class Server:
         """执行一次 MCP 工具；传输失败时由调用者核对结果。"""
         if not self.session:
             raise RuntimeError(f"Server {self.name} not initialized")
-        logging.info(f"Executing {tool_name}...")
+        logging.debug(f"Executing {tool_name}...")
         return await self.session.call_tool(tool_name, arguments)
 
     async def cleanup(self) -> None:

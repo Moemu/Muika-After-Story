@@ -105,7 +105,7 @@ class CoreBootstrap:
 
     async def start(self) -> None:
         """加载记忆后启动连接服务和核心循环。"""
-        logger.info("Muika Core is booting...")
+        logger.info("Starting Muika...")
 
         validate_template_configuration((mas_config.persona_template, mas_config.agent_template))
 
@@ -116,17 +116,18 @@ class CoreBootstrap:
 
         self._muika.start()
 
-        logger.success(
+        logger.debug(
             f"Muika Core is ready -- ws://{self._host}:{self._port}/ws "
             f"(health: http://{self._host}:{self._port}/health)"
         )
+        logger.success("Muika is ready.")
 
     async def stop(self) -> None:
         """停止接入和后台活动，再关闭数据库。"""
         if self._shutdown_event.is_set():
             return
 
-        logger.info("Muika Core is shutting down...")
+        logger.info("Stopping Muika...")
 
         self._shutdown_event.set()
         try:
@@ -138,7 +139,7 @@ class CoreBootstrap:
             await self._executor.scheduler.close()
             await close_db()
 
-        logger.success("Muika Core stopped")
+        logger.success("Muika stopped.")
 
     def _register_handlers(self) -> None:
         for msg_type in ("user_message", "command", "session_bootstrap", "session_end"):
@@ -148,12 +149,12 @@ class CoreBootstrap:
         """注册适配器连接 / 断开回调，将事件推入 Muika 事件队列。"""
 
         async def _on_adapter_connected(adapter: AdapterInfo) -> None:
-            logger.info(f"[Core] Adapter online: {adapter!r}")
+            logger.debug(f"[Core] Adapter online: {adapter!r}")
             if self.is_bootstraped:
                 await self._muika.create_event(AdapterOnlineEvent(adapter=adapter))
 
         async def _on_adapter_disconnected(adapter: AdapterInfo) -> None:
-            logger.info(f"[Core] Adapter offline: {adapter!r}")
+            logger.debug(f"[Core] Adapter offline: {adapter!r}")
             if self.is_bootstraped:
                 await self._muika.create_event(AdapterOfflineEvent(adapter=adapter))
 
@@ -175,7 +176,7 @@ class CoreBootstrap:
             logger.error(f"[Core] Failed to parse IPC event: {e}")
             return ErrorMessage(message="invalid_event", detail=str(e))
 
-        logger.info(f"[Core] Received event: {event.type} from {client_name!r}")
+        logger.debug(f"[Core] Received event: {event.type} from {client_name!r}")
 
         if is_core_maintenance_active():
             if isinstance(event, IpcCommandEvent) and is_maintenance_command_allowed(event.raw):
@@ -209,7 +210,7 @@ class CoreBootstrap:
             return ActionResponse(action=event.type, status="ok")
 
         if isinstance(event, IpcSessionBootstrapEvent):
-            logger.info(f"[Core] Adapter {client_name!r} joined existing session")
+            logger.debug(f"[Core] Adapter {client_name!r} joined existing session")
             self._ws_server.mark_bootstrapped(client_name)
             await self._muika.create_event(
                 AdapterOnlineEvent(
@@ -256,7 +257,7 @@ async def run_core(
     init_logger()
 
     logger.info(f"Muika-After-Story version: {get_version()}")
-    logger.info(f"Muika-After-Story data directory: {mas_config.data_dir.resolve()}")
+    logger.debug(f"Muika-After-Story data directory: {mas_config.data_dir.resolve()}")
 
     logger.debug("Loading Database...")
     await init_db()
@@ -273,7 +274,7 @@ async def run_core(
             )
 
         if MCP_CONFIG_PATH.exists():
-            logger.info("Loading MCP Server config")
+            logger.debug("Loading MCP Server config")
 
             await initialize_servers()
 
@@ -295,7 +296,7 @@ async def run_core(
         await bootstrap.start()
         await stop_event.wait()
     except KeyboardInterrupt:
-        logger.info("[Core] Interrupted by user")
+        logger.info("Muika was stopped by the user.")
     finally:
         try:
             if bootstrap is not None:

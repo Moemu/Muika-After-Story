@@ -203,6 +203,7 @@ class Muika:
         :param event: 待处理事件
         :param dt: 距上次循环的秒数
         """
+        self._log_event(event)
         if is_core_maintenance_active():
             if isinstance(event, AgentTaskEvent):
                 self.agent_tasks.defer_event(event)
@@ -232,7 +233,6 @@ class Muika:
             return
 
         self._is_collecting_event = False
-        self._log_event(event)
         if event.type == "user_message":
             await self.memory.add_context(
                 "user",
@@ -257,13 +257,13 @@ class Muika:
 
         if event.type == "adapter_online":
             self.current_adapters.append(event.adapter)
-            logger.info(f"[Loop] Adapter online: {event.adapter!r} — status updated")
+            logger.debug(f"[Loop] Adapter online: {event.adapter!r} — status updated")
             if len(self.current_adapters) < 2:
                 return
 
         if event.type == "adapter_offline" and event.adapter in self.current_adapters:
             self.current_adapters.remove(event.adapter)
-            logger.info(f"[Loop] Adapter offline: {event.adapter!r} — status updated")
+            logger.debug(f"[Loop] Adapter offline: {event.adapter!r} — status updated")
             return
 
         if think_mode == "topic":
@@ -278,10 +278,14 @@ class Muika:
 
     @staticmethod
     def _log_event(event: Event) -> None:
-        if event.type == "user_message":
+        if event.type == "time_tick":
+            logger.debug("[Event] time_tick")
+        elif event.type == "user_message":
             logger.info(f"[Event] user_message | content: {event.payload.message.message!r}")
         elif event.type == "scheduled_trigger":
             logger.info(f"[Event] scheduled_trigger | what: {event.payload.what!r}")
+        elif event.type == "agent_task":
+            logger.info(f"[Event] agent_task | task: {event.task_id[:8]} | status: {event.status}")
         else:
             logger.info(f"[Event] {event.type}")
 
@@ -303,7 +307,7 @@ class Muika:
                 last_activity = max(last_activity, self.state.active_topic.started_at)
             idle_seconds = (datetime.now() - last_activity).total_seconds()
             if idle_seconds >= SESSION_IDLE_TIMEOUT and not self._timeout_task:
-                logger.info(f"[Loop] Session idle for {idle_seconds / 60:.1f} min -- triggering session end.")
+                logger.debug(f"[Loop] Session idle for {idle_seconds / 60:.1f} min -- triggering session end.")
                 self._session_end_triggered = True
                 await self.create_event(SessionEndEvent())
 
@@ -433,10 +437,10 @@ class Muika:
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if parsed.do_nothing:
-            logger.info("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
+            logger.debug("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
             return
         if parsed.target:
-            logger.info(f"[Topic] Routing to target={parsed.target!r}")
+            logger.debug(f"[Topic] Routing to target={parsed.target!r}")
         if parsed.timeout is not None:
             self._arm_timeout(parsed.timeout)
         await self.executor.send_message(parsed.clean_reply, target=parsed.target)
@@ -448,7 +452,7 @@ class Muika:
             topic_type=topic.category,
         )
         self.state.boredom = 0.0
-        logger.info(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
+        logger.debug(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
     async def _fetch_memories(self, event: Event) -> RecallResult:
         """检索当前消息相关的日记、事实及原文。"""
@@ -490,7 +494,7 @@ class Muika:
         silent_turn = parsed.do_nothing
         if not silent_turn:
             if parsed.clean_reply:
-                logger.info(f"[Muika -> User] {parsed.clean_reply!r}")
+                logger.info(f"Muika: {parsed.clean_reply}")
                 await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
             await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
             if parsed.timeout is not None:
@@ -611,7 +615,7 @@ class Muika:
                 self.state.active_topic.topic_id,
                 user_engaged=self.state.active_topic.user_engaged,
             )
-            logger.info(
+            logger.debug(
                 f"[Topic] Recorded topic {self.state.active_topic.topic_id!r} "
                 f"at session end (engaged={self.state.active_topic.user_engaged})"
             )
@@ -628,7 +632,7 @@ class Muika:
         await self.memory.new_session()
         self.start_background_task(self.reflection.maybe_reflect())
 
-        logger.info("[Loop] Session reset complete -- waiting for next user interaction silently.")
+        logger.debug("[Loop] Session reset complete -- waiting for next user interaction silently.")
 
     @staticmethod
     def _save_last_connection_time() -> None:

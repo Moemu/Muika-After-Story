@@ -222,7 +222,7 @@ async def write_file(path: str, content: str, write_mode: str = "overwrite", enc
         with resolved.open(open_mode, encoding=encoding) as f:
             f.write(content)
         _remember_file(resolved)
-        logger.info(f"[WriteFile] Wrote {len(content):,} chars to {resolved} (mode={write_mode})")
+        logger.debug(f"[WriteFile] Wrote {len(content):,} chars to {resolved} (mode={write_mode})")
         return f"File written successfully ({write_mode}): {resolved}  ({len(content):,} chars)"
     except PermissionError:
         return ToolError(f"Permission denied: {resolved}")
@@ -315,7 +315,7 @@ async def edit_file(
         logger.error(f"[EditFile] Failed to write: {e}")
         return ToolError(f"Error writing file: {e}")
 
-    logger.info(f"[EditFile] Applied '{operation}' to {resolved}")
+    logger.debug(f"[EditFile] Applied '{operation}' to {resolved}")
     return f"File edited successfully ({operation}): {resolved}"
 
 

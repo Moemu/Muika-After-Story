@@ -100,7 +100,7 @@ class DigestAgent:
         agent_cfg = get_model_config(mas_config.agent_model) if mas_config.agent_model else None
         self.model = load_model(agent_cfg)
         if mas_config.agent_model:
-            logger.info(f"[DigestAgent] Using Agent model config: {mas_config.agent_model}")
+            logger.debug(f"[DigestAgent] Using Agent model config: {mas_config.agent_model}")
         else:
             logger.warning(
                 "[DigestAgent] `agent_model` is not configured; DigestAgent is using default model config. "
@@ -165,6 +165,7 @@ class DigestAgent:
             )
             return
 
+        logger.info("[DigestAgent] Checking for new reading material.")
         async with get_session() as db_session:
             # 清理过期缓存条目
             expired_count = await RssDigestCacheCRUD.delete_expired(db_session, DIGEST_CACHE_TTL_DAYS)
@@ -285,7 +286,7 @@ class DigestAgent:
                     scored_candidates.sort(key=lambda item: item.score, reverse=True)
                     chosen = scored_candidates[0]
 
-                    logger.info(
+                    logger.debug(
                         f"[DigestAgent] Digesting selected entry score={chosen.score} source={source.name}: "
                         f"{chosen.entry.title}"
                     )
@@ -304,10 +305,10 @@ class DigestAgent:
 
                     await TopicHistoryCRUD.record(db_session, topic_id=chosen.topic_id, user_engaged=False)
 
-                    logger.success(f"[DigestAgent] Successfully digested and enqueued: {chosen.topic_id}")
+                    logger.info(f"[DigestAgent] Reading note ready: {chosen.entry.title}")
                     return
 
                 except Exception as e:
                     logger.error(f"[DigestAgent] Error fetching source {source.name}: {e}")
 
-            logger.debug("[DigestAgent] No new unread entries found in checked sources.")
+            logger.info("[DigestAgent] Reading check finished without a new note.")

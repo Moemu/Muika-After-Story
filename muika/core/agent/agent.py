@@ -92,7 +92,7 @@ class Agent:
             return await self._execute_command(command, state, executor)
 
     async def _execute_command(self, command: str, state: MuikaState, executor: Executor) -> tuple[str, list[Resource]]:
-        logger.info(f"[Agent] Executing command: {command!r}")
+        logger.debug(f"[Agent] Executing command: {command!r}")
 
         with tool_context(state, executor) as context:
             request = self.build_request(command, state)
@@ -110,7 +110,7 @@ class Agent:
             resources = context.resources
 
             if report:
-                logger.info(f"[Agent] Report ready ({len(report)} chars): {report[:120]!r}")
+                logger.debug(f"[Agent] Report ready ({len(report)} chars): {report[:120]!r}")
             else:
                 logger.debug("[Agent] Empty report (silent operation).")
 

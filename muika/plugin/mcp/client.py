@@ -25,7 +25,7 @@ async def initialize_servers() -> None:
     server_config = get_mcp_server_config()
     _servers.extend([Server(name, srv_config) for name, srv_config in server_config.items()])
     for server in _servers:
-        logger.info(f"Initializing MCP server: {server.name}")
+        logger.debug(f"Initializing MCP server: {server.name}")
         try:
             await server.initialize()
             _tools.extend(transform_json(tool) for tool in await server.list_tools())
@@ -39,7 +39,7 @@ async def handle_mcp_tool(tool: str, arguments: Optional[dict[str, Any]] = None)
     """
     处理 MCP Tool 调用
     """
-    logger.info(f"执行 MCP 工具: {tool} (参数: {arguments})")
+    logger.debug(f"执行 MCP 工具: {tool} (参数: {arguments})")
 
     for server in _servers:
         server_tools = await server.list_tools()
@@ -53,7 +53,7 @@ async def handle_mcp_tool(tool: str, arguments: Optional[dict[str, Any]] = None)
                 progress = result["progress"]
                 total = result["total"]
                 percentage = (progress / total) * 100
-                logger.info(f"工具执行进度: {progress}/{total} ({percentage:.1f}%)")
+                logger.debug(f"工具执行进度: {progress}/{total} ({percentage:.1f}%)")
 
             if isinstance(result, CallToolResult):
                 resources = []

@@ -265,7 +265,7 @@ Bot 启动只检查状态，不等待终端输入。启动器仍会在启动前�
 | `master_id`             | `str = SUPERUSERS[0]`                     | 对话目标 ID。目前仅支持一对一对话。                          |
 | `agent_model`           | `Optional[str] = None`                    | 分身 Agent 所用模型的配置名。留空则与核心模型共享 default 配置。 |
 | `INPUT_TIMEOUT`         | `int = 0`                                 | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用。 |
-| `LOG_LEVEL`             | `str = "INFO"`                            | 日志等级。                                                   |
+| `LOG_LEVEL`             | `str = "INFO"`                            | 控制台日志等级。INFO 显示系统状态、非 time_tick 事件和简短后台进展；详细诊断使用 DEBUG，日志文件保留 DEBUG。 |
 | `TELEGRAM_PROXY`        | `Optional[str] = None`                    | Telegram 适配器代理，并使用该代理下载文件。                  |
 | `ENABLE_ADAPTERS`       | `list = ["~.onebot.v11", "~.onebot.v12"]` | 在入口文件中启用的 Nonebot 适配器。                          |
 | `FS_ALLOWED_PATHS`      | `List[str] = []`                          | 文件系统工具白名单目录。为空时禁用文件系统工具。             |

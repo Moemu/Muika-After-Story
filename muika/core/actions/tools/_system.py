@@ -158,7 +158,7 @@ async def send_desktop_notification(title: str, message: str, timeout: int = 5) 
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, _notify)
-        logger.info(f"[SendDesktopNotification] Sent: {title!r}")
+        logger.info(f"Desktop notification sent: {title}")
         return f"Desktop notification sent: {title!r}"
     except Exception as e:
         logger.error(f"[SendDesktopNotification] Failed: {e}")

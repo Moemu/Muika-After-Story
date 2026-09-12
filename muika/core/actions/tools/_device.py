@@ -39,7 +39,7 @@ async def capture_screenshot(context: ToolContext) -> str:
         timestamp = int(datetime.now().timestamp())
         file_path = temp_dir / f"screenshot_{timestamp}.png"
         screenshot.save(file_path)
-        logger.info(f"[CaptureScreenshot] Saved to {file_path}")
+        logger.info(f"Screenshot saved: {file_path}")
         resource = Resource(type="image", path=str(file_path), mimetype="image/png")
         context.resources.append(resource)
         return "Screenshot captured successfully. See attached image."
@@ -81,7 +81,7 @@ async def capture_camera_photo(context: ToolContext, device_index: int = 0) -> s
     try:
         loop = asyncio.get_event_loop()
         file_path = await loop.run_in_executor(None, _capture, device_index)
-        logger.info(f"[CaptureCameraPhoto] Saved to {file_path}")
+        logger.info(f"Camera photo saved: {file_path}")
         resource = Resource(type="image", path=file_path, mimetype="image/jpeg")
         context.resources.append(resource)
         return "Camera photo captured successfully. See attached image."

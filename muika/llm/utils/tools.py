@@ -1,4 +1,5 @@
 import json
+from time import perf_counter
 from typing import Any, Callable, Optional
 
 from muika.llm._schema import ToolCall, ToolResult
@@ -21,7 +22,11 @@ async def dispatch_tool(call: ToolCall) -> ToolResult:
             raise ValueError("Tool arguments must be a JSON object")
     except (json.JSONDecodeError, ValueError) as exc:
         return ToolResult(text=f"Invalid arguments for {call.name}: {exc}. Correct the JSON and retry.", is_error=True)
-    result = await function_call_handler(call.name, arguments)
+    started = perf_counter()
+    try:
+        result = await function_call_handler(call.name, arguments)
+    finally:
+        logger.debug(f"[Tool] end | name={call.name} call={call.id} seconds={perf_counter() - started:.3f}")
     if isinstance(result, ToolResult):
         return result
     return ToolResult(text=result if isinstance(result, str) else str(result), is_error=isinstance(result, ToolError))
@@ -34,7 +39,7 @@ async def function_call_handler(func: str, arguments: dict[str, Any] | None = No
     arguments = arguments if arguments and arguments != {"dummy_param": ""} else {}
 
     if func_caller := get_function_calls().get(func):
-        logger.info(f"Function call 请求 {func}, 参数: {arguments}")
+        logger.debug(f"Function call 请求 {func}, 参数: {arguments}")
         try:
             result = await func_caller.run(**arguments)
         except Exception as exc:
@@ -45,7 +50,7 @@ async def function_call_handler(func: str, arguments: dict[str, Any] | None = No
         if isinstance(result, ToolError) or isinstance(result, ToolResult) and result.is_error:
             logger.warning(log)
         else:
-            logger.success(log)
+            logger.debug(log)
         return result
 
     global handle_mcp_tool
@@ -64,7 +69,7 @@ async def function_call_handler(func: str, arguments: dict[str, Any] | None = No
         if isinstance(mcp_result, ToolError) or isinstance(mcp_result, ToolResult) and mcp_result.is_error:
             logger.warning(f"MCP tool {func} failed: {mcp_result}")
         else:
-            logger.success(f"MCP tool {func} completed")
+            logger.debug(f"MCP tool {func} completed")
         return mcp_result
 
     return ToolError(f"Unknown function: {func}. Refresh the available tools before continuing.")

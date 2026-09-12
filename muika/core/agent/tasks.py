@@ -223,6 +223,7 @@ class AgentTasks:
             )
         await self._save(task)
         applied_revision = 0
+        logger.info(f"[AgentTask] Task {task.id[:8]}: {task.status}")
         recovery_reads: set[str] = set()
         while not self._closing:
             if await self._stop_at_boundary(task):

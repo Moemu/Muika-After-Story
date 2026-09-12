@@ -74,7 +74,7 @@ class SelfModManager:
         )
         refresh_note = self._refresh_runtime(layer)
 
-        logger.info(f"[SelfMod] {rel} updated by {source} (revision #{revision_id}): {reason[:80]}")
+        logger.debug(f"[SelfMod] {rel} updated by {source} (revision #{revision_id}): {reason[:80]}")
         return (
             f"Self-modification applied (revision #{revision_id}): {rel}\n"
             f"Layer: {layer}.{refresh_note}\n"
@@ -143,7 +143,7 @@ class SelfModManager:
             source="self",
         )
         refresh_note = self._refresh_runtime(layer)
-        logger.info(f"[SelfMod] {rel} reverted (target revision #{target_id})")
+        logger.debug(f"[SelfMod] {rel} reverted (target revision #{target_id})")
         return f"Reverted {rel}: {report_action}.{refresh_note}"
 
     async def read_revert_target(self, raw_path: str, revision_id: Optional[int] = None) -> Optional[str]:

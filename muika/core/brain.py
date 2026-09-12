@@ -50,7 +50,7 @@ class MuikaBrain:
     def reload_model(self, new_config: ModelConfig, old_config: Optional[ModelConfig]):  # pragma: no cover
         provider_old = old_config.provider if old_config else "None"
         provider_new = new_config.provider
-        logger.info(f"Detected model config change: {provider_old} -> {provider_new}")
+        logger.debug(f"Detected model config change: {provider_old} -> {provider_new}")
 
         try:
             new_model = load_model(new_config)
@@ -60,7 +60,7 @@ class MuikaBrain:
             )
             new_model.compactor = self.compactor
             self.model = new_model
-            logger.success(f"Model reloaded: {provider_new}")
+            logger.success("Model settings updated.")
         except Exception as e:
             logger.error(f"Failed to reload model: {e}")
             logger.warning(
@@ -195,7 +195,7 @@ class MuikaBrain:
             if not completions.succeed:
                 raise RuntimeError(f"Model call failed: {completions.text}")
             _, result = general_processor(completions.text)
-            logger.info(
+            logger.debug(
                 f"[Brain] expand_topic | id={topic.id!r} chars={len(result)} "
                 f"tokens={completions.usage.total_tokens}"
             )
@@ -243,7 +243,7 @@ class MuikaBrain:
         # Inject session bootstrap instructions when waking into a fresh session
         if event.type == "session_bootstrap":
             mode = "first" if memory.session.is_first_session else "resume"
-            logger.info(f"[Brain] session_bootstrap | mode={mode} session={memory.session.session_id[:8]}...")
+            logger.debug(f"[Brain] session_bootstrap | mode={mode} session={memory.session.session_id[:8]}...")
             template_data.is_first_session = memory.session.is_first_session
             template_data.absence_bucket = event.absence_bucket
             template_data.last_connection_time = (
