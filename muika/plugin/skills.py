@@ -134,22 +134,7 @@ class SkillFileHandler(FileSystemEventHandler):
 class SkillManager:
     """技能管理器：启动时扫描技能目录，并通过文件监听实现热重载"""
 
-    _instance: Optional["SkillManager"] = None
-    _lock = threading.Lock()
-    _initialized: bool
-
-    def __new__(cls):
-        """确保实例在单例模式下运行"""
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(SkillManager, cls).__new__(cls)
-                cls._instance._initialized = False
-            return cls._instance
-
     def __init__(self) -> None:
-        if self._initialized:
-            return
-
         self._skills: dict[str, AgentSkill] = {}
         """当前技能注册表（name -> AgentSkill），替换时整体原子交换"""
         self._skills_lock = threading.Lock()
@@ -161,8 +146,6 @@ class SkillManager:
 
         self.reload()
         self._start_watcher()
-
-        self._initialized = True
 
     def _skill_roots(self) -> list[Path]:
         """按优先级从低到高返回技能根目录（用户目录在后，扫描时覆盖内置同名技能）"""
@@ -242,12 +225,14 @@ class SkillManager:
 
 
 _skill_manager: Optional[SkillManager] = None
+_skill_manager_lock = threading.Lock()
 
 
 def get_skill_manager() -> SkillManager:
     """获取技能管理器单例（首次调用时执行启动扫描并启动监听）"""
     global _skill_manager
-    if _skill_manager is None:
-        _skill_manager = SkillManager()
-        atexit.register(_skill_manager.stop_watcher)
+    with _skill_manager_lock:
+        if _skill_manager is None:
+            _skill_manager = SkillManager()
+            atexit.register(_skill_manager.stop_watcher)
     return _skill_manager

@@ -16,7 +16,7 @@ from benchmarks.extract.hallucination import (
     classify_action_hallucination,
 )
 from benchmarks.extract.leakage import find_leakage_spans
-from benchmarks.extract.meta import find_explicit_meta_mentions, meta_violations
+from benchmarks.extract.meta import meta_violations
 from benchmarks.report.schema import BenchmarkReport
 from benchmarks.runner import (
     _action_completion_is_internal_acknowledgement,
@@ -27,15 +27,13 @@ from benchmarks.runner import (
 )
 from benchmarks.scenarios.definitions import (
     ActionKind,
-    Metric,
     QualityAxis,
     Scenario,
     ScenarioTurn,
 )
 from benchmarks.scenarios.registry import get_scenario
 from benchmarks.scoring import score_metric
-from benchmarks.scoring.axes import action_cell_score, distortion_statistics
-from benchmarks.scoring.personality import trial_dialogue_experience_score
+from benchmarks.scoring.axes import refresh_axis_metrics
 from muika.core.loop import Muika
 
 _LEGACY_TIMEOUT = re.compile(r"<timeout(?::\s*|>\s*)([^<]+?)\s*</timeout>", re.IGNORECASE)
@@ -297,48 +295,6 @@ def _reanalyze_trial(trial: Any, scenario: Scenario) -> None:
         )
 
 
-def _refresh_axis_metrics(result: Any, scenario: Scenario) -> None:
-    trials = result.details
-    distortion = distortion_statistics(trials)
-    action_score = action_cell_score(trials, scenario)
-    experience_score = None
-    if scenario.primary_axis is QualityAxis.DIALOGUE_EXPERIENCE:
-        scores = [
-            trial_dialogue_experience_score(trial, scenario)
-            for trial in trials
-            if trial.is_valid and trial.personality is not None
-        ]
-        if scores:
-            experience_score = sum(scores) / len(scores)
-        elif scenario.metric is Metric.SELF_AWARENESS:
-            base_score = result.sub_metrics.get("base_score", result.score)
-            experience_score = float(base_score) if isinstance(base_score, (int, float)) else None
-
-    result.sub_metrics.update(
-        {
-            "axis_dialogue_experience": experience_score,
-            "axis_action_ability": action_score,
-            "axis_distortion_rate": distortion.event_frequency,
-            "distortion_counts": distortion.counts,
-            "distortion_event_count": float(distortion.event_count),
-            "distortion_raw_event_frequency": (
-                distortion.event_count / distortion.response_count if distortion.response_count else None
-            ),
-            "distortion_weighted_event_count": distortion.weighted_event_count,
-            "distortion_weighted_event_frequency": distortion.weighted_event_frequency,
-            "distortion_response_count": float(distortion.response_count),
-            "distortion_events_per_1000_chars": distortion.events_per_1000_chars,
-            "distorted_trial_count": float(distortion.distorted_trial_count),
-            "distorted_trial_rate": distortion.distorted_trial_rate,
-            "explicit_meta_mentions": float(
-                sum(len(find_explicit_meta_mentions(trial.clean_reply)) for trial in trials if trial.is_valid)
-            ),
-            "meta_policy": scenario.meta_policy.value,
-            "primary_axis": scenario.primary_axis.value,
-        }
-    )
-
-
 def rescore_report(report: BenchmarkReport, source: Path | None = None) -> BenchmarkReport:
     """Re-run deterministic extraction and scoring without any model calls."""
     minimum = report.config.get("min_validity_rate", 0.6)
@@ -373,7 +329,7 @@ def rescore_report(report: BenchmarkReport, source: Path | None = None) -> Bench
         preserved = dict(old_result.sub_metrics)
         preserved.update(rescored.sub_metrics)
         rescored.sub_metrics = preserved
-        _refresh_axis_metrics(rescored, scenario)
+        refresh_axis_metrics(rescored, scenario)
         rescored_results.append(rescored)
 
     source_generated_at = report.generated_at

@@ -37,7 +37,6 @@ from .ipc_client import IpcClient
 from .session import SessionManager
 from .utils.utils import download_file, get_file_via_adapter
 
-COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 3
 
 driver = get_driver()
@@ -128,60 +127,10 @@ async def _extract_multi_resources(message: UniMsg, event: Event) -> list[Resour
     return resources
 
 
-def _split_message(content: str, max_length_per_message: int = 250) -> list[str]:
-    """将消息按自然边界切分，贪心合并以最小化切出的消息段数量。"""
-    paragraphs = content.split("\n\n")
-    final_messages = []
-
-    for paragraph in paragraphs:
-        if len(paragraph) <= max_length_per_message:
-            final_messages.append(paragraph)
-            continue
-
-        # 先按标点切分为自然句段
-        segments = []
-        current = ""
-        for char in paragraph:
-            current += char
-            if char in COMMON_PUNCTUATION:
-                segments.append(current)
-                current = ""
-        if current:
-            segments.append(current)
-
-        # 贪心合并句段，使每条消息尽可能接近 max_length_per_message
-        buffer = ""
-        for seg in segments:
-            if len(buffer) + len(seg) <= max_length_per_message:
-                buffer += seg
-            else:
-                if buffer:
-                    final_messages.append(buffer)
-                    buffer = ""
-                # 若单个句段超过上限，硬切分
-                while len(seg) > max_length_per_message:
-                    final_messages.append(seg[:max_length_per_message])
-                    seg = seg[max_length_per_message:]
-                buffer = seg
-        if buffer:
-            final_messages.append(buffer)
-
-    return final_messages
-
-
-async def _send_message(message: str, raw: bool = False):
-    """
-    发送消息给用户
-    """
-    if not raw:
-        # 移除 agent 指令会导致 4 个同时出现的换行符，要么替换为 2 个，要么提示用户
-        message = message.strip().replace("\n\n\n\n", "\n\n")
-        messages = _split_message(message)
-    else:
-        messages = [message]
-    for msg in messages:
-        await UniMessage(msg).send(target=_message_target, bot=get_bot())
-        await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
+async def _send_message(message: str) -> None:
+    """发送 Core 提供的消息段或完整命令结果。"""
+    await UniMessage(message).send(target=_message_target, bot=get_bot())
+    await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
 
 
 def _init_ipc_client() -> IpcClient:
@@ -200,7 +149,7 @@ def _init_ipc_client() -> IpcClient:
     async def _handle_command_result(data: dict) -> None:
         content = data.get("content", "")
         if content:
-            await _send_message(content, raw=True)
+            await _send_message(content)
         resources = data.get("resources", [])
         if resources:
             await _render_resources(resources)

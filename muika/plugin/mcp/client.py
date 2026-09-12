@@ -1,7 +1,7 @@
 import base64
 from typing import Any, Optional
 
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
 from muika.llm._schema import MediaReference, ToolResult
 from muika.llm.utils.tools import ToolError
@@ -10,7 +10,7 @@ from muika.plugin.command import ensure_resource_path
 from muika.utils.logger import logger
 
 from .config import get_mcp_server_config
-from .server import Server, Tool
+from .server import Server
 
 _servers: list[Server] = []
 _tools: list[dict[str, dict]] = []
@@ -97,11 +97,11 @@ def transform_json(tool: Tool) -> dict[str, Any]:
     """
     func_desc = {"name": tool.name, "description": tool.description, "parameters": {}, "required": []}
 
-    if tool.input_schema:
+    if tool.inputSchema:
         parameters = {
-            "type": tool.input_schema.get("type", "object"),
-            "properties": tool.input_schema.get("properties", {}),
-            "required": tool.input_schema.get("required", []),
+            "type": tool.inputSchema.get("type", "object"),
+            "properties": tool.inputSchema.get("properties", {}),
+            "required": tool.inputSchema.get("required", []),
         }
         func_desc["parameters"] = parameters
 

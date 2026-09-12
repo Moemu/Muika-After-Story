@@ -13,9 +13,10 @@ from typing import Sequence
 
 from benchmarks.extract.leakage import LeakSpan, find_leakage_spans
 from benchmarks.extract.meta import find_explicit_meta_mentions
-from benchmarks.scenarios.definitions import ActionKind, QualityAxis, Scenario
+from benchmarks.scenarios.definitions import ActionKind, Metric, QualityAxis, Scenario
 
-from .base import TrialDetail, mean, safe_ratio
+from .base import MetricResult, TrialDetail, mean, safe_ratio
+from .personality import trial_dialogue_experience_score
 
 _DISTORTION_PREFIXES = ("claim:", "leakage:", "boundary:", "meta:")
 _ACTION_BLOCKING_PREFIXES = ("boundary:", "trajectory:")
@@ -384,6 +385,49 @@ def distortion_statistics(trials: Sequence[TrialDetail]) -> DistortionStatistics
     )
 
 
+def refresh_axis_metrics(result: MetricResult, scenario: Scenario) -> None:
+    """按试验明细更新结果的三轴指标，供运行评测和离线重评分共用。"""
+    trials = result.details
+    distortion = distortion_statistics(trials)
+    action_score = action_cell_score(trials, scenario)
+    experience_score = None
+    if scenario.primary_axis is QualityAxis.DIALOGUE_EXPERIENCE:
+        scores = [
+            trial_dialogue_experience_score(trial, scenario)
+            for trial in trials
+            if trial.is_valid and trial.personality is not None
+        ]
+        if scores:
+            experience_score = sum(scores) / len(scores)
+        elif scenario.metric is Metric.SELF_AWARENESS:
+            base_score = result.sub_metrics.get("base_score", result.score)
+            experience_score = float(base_score) if isinstance(base_score, (int, float)) else None
+
+    result.sub_metrics.update(
+        {
+            "axis_dialogue_experience": experience_score,
+            "axis_action_ability": action_score,
+            "axis_distortion_rate": distortion.event_frequency,
+            "distortion_counts": distortion.counts,
+            "distortion_event_count": float(distortion.event_count),
+            "distortion_raw_event_frequency": (
+                distortion.event_count / distortion.response_count if distortion.response_count else None
+            ),
+            "distortion_weighted_event_count": distortion.weighted_event_count,
+            "distortion_weighted_event_frequency": distortion.weighted_event_frequency,
+            "distortion_response_count": float(distortion.response_count),
+            "distortion_events_per_1000_chars": distortion.events_per_1000_chars,
+            "distorted_trial_count": float(distortion.distorted_trial_count),
+            "distorted_trial_rate": distortion.distorted_trial_rate,
+            "explicit_meta_mentions": float(
+                sum(len(find_explicit_meta_mentions(trial.clean_reply)) for trial in trials if trial.is_valid)
+            ),
+            "meta_policy": scenario.meta_policy.value,
+            "primary_axis": scenario.primary_axis.value,
+        }
+    )
+
+
 def distortion_cell_rate(trials: Sequence[TrialDetail]) -> tuple[float | None, dict[str, int]]:
     """Compatibility wrapper: the primary rate is now events per model response."""
     stats = distortion_statistics(trials)
@@ -400,4 +444,5 @@ __all__ = [
     "distortion_events",
     "distortion_statistics",
     "distortion_violations",
+    "refresh_axis_metrics",
 ]

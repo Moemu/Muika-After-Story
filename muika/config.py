@@ -32,6 +32,7 @@ USER_SKILL_PATHS = (Path.home() / ".agents" / "skills", Path.home() / ".claude" 
 """用户全局技能目录，仅在 load_user_skills 启用时扫描"""
 
 _model_config_manager: Optional["ModelConfigManager"] = None
+_model_config_lock = threading.Lock()
 
 
 class MASConfig(BaseSettings):
@@ -243,23 +244,9 @@ class ConfigFileHandler(FileSystemEventHandler):
 class ModelConfigManager:
     """模型配置管理器"""
 
-    _instance: Optional["ModelConfigManager"] = None
-    _lock = threading.Lock()
-    _initialized: bool
     configs: dict[str, ModelConfig]
 
-    def __new__(cls):
-        """确保实例在单例模式下运行"""
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(ModelConfigManager, cls).__new__(cls)
-                cls._instance._initialized = False
-            return cls._instance
-
     def __init__(self) -> None:
-        if self._initialized:
-            return
-
         self.configs: dict[str, ModelConfig] = {}
         """所有模型配置"""
         self.current_config: Optional[ModelConfig] = None
@@ -280,8 +267,6 @@ class ModelConfigManager:
         )
         if self.heart_intensity != "medium" and HEART_INTENSITY_SAMPLING.get(self.heart_intensity):
             self.current_config = self._compose()
-
-        self._initialized = True
 
     def _load_configs(self):
         """
@@ -447,9 +432,10 @@ class ModelConfigManager:
 
 def get_model_config_manager() -> ModelConfigManager:
     global _model_config_manager
-    if _model_config_manager is None:
-        _model_config_manager = ModelConfigManager()
-        atexit.register(_model_config_manager.stop_watcher)
+    with _model_config_lock:
+        if _model_config_manager is None:
+            _model_config_manager = ModelConfigManager()
+            atexit.register(_model_config_manager.stop_watcher)
     return _model_config_manager
 
 

@@ -30,6 +30,11 @@ async def save_model_usage(model: "BaseLLM", usage: Usage) -> None:
     """记录一次模型调用的用量。"""
     plugin_name = _get_caller_plugin_name() or "muika"
     model_config = get_name_from_config(model.config)
+    await _save_usage(plugin_name, model_config, usage)
+
+
+async def _save_usage(plugin_name: str, model_config: str, usage: Usage) -> None:
+    """串行写入已确定插件和模型归属的用量。"""
     async with _usage_write_lock:
         async with get_session() as session:
             await UsageORM.save_usage(
@@ -51,29 +56,13 @@ def record_plugin_usage(func: ASK_FUNC):
     async def wrapper(self: "BaseLLM", request: ModelRequest, *, stream: bool = False):
         plugin_name = _get_caller_plugin_name() or "muika"
 
-        # Call the original 'ask' method
         response = await func(self, request, stream=stream)
         model_config = get_name_from_config(self.config)
 
-        # Handle non-streaming response
         if isinstance(response, ModelCompletions):
-            usg = response.usage
-
-            async with _usage_write_lock:
-                async with get_session() as session:
-                    await UsageORM.save_usage(
-                        session,
-                        plugin_name,
-                        model_config,
-                        input_tokens=usg.input_tokens,
-                        output_tokens=usg.output_tokens,
-                        cached_tokens=usg.cached_tokens,
-                    )
-
+            await _save_usage(plugin_name, model_config, response.usage)
             return response
 
-        # Handle streaming response
-        # elif isinstance(response, AsyncGenerator):
         async def generator_wrapper() -> AsyncGenerator[ModelStreamCompletions, None]:
             last_usage = Usage()
             try:
@@ -81,16 +70,7 @@ def record_plugin_usage(func: ASK_FUNC):
                     last_usage = chunk.usage
                     yield chunk
             finally:
-                async with _usage_write_lock:
-                    async with get_session() as session:
-                        await UsageORM.save_usage(
-                            session,
-                            plugin_name,
-                            model_config,
-                            input_tokens=last_usage.input_tokens,
-                            output_tokens=last_usage.output_tokens,
-                            cached_tokens=last_usage.cached_tokens,
-                        )
+                await _save_usage(plugin_name, model_config, last_usage)
 
         return generator_wrapper()
 

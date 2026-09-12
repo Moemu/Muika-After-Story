@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
+from mcp.types import Tool
 
 from muika.core.brain import MuikaBrain
 from muika.core.events import (
@@ -331,7 +332,7 @@ async def test_mcp_tools_remain_in_consecutive_requests_and_clear_on_cleanup(fak
 
     from muika.plugin.mcp import client
 
-    tool = SimpleNamespace(name="remote_probe", description="probe", input_schema={"type": "object"})
+    tool = Tool(name="remote_probe", description="probe", inputSchema={"type": "object"})
     server = SimpleNamespace(
         name="test", initialize=AsyncMock(), list_tools=AsyncMock(return_value=[tool]), cleanup=AsyncMock()
     )

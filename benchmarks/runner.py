@@ -56,12 +56,9 @@ from benchmarks.scenarios.definitions import (
 )
 from benchmarks.scenarios.registry import get_scenario, select_scenario_ids
 from benchmarks.scoring import score_metric
-from benchmarks.scoring.axes import action_cell_score, distortion_statistics
+from benchmarks.scoring.axes import refresh_axis_metrics
 from benchmarks.scoring.base import MetricResult, TrialDetail, TurnDetail
-from benchmarks.scoring.personality import (
-    rule_personality_score,
-    trial_dialogue_experience_score,
-)
+from benchmarks.scoring.personality import rule_personality_score
 from benchmarks.util import redact
 from muika.core.brain import MuikaBrain
 from muika.core.events import (
@@ -1074,21 +1071,7 @@ async def run_cell(
         model_spec.name,
         min_validity_rate=config.min_validity_rate,
     )
-    action_score = action_cell_score(trials, scenario)
-    distortion_stats = distortion_statistics(trials)
-    meta_mentions = sum(len(find_explicit_meta_mentions(trial.clean_reply)) for trial in trials if trial.is_valid)
-    experience_score: float | None = None
-    if scenario.primary_axis is QualityAxis.DIALOGUE_EXPERIENCE:
-        experience_scores = [
-            trial_dialogue_experience_score(trial, scenario)
-            for trial in trials
-            if trial.is_valid and trial.personality is not None
-        ]
-        if experience_scores:
-            experience_score = sum(experience_scores) / len(experience_scores)
-        elif scenario.metric is Metric.SELF_AWARENESS:
-            base_score = result.sub_metrics.get("base_score", result.score)
-            experience_score = float(base_score) if isinstance(base_score, (int, float)) else None
+    refresh_axis_metrics(result, scenario)
     latencies = [trial.latency_ms for trial in trials if trial.latency_ms is not None]
     status_counts = Counter(trial.generation_status for trial in trials)
     failure_counts = Counter(redact(trial.error or trial.generation_status) for trial in trials if not trial.is_valid)
@@ -1107,25 +1090,6 @@ async def run_cell(
             "retried_trial_count": float(sum(trial.attempt_count > 1 for trial in trials)),
             "generation_status_counts": dict(status_counts),
             "failure_reasons": dict(failure_counts),
-            "axis_dialogue_experience": experience_score,
-            "axis_action_ability": action_score,
-            "axis_distortion_rate": distortion_stats.event_frequency,
-            "distortion_counts": distortion_stats.counts,
-            "distortion_event_count": float(distortion_stats.event_count),
-            "distortion_raw_event_frequency": (
-                distortion_stats.event_count / distortion_stats.response_count
-                if distortion_stats.response_count
-                else None
-            ),
-            "distortion_weighted_event_count": distortion_stats.weighted_event_count,
-            "distortion_weighted_event_frequency": distortion_stats.weighted_event_frequency,
-            "distortion_response_count": float(distortion_stats.response_count),
-            "distortion_events_per_1000_chars": distortion_stats.events_per_1000_chars,
-            "distorted_trial_count": float(distortion_stats.distorted_trial_count),
-            "distorted_trial_rate": distortion_stats.distorted_trial_rate,
-            "explicit_meta_mentions": float(meta_mentions),
-            "meta_policy": scenario.meta_policy.value,
-            "primary_axis": scenario.primary_axis.value,
         }
     )
     return result

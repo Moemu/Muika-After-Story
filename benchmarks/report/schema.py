@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -196,7 +196,7 @@ def _result_to_dict(result: MetricResult) -> dict[str, Any]:
         "n_attempted": result.n_attempted,
         "availability": result.availability,
         "scoring_path": result.scoring_path,
-        "details": [_trial_to_dict(trial) for trial in result.details],
+        "details": [asdict(trial) for trial in result.details],
     }
 
 
@@ -246,20 +246,6 @@ def _result_from_dict(data: dict[str, Any]) -> MetricResult:
     )
 
 
-def _turn_to_dict(turn: TurnDetail) -> dict[str, Any]:
-    return {
-        "turn_idx": turn.turn_idx,
-        "event_kind": turn.event_kind,
-        "user_text": turn.user_text,
-        "actions": [action.value for action in turn.actions],
-        "clean_reply": turn.clean_reply,
-        "raw_reply": turn.raw_reply,
-        "claim_ledger": turn.claim_ledger,
-        "invariant_violations": turn.invariant_violations,
-        "trace": turn.trace,
-    }
-
-
 def _turn_from_dict(data: dict[str, Any]) -> TurnDetail:
     return TurnDetail(
         turn_idx=data.get("turn_idx", 0),
@@ -272,39 +258,6 @@ def _turn_from_dict(data: dict[str, Any]) -> TurnDetail:
         invariant_violations=data.get("invariant_violations", []),
         trace=data.get("trace", {}),
     )
-
-
-def _trial_to_dict(trial: TrialDetail) -> dict[str, Any]:
-    return {
-        "trial_idx": trial.trial_idx,
-        "actions": [action.value for action in trial.actions],
-        "clean_reply": trial.clean_reply,
-        "raw_reply": trial.raw_reply,
-        "leakage_spans": [
-            {"start": span.start, "end": span.end, "pattern": span.pattern} for span in trial.leakage_spans
-        ],
-        "boundary_violations": trial.boundary_violations,
-        "self_awareness": trial.self_awareness,
-        "personality": trial.personality,
-        "hallucination": trial.hallucination,
-        "trial_score": trial.trial_score,
-        "error": trial.error,
-        "valid": trial.valid,
-        "generation_status": trial.generation_status,
-        "invariant_violations": trial.invariant_violations,
-        "claim_ledger": trial.claim_ledger,
-        "judge_sources": trial.judge_sources,
-        "judge_evidence": trial.judge_evidence,
-        "latency_ms": trial.latency_ms,
-        "model_calls": trial.model_calls,
-        "input_tokens": trial.input_tokens,
-        "output_tokens": trial.output_tokens,
-        "cached_tokens": trial.cached_tokens,
-        "attempt_count": trial.attempt_count,
-        "retry_errors": trial.retry_errors,
-        "prompt_hashes": trial.prompt_hashes,
-        "turns": [_turn_to_dict(turn) for turn in trial.turns],
-    }
 
 
 def _trial_from_dict(data: dict[str, Any]) -> TrialDetail:

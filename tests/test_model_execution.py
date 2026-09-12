@@ -7,8 +7,15 @@ import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 from muika.llm import ModelCompletions, ModelConfig, ModelRequest
+from muika.llm import _wrapper as usage_wrapper
 from muika.llm._execution import collect_step, run_conversation
-from muika.llm._schema import MediaReference, ModelMessage, ToolResult
+from muika.llm._schema import (
+    MediaReference,
+    ModelMessage,
+    ModelStreamCompletions,
+    ToolResult,
+    Usage,
+)
 from muika.llm.providers.openai import Openai
 
 
@@ -24,6 +31,45 @@ def _response(message, finish_reason="stop"):
         object="chat.completion",
         choices=[{"index": 0, "finish_reason": finish_reason, "message": message}],
         usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    )
+
+
+@pytest.mark.parametrize("mode", ["step", "complete", "stream", "closed_stream"])
+async def test_usage_records_cumulative_tokens_and_original_owner(monkeypatch, db_session, session_ctx_factory, mode):
+    provider = _provider()
+    monkeypatch.setattr(usage_wrapper, "get_session", lambda: session_ctx_factory(db_session))
+    monkeypatch.setattr(usage_wrapper, "_get_caller_plugin_name", lambda: "original")
+    monkeypatch.setattr(usage_wrapper, "get_name_from_config", lambda config: "test-model")
+
+    async def chunks(request, messages, *, stream):
+        for output_tokens in (1, 2):
+            yield ModelStreamCompletions(chunk="text", usage=Usage(3, output_tokens, 2))
+
+    monkeypatch.setattr(provider, "request_step", chunks)
+    request = ModelRequest("hello")
+    if mode == "step":
+        await provider.step(request, [])
+    elif mode == "complete":
+        await provider.ask(request)
+    else:
+        response = await provider.ask(request, stream=True)
+        monkeypatch.setattr(usage_wrapper, "_get_caller_plugin_name", lambda: "consumer")
+        monkeypatch.setattr(usage_wrapper, "get_name_from_config", lambda config: "changed-model")
+        if mode == "closed_stream":
+            await anext(response)
+            await response.aclose()
+        else:
+            async for _ in response:
+                pass
+
+    records = await usage_wrapper.UsageORM.get_usage_records(db_session)
+    assert len(records) == 1
+    record = records[0]
+    assert (record.plugin, record.model) == ("original", "test-model")
+    assert (record.input_tokens, record.output_tokens, record.cached_tokens) == (
+        3,
+        1 if mode == "closed_stream" else 2,
+        2,
     )
 
 

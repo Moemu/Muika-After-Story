@@ -17,7 +17,7 @@ from ..dependencies import resolve_arguments
 from ..utils import is_coroutine_callable
 from ._types import ASYNC_FUNCTION_CALL_FUNC, F
 from .context import get_dependencies
-from .parameter import FunctionCallJsonSchema, Parameter
+from .parameter import FunctionCallJsonSchema
 from .utils import async_wrap
 
 _caller_data: dict[str, "Caller"] = {}
@@ -36,14 +36,10 @@ class Caller:
         """函数是否只读取数据而不修改外部状态"""
         self._description: str = description
         """函数描述"""
-        self._parameters: dict[str, Parameter] = {}
-        """函数参数字典"""
         self._parameters_model: Optional[Type[BaseModel]] = params
         """函数参数 pydantic 模型"""
         self.function: ASYNC_FUNCTION_CALL_FUNC
         """函数对象"""
-        self.default: dict[str, Any] = {}
-        """默认值"""
 
         self.module_name: str = ""
         """函数所在模块名称"""
@@ -113,45 +109,27 @@ class Caller:
         return await self.function(**inject_args)
 
     def data(self) -> dict[str, Any]:
-        """
-        生成函数描述信息
-
-        Note:
-            如果通过 `_parameters_model` 提供了 pydantic 模型，则该模型优先于动态添加的 `_parameters`。
-            这意味着参数验证和注入将根据 pydantic 模型来处理，而通过 `params()` 方法添加的任何参数都将被忽略。
-            使用 `_parameters_model` 可以获得更强大和类型安全的参数验证。
-
-        :return: 可用于 Function_call 的字典
-        """
+        """生成工具描述和参数模型的 JSON Schema。"""
         if self._parameters_model:
-            return {
-                "type": "function",
-                "function": {
-                    "name": self._name,
-                    "description": self._description,
-                    "parameters": self._parameters_model.model_json_schema(schema_generator=FunctionCallJsonSchema),
-                },
-            }
-
-        if not self._parameters:
-            properties = {
-                "dummy_param": {"type": "string", "description": "为了兼容性设置的一个虚拟参数，因此不需要填写任何值"}
-            }
-            required = []
+            parameters = self._parameters_model.model_json_schema(schema_generator=FunctionCallJsonSchema)
         else:
-            properties = {key: value.data() for key, value in self._parameters.items()}
-            required = [key for key, value in self._parameters.items() if value.default is None]
+            parameters = {
+                "type": "object",
+                "properties": {
+                    "dummy_param": {
+                        "type": "string",
+                        "description": "为了兼容性设置的一个虚拟参数，因此不需要填写任何值",
+                    }
+                },
+                "required": [],
+            }
 
         return {
             "type": "function",
             "function": {
                 "name": self._name,
                 "description": self._description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
+                "parameters": parameters,
             },
         }
 

@@ -9,35 +9,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import Tool
 
 from .config import mcpConfig
-
-
-class Tool:
-    """
-    MCP Tool
-    """
-
-    def __init__(self, name: str, description: str, input_schema: dict[str, Any]) -> None:
-        self.name: str = name
-        self.description: str = description
-        self.input_schema: dict[str, Any] = input_schema
-
-    def format_for_llm(self) -> str:
-        """
-        为 llm 生成工具描述
-
-        :return: 工具描述
-        """
-        args_desc = []
-        if "properties" in self.input_schema:
-            for param_name, param_info in self.input_schema["properties"].items():
-                arg_desc = f"- {param_name}: {param_info.get('description', 'No description')}"
-                if param_name in self.input_schema.get("required", []):
-                    arg_desc += " (required)"
-                args_desc.append(arg_desc)
-
-        return f"Tool: {self.name}\n" f"Description: {self.description}\n" f"Arguments:{chr(10).join(args_desc)}" ""
 
 
 class Server:
@@ -116,14 +90,7 @@ class Server:
         if not self.session:
             raise RuntimeError(f"Server {self.name} not initialized")
 
-        tools_response = await self.session.list_tools()
-        tools: list[Tool] = []
-
-        for item in tools_response:
-            if isinstance(item, tuple) and item[0] == "tools":
-                tools.extend(Tool(tool.name, tool.description, tool.inputSchema) for tool in item[1])
-
-        return tools
+        return (await self.session.list_tools()).tools
 
     async def execute_tool(self, tool_name: str, arguments: Optional[dict[str, Any]] = None) -> Any:
         """执行一次 MCP 工具；传输失败时由调用者核对结果。"""
