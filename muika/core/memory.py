@@ -320,7 +320,14 @@ class MemoryManager:
             self.recent_turns.clear()
 
     def get_memory_prompt(self, budget: int = 2048) -> str:
-        """按回顾权重选择预算内最多二十条原子事实。"""
+        """在预算内提供关系日期及按回顾权重选择的最多二十条原子事实。"""
+        metadata: list[str] = []
+        if self.snapshot.first_interaction_at is not None:
+            line = (
+                f"[Relationship history] Earliest known interaction with Master: {self.snapshot.first_interaction_at}"
+            )
+            if estimate_tokens(line) <= budget:
+                metadata.append(line)
         now = datetime.now()
         records = sorted(
             self.facts.values(), key=lambda fact: (fact.score(now), fact.last_recalled_at, -fact.id), reverse=True
@@ -328,12 +335,12 @@ class MemoryManager:
         lines: list[str] = []
         for record in records:
             line = record.describe()
-            if estimate_tokens("\n".join(lines + [line])) > budget:
+            if estimate_tokens("\n".join(metadata + lines + [line])) > budget:
                 continue
             lines.append(line)
             if len(lines) == 20:
                 break
-        return "\n".join(lines)
+        return "\n".join(metadata + lines)
 
     @staticmethod
     def _apply_state(

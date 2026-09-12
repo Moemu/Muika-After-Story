@@ -5,6 +5,7 @@
 """
 
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -13,6 +14,7 @@ import pytest
 
 from muika.config import mas_config
 from muika.core.agent.agent import Agent
+from muika.core.memory import MemoryManager
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.state import MuikaState
 from muika.llm import ModelCompletions, ModelConfig
@@ -56,9 +58,14 @@ async def test_execute_command_system_assembly(fake_llm_factory):
     fake = fake_llm_factory(response=ModelCompletions(text='<agent_result status="completed">Done.</agent_result>'))
     agent = _agent(fake)
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: "SKILLS"))
+    memory = MemoryManager()
+    memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
     with _cmd_patches()[0], _cmd_patches()[1]:
-        await agent.execute_command("cmd", MuikaState(), executor=None)
-    assert agent.model.requests[0].system.startswith("SYSTEM\n\nSKILLS\n\nExecution environment:")
+        await agent.execute_command("cmd", MuikaState(memory=memory), executor=None)
+    system = agent.model.requests[0].system
+    assert system.startswith("SYSTEM\n[Remembered context]")
+    assert "Earliest known interaction with Master: 2025-01-01 12:00:00" in system
+    assert "\n\nSKILLS\n\nExecution environment:" in system
 
 
 async def test_execute_command_llm_error(fake_llm_factory):

@@ -69,7 +69,7 @@ class Agent:
         self.refresh_models()
         system = generate_prompt_from_template(mas_config.agent_template)
         if state is not None and state.memory is not None:
-            system += "\n[Remembered facts]\n" + state.memory.get_memory_prompt()
+            system += "\n[Remembered context]\n" + state.memory.get_memory_prompt()
             system += "\n[Lasting state]\n" + state.memory.persistent.describe()
         skills_section = self._skill_manager.render_prompt_section()
         if skills_section:

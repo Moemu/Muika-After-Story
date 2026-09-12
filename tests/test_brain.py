@@ -145,6 +145,7 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     state = MuikaState()
     memory = _memory()
     memory.session.is_first_session = False
+    memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
     memory.facts[1] = Fact(id=1, category=MemoryCategory.USER, key="name", value="Alice")
     recall = RecallResult(hits=[RecallHit(ref="fact:2", content="tea", occurred_at="2026-09-10")])
     captured = {}
@@ -160,6 +161,7 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     assert data.event_type == "user_message"
     assert data.is_chat is True
     assert data.memory_context == memory.get_memory_prompt()
+    assert "Earliest known interaction with Master: 2025-01-01 12:00:00" in data.memory_context
     assert data.recalled_memories == recall
     assert data.adapters_info is None
 

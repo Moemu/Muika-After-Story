@@ -164,6 +164,12 @@ def test_weight_decay_and_resident_budget():
     assert len(prompt.splitlines()) == 20
     assert "long ago" not in prompt
     assert estimate_tokens(memory.get_memory_prompt(budget=100)) <= 100
+    memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
+    prompt = memory.get_memory_prompt()
+    assert "[Relationship history] Earliest known interaction with Master: 2025-01-01 12:00:00" in prompt
+    assert len(prompt.splitlines()) == 21
+    assert estimate_tokens(memory.get_memory_prompt(budget=100)) <= 100
+    assert memory.get_memory_prompt(budget=1) == ""
 
 
 async def test_lasting_anger_survives_sessions_restart_and_old_dream():
@@ -238,13 +244,16 @@ async def test_task_result_preserves_closed_intention_and_explicit_reopening(int
     assert restored.persistent.intentions[0].task_id == "task1"
 
 
-async def test_legacy_material_keeps_provenance_and_runtime_metadata(database):
+@pytest.mark.parametrize("known_first_conversation", [False, True])
+async def test_legacy_material_keeps_provenance_and_runtime_metadata(database, known_first_conversation):
     for layer, category, key, value in [
         ("core", "user", "name", "Alice"),
         ("preference", "self", "book", "Poems"),
         ("state", "relation", "mood", "Old anger"),
         ("core", "self", "first_conversation_time", "2025-01-01T12:00:00"),
     ]:
+        if key == "first_conversation_time" and not known_first_conversation:
+            continue
         database.add(
             MemoryRecordORM(
                 layer=layer,
@@ -275,6 +284,16 @@ async def test_legacy_material_keeps_provenance_and_runtime_metadata(database):
     assert await memory.pending_days(datetime.now()) == []
     await memory.load()
     assert await database.scalar(select(func.count()).select_from(ExperienceORM)) == 3
+    restored = MemoryManager()
+    await restored.load()
+    assert (
+        "[Relationship history] Earliest known interaction with Master: 2025-01-01 12:00:00"
+        in restored.get_memory_prompt()
+    )
+
+
+def test_unknown_relationship_date_is_not_invented():
+    assert MemoryManager().get_memory_prompt() == ""
 
 
 async def test_resources_are_immutable_and_private_tags_never_recalled(tmp_path):
