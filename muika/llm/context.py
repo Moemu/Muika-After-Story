@@ -122,7 +122,7 @@ class ContextCompactor:
         :param text: 待整理的工作历史。
         :param target_tokens: 期望的摘要长度。
         :param available_tokens: 摘要可用空间；省略时使用目标长度作为上限。
-        :return: 有效摘要；无法缩短到可用空间时警告并返回 None。
+        :return: 有效摘要；请求失败或无法缩短到可用空间时警告并返回 None。
         """
         model = self.model
         started = perf_counter()
@@ -146,8 +146,17 @@ class ContextCompactor:
         for attempt in range(1, 5):
             parts = []
             for chunk in split_text(current, capacity):
-                response = await model.ask(ModelRequest(prompt=chunk, system=system), stream=False)
-                result = public_text(response.require_content())
+                try:
+                    response = await model.ask(ModelRequest(prompt=chunk, system=system), stream=False)
+                    content = response.require_content()
+                except Exception as exc:
+                    warnings.warn(
+                        "The context summary request failed; keeping history", ContextOverflowWarning, stacklevel=2
+                    )
+                    logger.warning("[ContextSummary] request failed; keeping history")
+                    logger.debug(f"[ContextSummary] request error | {type(exc).__name__}: {exc}")
+                    return None
+                result = public_text(content)
                 if not result:
                     warnings.warn(
                         "The context summary was empty; keeping history", ContextOverflowWarning, stacklevel=2

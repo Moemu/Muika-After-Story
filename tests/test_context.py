@@ -1,5 +1,6 @@
 """验证模型预算、完整工具交互压缩和超长重试。"""
 
+from asyncio import CancelledError
 from unittest.mock import AsyncMock
 
 import pytest
@@ -164,18 +165,77 @@ async def test_actual_service_length_rejection_remains_a_failed_response(monkeyp
     assert not chunks[-1].succeed and "service context limit" in chunks[-1].chunk
 
 
-async def test_failed_summary_keeps_complete_tool_protocol(fake_llm_factory):
-    compactor = ContextCompactor(fake_llm_factory(response=ModelCompletions(text="")))
+@pytest.mark.parametrize(
+    "response, error, warning",
+    [
+        (ModelCompletions(text=""), None, "summary was empty"),
+        (ModelCompletions(text="Service unavailable", succeed=False), None, "summary request failed"),
+        (None, RuntimeError("Connection closed"), "summary request failed"),
+    ],
+)
+async def test_failed_summary_keeps_complete_tool_protocol(fake_llm_factory, response, error, warning):
+    compactor = ContextCompactor(fake_llm_factory(response=response, error=error))
     messages = [
         ModelMessage(role="assistant", tool_calls=[ToolCall(id="old", name="read", arguments="{}")]),
         ModelMessage(role="tool", tool_call_id="old", content="evidence " * 3000),
         ModelMessage(role="assistant", content="Continue from that result."),
     ]
-    with pytest.warns(ContextOverflowWarning, match="summary was empty"):
+    with pytest.warns(ContextOverflowWarning, match=warning):
         result, through, summary = await compactor.compact_messages(
             ModelRequest("current input"), messages, ModelConfig(provider="_echo", context_window=8192, max_tokens=1024)
         )
     assert result == messages and through == 0 and summary == ""
+
+
+@pytest.mark.parametrize(
+    "response, error",
+    [
+        (ModelCompletions(text="Service unavailable", succeed=False), None),
+        (None, RuntimeError("Connection closed")),
+    ],
+)
+async def test_summary_failure_does_not_block_fitting_primary_request(
+    monkeypatch, fake_llm_factory, redirect_get_session, response, error
+):
+    memory = MemoryManager()
+    memory.snapshot.working_summary = "An earlier promise remains open."
+    for index in range(8):
+        await memory.add_context("user" if index % 2 == 0 else "muika", "past conversation " * 115)
+    before = memory.snapshot.model_copy(deep=True)
+    request = ModelRequest("My current question", history=list(memory.recent_turns))
+    model = Openai(
+        ModelConfig(provider="openai", model_name="test", api_key="test", context_window=8192, max_tokens=1024)
+    )
+    summary_model = fake_llm_factory(response=response, error=error)
+    compactor = ContextCompactor(summary_model)
+    sent = []
+
+    async def prepare(request, messages, force):
+        return await memory.prepare_context(request, model.config, compactor, force=force), list(messages)
+
+    async def step(request, messages, *, stream):
+        sent.append(request)
+        assert input_budget(model.config) * 0.8 < request_tokens(request) < input_budget(model.config)
+        yield ModelStreamCompletions(chunk="I remember your question.")
+
+    monkeypatch.setattr(model, "request_step", step)
+    with pytest.warns(ContextOverflowWarning, match="summary request failed"):
+        result = await collect_step(model, request, [], prepare_context=prepare)
+    assert result.succeed and result.text == "I remember your question."
+    assert len(sent) == summary_model.call_count == 1
+    assert sent[0].prompt == request.prompt and sent[0].history == request.history
+    assert before.working_summary in sent[0].system
+    restored = MemoryManager()
+    await restored.load()
+    assert restored.snapshot.working_summary == before.working_summary
+    assert restored.snapshot.summary_through == before.summary_through
+    assert list(restored.recent_turns) == request.history
+
+
+async def test_summary_cancellation_propagates(fake_llm_factory):
+    compactor = ContextCompactor(fake_llm_factory(error=CancelledError()))
+    with pytest.raises(CancelledError):
+        await compactor.summarize("An unfinished conversation.", 512)
 
 
 async def test_summary_above_target_is_used_once_when_it_fits_available_budget(fake_llm_factory):
