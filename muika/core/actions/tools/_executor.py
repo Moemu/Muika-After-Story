@@ -32,6 +32,7 @@ _SENSITIVE_PREFIXES = (
     "PASSWORD",
 )
 _DEFAULT_TIMEOUT = 1800.0
+_DEFAULT_YIELD_TIME = 3.0
 _DEFAULT_SHELL: Literal["powershell", "bash", "cmd"] = "powershell" if sys.platform == "win32" else "bash"
 
 
@@ -57,7 +58,9 @@ class ExecutionParams(BaseModel):
     timeout: float = Field(
         _DEFAULT_TIMEOUT, gt=0, description="Hard execution deadline in seconds. Default 30 minutes."
     )
-    yield_time: float = Field(1.0, ge=0, le=30, description="Seconds to wait for output before returning a process ID.")
+    yield_time: float = Field(
+        _DEFAULT_YIELD_TIME, ge=0, le=30, description="Seconds to wait for output before returning a process ID."
+    )
     cwd: str | None = Field(None, description="Working directory. Defaults to the current Muika working directory.")
 
 
@@ -87,7 +90,9 @@ async def _start(command: list[str], timeout: float, yield_time: float, cwd: str
     "Use wait_process to continue waiting. Requires ENABLE_CODE_EXECUTION=true.",
     params=ExecutePythonParams,
 )
-async def execute_python(code: str, timeout: float = _DEFAULT_TIMEOUT, yield_time: float = 1.0, cwd: str | None = None):
+async def execute_python(
+    code: str, timeout: float = _DEFAULT_TIMEOUT, yield_time: float = _DEFAULT_YIELD_TIME, cwd: str | None = None
+):
     if not mas_config.enable_code_execution:
         return ToolError("Code execution is disabled. Set ENABLE_CODE_EXECUTION=true to enable.")
     # 调试器会在源码前拼接分号语句，换行保留 try/with 等复合语句的语法。
@@ -110,7 +115,7 @@ async def execute_shell(
     command: str,
     shell: str = _DEFAULT_SHELL,
     timeout: float = _DEFAULT_TIMEOUT,
-    yield_time: float = 1.0,
+    yield_time: float = _DEFAULT_YIELD_TIME,
     cwd: str | None = None,
 ):
     if not mas_config.enable_shell_execution:
