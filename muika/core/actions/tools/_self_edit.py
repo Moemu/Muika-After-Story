@@ -205,7 +205,7 @@ async def self_write(path: str, content: str, reason: str) -> str:
             return await get_plugin_deployer().deploy_new(path, content, reason.strip())
         return await get_self_mod_manager().apply(path, content, reason.strip())
     except SelfModError as e:
-        logger.info(f"[SelfEdit] Rejected write to {path!r}: {e}")
+        logger.debug(f"[SelfEdit] Rejected write to {path!r}: {e}")
         return ToolError(f"The change was rejected: {e}")
     except Exception as e:
         logger.error(f"[SelfEdit] Unexpected error writing {path!r}: {e}")
@@ -520,7 +520,8 @@ async def persona_switch(template_name: str) -> str:
     old_name = mas_config.persona_template
     mas_config.persona_template = name
     _persist_persona_to_env(name)
-    logger.info(f"[Persona] Switched persona template: {old_name} -> {name} (source: {source_path})")
+    logger.debug(f"[Persona] Switched persona template: {old_name} -> {name} (source: {source_path})")
+    logger.info(f"Persona changed: {old_name} -> {name}")
 
     return "Persona template switched successfully.\n"
 

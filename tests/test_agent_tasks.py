@@ -3,17 +3,23 @@
 import asyncio
 import json
 from collections import deque
-from types import SimpleNamespace
-from unittest.mock import MagicMock
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from muika.core.agent.task_store import CallRecord
 from muika.core.agent.tasks import AgentTasks
 from muika.core.events import AgentTaskEvent
+from muika.core.memory import MemoryManager, MemoryQuery, StateUpdate
+from muika.core.memory_models import Intention
 from muika.core.state import MuikaState
-from muika.llm import ModelCompletions, ModelRequest
-from muika.llm._schema import ModelMessage, ToolCall, ToolResult
+from muika.llm import ModelCompletions, ModelConfig, ModelRequest
+from muika.llm._execution import collect_step
+from muika.llm._retry import LLMRequestError
+from muika.llm._schema import ModelMessage, ModelStreamCompletions, ToolCall, ToolResult
+from muika.llm.context import ContextCompactor
+from muika.llm.providers.openai import Openai
 from muika.plugin.func_call import get_function_calls, get_tool_list, on_function_call
 
 
@@ -37,9 +43,11 @@ class StepModel:
     def __init__(self, script):
         self.script = deque(script)
         self.requests = []
-        self.config = SimpleNamespace(multimodal=False)
+        self.config = ModelConfig(provider="_echo", multimodal=False)
 
-    async def step(self, request, messages):
+    async def step(self, request, messages, *, prepare_context=None):
+        if prepare_context is not None:
+            request, messages = await prepare_context(request, messages, False)
         self.requests.append((request, [m.model_copy(deep=True) for m in messages]))
         response = self.script.popleft()
         return await response(request, messages) if callable(response) else response
@@ -54,7 +62,8 @@ def factory(monkeypatch, db_session, session_ctx_factory):
         agent = MagicMock()
         agent.action_lock = asyncio.Lock()
         agent.model = StepModel(script)
-        agent.build_request = lambda command: ModelRequest(command, tools=get_tool_list())
+        agent.memory_reasoner.compactor = ContextCompactor(agent.model)
+        agent.build_request = lambda command, state=None: ModelRequest(command, tools=get_tool_list())
         return AgentTasks(agent, MuikaState(), MagicMock(), queue if queue is not None else asyncio.Queue())
 
     return create
@@ -68,6 +77,73 @@ async def _stop(manager, worker):
     await manager.close()
     worker.cancel()
     await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_failed_compaction_waits_for_growth_or_changed_model(factory, monkeypatch):
+    manager = factory([])
+    task = await manager.submit("inspect", "original")
+    task.messages = [ModelMessage(role="user", content="evidence " * 1600)]
+    model = manager.agent.model
+    model.config = ModelConfig(provider="_echo", context_window=8192, max_tokens=1024)
+    compactor = manager.agent.memory_reasoner.compactor
+    compact = AsyncMock(side_effect=lambda request, messages, config, **kwargs: (list(messages), 0, ""))
+    monkeypatch.setattr(compactor, "compact_messages", compact)
+    request = ModelRequest("inspect")
+
+    await manager._prepare_context(task, model, request, task.messages, False)
+    task.messages.append(ModelMessage(role="assistant", content="Read another nearby line."))
+    await manager._prepare_context(task, model, request, task.messages, False)
+    assert compact.await_count == 1
+
+    task.messages.append(ModelMessage(role="user", content="new evidence " * 500))
+    await manager._prepare_context(task, model, request, task.messages, False)
+    assert compact.await_count == 2
+    model.config = model.config.model_copy(update={"context_window": 16000})
+    await manager._prepare_context(task, model, request, task.messages, False)
+    assert compact.await_count == 3
+
+
+async def test_action_context_prepares_once_and_forced_retry_saves_before_sending(factory, monkeypatch):
+    manager = factory([])
+    task = await manager.submit("inspect", "original")
+    task.messages = [ModelMessage(role="user", content="evidence " * 1600)]
+    model = Openai(
+        ModelConfig(provider="openai", model_name="test", api_key="test", context_window=8192, max_tokens=1024)
+    )
+    compactor = manager.agent.memory_reasoner.compactor
+    compacted = [ModelMessage(role="user", content="Saved evidence and exact source reference.")]
+    preparations = []
+    requests = []
+
+    async def compact(request, messages, config, *, force=False):
+        preparations.append(force)
+        return (compacted, 1, "Saved evidence") if force else (list(messages), 0, "")
+
+    async def step(request, messages, *, stream):
+        requests.append(list(messages))
+        if len(requests) == 2:
+            raise LLMRequestError("actual service limit", "context_length", 400)
+        if len(requests) == 3:
+            saved = next(item for item in await manager.store.load() if item.id == task.id)
+            assert saved.context_messages == compacted
+            assert saved.context_through == len(task.messages)
+        yield ModelStreamCompletions(chunk="checked")
+
+    async def prepare(request, messages, force):
+        return await manager._prepare_context(task, model, request, messages, force)
+
+    monkeypatch.setattr(compactor, "compact_messages", compact)
+    monkeypatch.setattr(model, "request_step", step)
+    generic = AsyncMock(side_effect=AssertionError("Duplicate generic preparation"))
+    monkeypatch.setattr("muika.llm._execution.prepare_request", generic)
+    request = ModelRequest("inspect")
+    assert (await collect_step(model, request, task.messages, prepare_context=prepare)).succeed
+    task.messages.append(ModelMessage(role="assistant", content="One more detail."))
+    assert (await collect_step(model, request, task.messages, prepare_context=prepare)).succeed
+    assert preparations == [False, True]
+    assert len(requests) == 3 and requests[-1] == compacted
+    assert len(task.messages) == 2
+    generic.assert_not_awaited()
 
 
 async def test_tasks_execute_fifo_and_emit_one_versioned_result(factory):
@@ -366,3 +442,39 @@ async def test_failed_process_arguments_are_not_reclassified_as_unknown_actions(
     await manager._run_task(task)
     assert task.status == "completed"
     assert (await manager.store.calls(task.id))[0].status == "completed"
+
+
+async def test_completed_call_missing_from_memory_is_restored_once(factory, redirect_get_session):
+    memory = MemoryManager()
+    manager = factory([])
+    task = await manager.submit("Read a poem", "Read it")
+    call = CallRecord(
+        task_id=task.id,
+        call=ToolCall(id="poem", name="read_poem", arguments="{}"),
+        status="completed",
+        result=ToolResult(text="The old poem was read."),
+        completed_at=datetime(2026, 9, 1, 4, tzinfo=timezone.utc),
+    )
+    task.status = "completed"
+    await manager.store.save(task, call)
+    for _ in range(2):
+        restored = factory([])
+        restored.state.memory = memory
+        await restored.initialize()
+    hits = await memory.search(MemoryQuery(terms=["old poem"]))
+    assert len(hits) == 1
+    assert "2026-09-01" in hits[0].occurred_at
+    assert f"task_output:{task.id}:{call.id}" in hits[0].content
+
+
+async def test_same_intention_does_not_submit_duplicate_task_after_restart(factory, redirect_get_session):
+    memory = MemoryManager()
+    await memory.update_state(StateUpdate(reason="I am curious", intentions=[Intention(id="poem", description="Read")]))
+    manager = factory([])
+    manager.state.memory = memory
+    task = await manager.submit("Read", "Read", intention_id="poem")
+    restored = factory([])
+    restored.state.memory = memory
+    duplicate = await restored.submit("Read", "Read", intention_id="poem")
+    assert duplicate.id == task.id
+    assert len(restored.tasks) == 1

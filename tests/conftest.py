@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 os.environ.setdefault("MASTER_ID", "test_master")
 os.environ.setdefault("SUPERUSERS", '["test_master"]')
@@ -67,6 +68,10 @@ class FakeLLM:
     usage 写库装饰（DB 未初始化时装饰器会抛 RuntimeError）。"""
 
     def __init__(self, response=None, error=None, side_effect=None):
+        from muika.llm import ModelConfig
+
+        self.config = ModelConfig(provider="_echo")
+        self.compactor = None
         self.response = response
         self.error = error
         self.side_effect = side_effect
@@ -106,7 +111,10 @@ def session_ctx_factory():
 
         async def __aexit__(self, *exc):
             # 对齐真实 get_session 的成功提交语义
-            await self.session.commit()
+            if exc[0] is not None:
+                await self.session.rollback()
+            else:
+                await self.session.commit()
             return False
 
     def factory(session):
@@ -125,8 +133,20 @@ def redirect_get_session(db_session, session_ctx_factory, monkeypatch):
     - 各模块的模块级 ``get_session`` 名字：覆盖直接用模块级引用的方法
       （如 ``add_archive``、``record_topic_used``）。
     """
-    factory = lambda: session_ctx_factory(db_session)  # noqa: E731
+    sessions = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def factory():
+        async with sessions() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
     monkeypatch.setattr("muika.database.db.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
     monkeypatch.setattr("muika.core.topic_manager.get_session", factory)
+    monkeypatch.setattr("muika.core.agent.task_store.get_session", factory)
     return db_session

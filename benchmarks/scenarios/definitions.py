@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Mapping
 
-from muika.core.memory import MemoryCategory, MemoryLayer
+from muika.core.memory import MemoryCategory
 
 ExperienceRubric = Literal["general", "meta", "philosophy", "care"]
 
@@ -109,9 +109,8 @@ class ActionKind(str, Enum):
 
 @dataclass(frozen=True)
 class SeedMemory:
-    """播种到 MemoryManager 的单条 CORE 记忆。"""
+    """播种到 MemoryManager 的单条原子事实。"""
 
-    layer: MemoryLayer
     category: MemoryCategory
     key: str
     value: str

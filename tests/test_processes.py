@@ -43,6 +43,17 @@ async def test_python_compound_statement_survives_debugger_prefix(processes, tmp
     assert execution.stdout.strip() == "it works"
 
 
+async def test_short_python_job_finishes_without_another_wait_call(processes, tmp_path, monkeypatch):
+    monkeypatch.setattr(mas_config, "enable_code_execution", True)
+    monkeypatch.setattr(_executor, "get_process_manager", lambda: processes)
+    result = await _executor.execute_python(
+        'import time; time.sleep(1.1); print("checked")', cwd=str(tmp_path), timeout=5
+    )
+    execution = ProcessResult.model_validate_json(result.text)
+    assert execution.status == "completed" and execution.exit_code == 0
+    assert execution.stdout.strip() == "checked"
+
+
 async def test_wait_returns_running_and_later_reads_all_output(processes, tmp_path):
     process_id = await processes.start(
         [sys.executable, "-u", "-c", "import time; print('first', flush=True); time.sleep(0.4); print('second')"],

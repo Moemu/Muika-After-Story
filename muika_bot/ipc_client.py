@@ -75,7 +75,7 @@ class IpcClient:
     def set_client_info(self, name: str) -> None:
         """更新适配器身份信息（在 NoneBot 适配器就绪后调用）。"""
         self.client_name = name
-        logger.info(f"[IpcClient] Client identity set: name={name!r}")
+        logger.debug(f"[IpcClient] Client identity set: name={name!r}")
 
     @property
     def is_connected(self) -> bool:
@@ -83,7 +83,7 @@ class IpcClient:
 
     async def _connect_once(self) -> None:
         """单次连接尝试。"""
-        logger.info(f"[IpcClient] Connecting to Core at {self._url}...")
+        logger.debug(f"[IpcClient] Connecting to Core at {self._url}...")
         headers = {
             "X-Client-Name": self.client_name,
         }
@@ -93,7 +93,7 @@ class IpcClient:
         self._connected = True
         self._reconnect_count = 0
         self._connected_event.set()
-        logger.success("[IpcClient] Connected to Core")
+        logger.success("Connected to Muika.")
 
         # 发送所有暂存的事件
         await self._flush_pending()
@@ -169,7 +169,7 @@ class IpcClient:
                 self._pending_events.appendleft(msg)
                 break
         if sent:
-            logger.info(f"[IpcClient] Flushed {sent} pending event(s)")
+            logger.debug(f"[IpcClient] Flushed {sent} pending event(s)")
         return sent
 
     @overload
@@ -238,7 +238,7 @@ class IpcClient:
                 break
 
             delay = min(_INITIAL_RECONNECT_DELAY * (2 ** (self._reconnect_count - 1)), _MAX_RECONNECT_DELAY)
-            logger.info(f"[IpcClient] Reconnecting in {delay:.1f}s (attempt {self._reconnect_count})...")
+            logger.debug(f"[IpcClient] Reconnecting in {delay:.1f}s (attempt {self._reconnect_count})...")
             await asyncio.sleep(delay)
 
         # 清理
@@ -252,7 +252,7 @@ class IpcClient:
         if self._ws and not self._ws.closed:
             await self._ws.close()
             self._ws = None
-        logger.info("[IpcClient] Disconnected")
+        logger.info("Disconnected from Muika.")
 
     async def send_user_message(self, message: str, resources: Optional[list[dict]] = None) -> bool:
         """向 Core 发送用户对话消息。"""

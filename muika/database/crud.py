@@ -86,16 +86,21 @@ class UsageORM:
         )
 
     @staticmethod
-    async def get_usage_records(session: AsyncSession, days: int = 7) -> list[Usage]:
-        """返回最近 N 天按日期降序排列的用量明细行。
+    async def get_usage_records(session: AsyncSession, days: int | None = 7) -> list[Usage]:
+        """返回所选自然日范围内按日期降序排列的用量明细行。
 
         :param session: 数据库会话
-        :param days: 返回最近多少天的数据
+        :param days: 包含今天在内的天数；None 表示全部历史。
+        :raises ValueError: 天数小于 1。
         """
-        since = (datetime.now() - timedelta(days=days)).strftime("%Y.%m.%d")
-        stmt = await session.execute(
-            select(Usage).where(Usage.date >= since).order_by(Usage.date.desc(), Usage.type, Usage.plugin)
-        )
+        query = select(Usage)
+        if days is not None:
+            if days < 1:
+                raise ValueError("days must be at least 1")
+            today = datetime.now()
+            since = (today - timedelta(days=days - 1)).strftime("%Y.%m.%d")
+            query = query.where(Usage.date >= since, Usage.date <= today.strftime("%Y.%m.%d"))
+        stmt = await session.execute(query.order_by(Usage.date.desc(), Usage.type, Usage.plugin))
         return list(stmt.scalars().all())
 
 

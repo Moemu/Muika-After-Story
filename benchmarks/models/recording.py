@@ -16,6 +16,7 @@ class RecordingModel:
 
     def __init__(self, inner: Any) -> None:
         self.inner = inner
+        self.config = inner.config
         self.requests: list[ModelRequest] = []
         self.responses: list[ModelCompletions] = []
         self.errors: list[BaseException] = []

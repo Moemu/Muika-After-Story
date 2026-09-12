@@ -119,7 +119,7 @@ async def _apply_topics_change(new_text: str, reason: str, action: SelfModAction
     if topic_manager is not None:
         topic_manager.reload_store()
     await get_self_mod_manager().record_event(str(TOPICS_PATH), action, reason, source="self")
-    logger.info(f"[Topics] topics.yml updated: {reason[:80]}")
+    logger.debug(f"[Topics] topics.yml updated: {reason[:80]}")
     return f"Topic library updated. Reason: {reason}"
 
 
@@ -252,7 +252,7 @@ async def topic_add(
         except SelfModError as e:
             return ToolError(f"The new topic was rejected: {e}")
 
-    logger.info(f"[Topics] Added topic {topic_id!r}")
+    logger.debug(f"[Topics] Added topic {topic_id!r}")
     return (
         f"Topic added to the library (now {len(entries) + 1} topics total). It is already available "
         f"for proactive conversations.\n{block.rstrip()}"
@@ -327,7 +327,7 @@ async def topic_update(
         except SelfModError as e:
             return ToolError(f"The change was rejected: {e}")
 
-    logger.info(f"[Topics] Updated topic {topic_id!r}")
+    logger.debug(f"[Topics] Updated topic {topic_id!r}")
     return f"Topic {topic_id!r} updated. The new version is already active.\n{block.rstrip()}"
 
 
@@ -370,5 +370,5 @@ async def topic_delete(id: str, reason: str = "") -> str:
         except SelfModError as e:
             return ToolError(f"The deletion was rejected: {e}")
 
-    logger.info(f"[Topics] Deleted topic {topic_id!r}")
+    logger.debug(f"[Topics] Deleted topic {topic_id!r}")
     return f"Topic {topic_id!r} removed from the library ({len(entries) - 1} topics remaining)."

@@ -15,6 +15,7 @@ from muika.builtin_plugins import plugins as plugins_command
 from muika.config import mas_config
 from muika.core.actions.tools import _self_edit
 from muika.core.actions.tools._plugin import plugin_load
+from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.self_mod import SelfModError
 from muika.core.self_mod.plugin_deployer import PluginDeployer
 from muika.plugin.exceptions import PluginImportError
@@ -230,6 +231,9 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fak
     agent = Agent.__new__(Agent)
     agent.action_lock = asyncio.Lock()
     agent.model = fake_model
+    agent.summarize_model = fake_model
+    agent.memory_reasoner = MemoryReasoner(fake_model, fake_model)
+    monkeypatch.setattr("muika.core.agent.agent.get_model_config", lambda name: fake_model.config)
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""
     monkeypatch.setattr("muika.core.agent.agent.generate_prompt_from_template", lambda *args: "system")

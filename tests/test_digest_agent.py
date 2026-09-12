@@ -2,9 +2,16 @@
 
 import json
 
+import pytest
+
 from muika.core.digest_agent import DigestAgent
-from muika.llm import ModelCompletions
+from muika.llm import ModelCompletions, ModelConfig
 from muika.llm._schema import ModelMessage
+
+
+@pytest.fixture(autouse=True)
+def model_configs(monkeypatch):
+    monkeypatch.setattr("muika.core.digest_agent.get_model_config", lambda name: ModelConfig(provider="_echo"))
 
 
 def test_normalize_text():

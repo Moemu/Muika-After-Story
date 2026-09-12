@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, AsyncGenerator
 
@@ -45,7 +46,7 @@ async def _run_migrations(db_path: Path) -> None:
 
     1. 构建指向 ``alembic.ini`` 和迁移脚本的 Alembic Config。
     2. 检测是否为旧数据库（有 ORM 表但无 ``alembic_version`` 表）
-       ——若是，则 stamp HEAD 保护用户数据。
+       ——若是，则识别已有结构并标记对应版本。
     3. 执行 ``alembic upgrade head``。
     """
     from alembic import command as alembic_command
@@ -61,6 +62,24 @@ async def _run_migrations(db_path: Path) -> None:
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
     def _sync_run() -> None:
+        from alembic.script import ScriptDirectory
+
+        if db_path.exists():
+            with sqlite3.connect(db_path) as source:
+                tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                current = (
+                    source.execute("SELECT version_num FROM alembic_version").fetchone()
+                    if "alembic_version" in tables
+                    else None
+                )
+                head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
+                if tables and (current is None or current[0] != head):
+                    backup_dir = db_path.parent / "backups"
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup = backup_dir / f"{db_path.stem}-before-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
+                    with sqlite3.connect(backup) as destination:
+                        source.backup(destination)
+                    logger.info(f"Backup saved before update: {backup}")
         # 自动标记旧数据库
         _ensure_alembic_version_table(db_path, alembic_cfg)
         alembic_command.upgrade(alembic_cfg, "head")
@@ -73,7 +92,7 @@ async def _run_migrations(db_path: Path) -> None:
 
 def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> None:
     """如果数据库文件存在且包含 ORM 表但缺少 ``alembic_version`` 表，
-    直接通过 sqlite3 创建版本表并标记为 HEAD，绕过 Alembic async engine 路径以避免锁冲突。
+    通过 sqlite3 标记已有结构对应的版本，再执行后续迁移。
     """
     if not db_path.exists():
         return  # 全新部署，无需标记
@@ -95,9 +114,20 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
         has_user_tables = cursor.fetchone() is not None
 
         if has_user_tables:
-            logger.info("[DB] 检测到现有数据库但无 alembic_version 表" " —— 自动标记为当前版本以保护数据")
-            script = ScriptDirectory.from_config(alembic_cfg)
-            head = script.get_current_head()
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if {"memory_runtime", "experience", "diary", "fact", "fact_recall"} <= tables:
+                head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
+            elif {"agent_task", "agent_call"} <= tables:
+                head = "3b6a7e5f332e"
+            elif "self_modification_log" in tables:
+                head = "906676bdf27e"
+            elif "rss_digest_cache" in tables:
+                head = "aa5d6045b34e"
+            elif "input_tokens" in {row[1] for row in conn.execute("PRAGMA table_info(usage)")}:
+                head = "27385c0c4fbb"
+            else:
+                head = "78ae56f30d1a"
+            logger.debug(f"[DB] Identified unversioned database as {head}")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS alembic_version ("
                 "    version_num VARCHAR(32) NOT NULL,"

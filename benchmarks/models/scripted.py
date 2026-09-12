@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from benchmarks.scenarios.definitions import Metric, Scenario
+from muika.llm import ModelConfig
 from muika.llm._schema import ModelCompletions, ModelRequest
 
 
@@ -15,6 +16,7 @@ class ScriptedLLM:
     """按注入脚本依次返回预设回复的离线模型。"""
 
     def __init__(self, script: list[str] | None = None) -> None:
+        self.config = ModelConfig(provider="_echo")
         self._script: list[str] = list(script or [])
         self._index = 0
         self.requests: list[ModelRequest] = []

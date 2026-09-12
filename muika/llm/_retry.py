@@ -18,6 +18,7 @@ FailureKind = Literal[
     "server",
     "authentication",
     "invalid_request",
+    "context_length",
 ]
 
 T = TypeVar("T")
@@ -126,8 +127,22 @@ def classify_request_error(exc: Exception) -> LLMRequestError:
     code = str(getattr(exc, "code", ""))
     name = type(exc).__name__.lower()
     text = str(exc)
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timeout" in name:
-        kind: FailureKind = "timeout"
+    if any(
+        marker in (code + " " + text).lower()
+        for marker in (
+            "context_length_exceeded",
+            "maximum context length",
+            "context window exceeded",
+            "input token count exceeds",
+            "input length exceeds",
+            "too many tokens",
+            "prompt is too long",
+            "request too large for model",
+        )
+    ):
+        kind: FailureKind = "context_length"
+    elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timeout" in name:
+        kind = "timeout"
     elif status_code in {429, 529} or "throttl" in code.lower() or "rate" in code.lower():
         kind = "congestion"
     elif status_code in {401, 403}:

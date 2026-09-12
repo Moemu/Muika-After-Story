@@ -79,7 +79,7 @@ class PluginFileHandler(FileSystemEventHandler):
             self._last_triggered[trigger_key] = current
 
         action = "deleted" if is_delete else "changed"
-        logger.info(
+        logger.debug(
             f"[PluginWatcher] {action} {src.relative_to(self._plugins_dir)} "
             f"→ {'unload' if is_delete else 'reload'} {package_name!r}"
         )
@@ -176,7 +176,7 @@ def start_plugin_watcher(
     observer.schedule(handler, str(plugins_dir), recursive=True)
     observer.start()
     _observer = observer
-    logger.info(f"[PluginWatcher] Started watching {plugins_dir}")
+    logger.debug(f"[PluginWatcher] Started watching {plugins_dir}")
     return observer
 
 
@@ -187,4 +187,4 @@ def stop_plugin_watcher() -> None:
         _observer.stop()
         _observer.join()
         _observer = None
-        logger.info("[PluginWatcher] Stopped")
+        logger.debug("[PluginWatcher] Stopped")

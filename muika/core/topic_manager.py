@@ -111,7 +111,7 @@ class TopicStore:
 
         self._by_category = new_map
         total = sum(len(v) for v in new_map.values())
-        logger.info(f"[TopicStore] Loaded {total} static topics across {len(new_map)} categories")
+        logger.debug(f"[TopicStore] Loaded {total} static topics across {len(new_map)} categories")
 
     def get_by_category(self, category: str) -> list[StaticTopic]:
         return self._by_category.get(category, [])

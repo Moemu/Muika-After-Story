@@ -40,3 +40,15 @@ def load_model(config: Optional[ModelConfig] = None) -> BaseLLM:
         sys.exit(1)
 
     return LLMClass(config)
+
+
+def refresh_model(model: BaseLLM, config: ModelConfig) -> BaseLLM:
+    """配置变化时创建新实例，保留上下文组件并让在途请求继续使用旧实例。"""
+    if model.config.model_dump() == config.model_dump():
+        return model
+    replacement = load_model(config)
+    replacement.compactor = model.compactor
+    logger.debug(
+        f"[Model] refreshed | model={config.model_name or config.provider} context_window={config.context_window}"
+    )
+    return replacement

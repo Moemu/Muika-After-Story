@@ -175,19 +175,19 @@ async def _get_ipc_client() -> IpcClient:
 @driver.on_startup
 async def startup() -> None:
     """Bot startup: connect to Core, load plugins."""
-    logger.info("Loading MAS framework...")
+    logger.info("Starting chat service...")
     require_user_agreement()
 
-    logger.info(f"Connecting to Core ({mas_config.core_ws_url})...")
+    logger.debug(f"Connecting to Core ({mas_config.core_ws_url})...")
     client = _init_ipc_client()
     asyncio.create_task(client.connect())
     connected = await client.wait_connected(timeout=10.0)
     if connected:
-        logger.success("Connected to Core process")
+        logger.debug("Connected to Core process")
     else:
         logger.warning("Core connection timed out, messages will be queued")
 
-    logger.success("MAS framework is ready")
+    logger.success("Chat service is ready.")
 
 
 def _detect_adapter_type() -> str:
@@ -211,14 +211,14 @@ def _detect_adapter_type() -> str:
 @driver.on_bot_connect
 async def bot_connected() -> None:
     """Handle Bot platform connection."""
-    logger.success("Bot connected")
+    logger.success("Chat platform connected.")
 
     # 检测并设置适配器身份
     client_name = _detect_adapter_type()
     _ipc_client.set_client_info(client_name)
 
     if _ipc_client.is_connected:
-        logger.info("[Bootstrap] bot_connected event sent via IPC.")
+        logger.debug("[Bootstrap] bot_connected event sent via IPC.")
     else:
         logger.warning("[Bootstrap] Core not connected -- bootstrap event queued.")
 
@@ -263,7 +263,7 @@ async def handle_supported_adapters(
     message_text = merged_message.extract_plain_text()
     message_resource = await _extract_multi_resources(merged_message, event)
 
-    logger.info(f"Received message: {message_text} multimodal: {message_resource}")
+    logger.debug(f"Received message: {message_text} multimodal: {message_resource}")
 
     if not any((message_text, message_resource)):
         return

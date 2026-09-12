@@ -780,7 +780,7 @@ class CoreProposalManager:
             proposal["approved_boot_id"] = _BOOT_ID
             self._save(proposal)
             _enter_maintenance(patch_id)
-            logger.info("[CoreProposal] Core update approved; restart required")
+            logger.info("Update approved. Restart Muika to apply it.")
             for change in proposal["changes"]:
                 audit_error = await self._audit_change(proposal, change, "core_approve")
                 if audit_error:
@@ -966,7 +966,7 @@ class CoreProposalManager:
                     source=f"patch:{proposal['patch_id']}",
                 )
                 await session.flush()
-                logger.info(f"[CoreProposal] Audit #{record.id} recorded for {change['path']}")
+                logger.debug(f"[CoreProposal] Audit #{record.id} recorded for {change['path']}")
                 return None
         except Exception as exc:
             message = f"{change['path']}: {exc}"

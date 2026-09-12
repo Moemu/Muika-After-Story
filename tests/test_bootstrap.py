@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from muika.core.memory import MemoryCategory, MemoryLayer, MemoryRecord
+from muika.core.memory import Fact, MemoryCategory
 from muika.ipc.bootstrap import CoreBootstrap
 
 
@@ -25,9 +25,8 @@ async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkey
     async def load_memory():
         entered.set()
         await release.wait()
-        muika.memory.records["core:user:name"] = MemoryRecord(
-            layer=MemoryLayer.CORE, category=MemoryCategory.USER, key="name", value="Alice"
-        )
+        muika.memory.facts[1] = Fact(id=1, category=MemoryCategory.USER, key="name", value="Alice")
+        muika.memory.session.is_first_session = False
 
     monkeypatch.setattr(muika.memory, "load", load_memory)
     monkeypatch.setattr(muika, "start", MagicMock())
@@ -41,7 +40,7 @@ async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkey
         server.start.assert_awaited_once()
         await bootstrap._handle_event({"type": "session_bootstrap"}, SimpleNamespace(client_name="test"))
         assert not muika.memory.session.is_first_session
-        assert muika.memory.records["core:user:name"].value == "Alice"
+        assert muika.memory.facts[1].value == "Alice"
         while not muika.event_queue.empty():
             await muika.collect_events()
         await bootstrap._executor.scheduler.schedule("scheduled", trigger_in_seconds=0)

@@ -23,6 +23,6 @@ reflect_cmd = on_alconna(
 @reflect_cmd.handle()
 async def _reflect(muika: Muika) -> str:
     """触发强制自省，fire-and-forget；handler 立即回复 [System] 预告。"""
-    logger.info("[Reflection] Triggering forced reflection (user_command)")
+    logger.info("Diary review requested.")
     muika.start_background_task(muika.reflection.force_reflect())
     return "[System] Muika 正在安静地自省……"

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from muika.core.memory import MemoryRecord
+from muika.core.memory import RecallResult
 from muika.core.state import MuikaState
 from muika.utils.utils import get_version
 
@@ -28,7 +28,7 @@ class PromptTemplatesData(BaseModel):
     """内心独白（Heart）强度等级，决定模板渲染哪一段思考指示"""
     memory_context: Optional[str] = None
     """记忆内容"""
-    injected_preferences: Optional[List["MemoryRecord"]] = None
+    recalled_memories: RecallResult | None = None
     """记忆条目"""
 
     lonely_desc: Optional[str] = None

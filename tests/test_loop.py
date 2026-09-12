@@ -9,11 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from muika.core.agent.task_store import TaskRecord
 from muika.core.events import TimeTickEvent, UserMessageEvent, UserMessagePayload
 from muika.core.loop import Muika, ParsedReply
+from muika.core.memory import MemoryManager, MemoryQuery, RecallResult
 from muika.core.state import ActiveTopicState, MuikaState
-from muika.llm import ModelCompletions, ModelRequest
+from muika.llm import ModelCompletions, ModelConfig, ModelRequest
+from muika.llm.context import ContextCompactor
 from muika.models import Message
 
 
@@ -109,6 +110,7 @@ def test_parse_combined():
         clean_reply="Hello",
         memory_contents=["m"],
         agent_commands=["cmd"],
+        intention_ids=[None],
         target="t",
         timeout=3600.0,
         god_mode=True,
@@ -118,6 +120,7 @@ def test_parse_combined():
 def _engine() -> Muika:
     m = Muika.__new__(Muika)
     m.state = MuikaState()
+    m.memory = MemoryManager()
     return m
 
 
@@ -187,18 +190,25 @@ def test_incomplete_heart_hides_private_text_and_commands(opening):
 
 
 @pytest.fixture
-def engine(monkeypatch):
+def engine(monkeypatch, redirect_get_session):
     for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
-    return Muika(MagicMock(send_message=AsyncMock()), asyncio.Queue())
+    engine = Muika(MagicMock(send_message=AsyncMock()), asyncio.Queue())
+    engine.reflection.maybe_reflect = AsyncMock()
+    engine.agent.model.config = ModelConfig(provider="_echo")
+    engine.agent.memory_reasoner.compactor = ContextCompactor(engine.agent.model)
+    engine.agent.memory_reasoner.recall = AsyncMock(return_value=RecallResult())
+    return engine
 
 
-async def test_god_mode_enables_tools_and_isolates_resources(engine):
+async def test_god_mode_enables_tools_and_isolates_resources(engine, tmp_path):
     from muika.models import Resource
     from muika.plugin.func_call.context import ToolContext, get_dependencies
 
     requests = []
-    resource = Resource(type="image", path="capture.png", mimetype="image/png")
+    capture = tmp_path / "capture.png"
+    capture.write_bytes(b"image fixture")
+    resource = Resource(type="image", path=str(capture), mimetype="image/png")
 
     async def generate_reply(**kwargs):
         requests.append(kwargs["god_mode"])
@@ -224,18 +234,19 @@ async def test_god_mode_enables_tools_and_isolates_resources(engine):
     assert get_dependencies()[ToolContext] is None
 
 
-async def test_chat_and_session_end_keep_background_task(engine, monkeypatch, db_session, session_ctx_factory):
-    monkeypatch.setattr("muika.core.agent.task_store.get_session", lambda: session_ctx_factory(db_session))
+async def test_chat_and_session_end_keep_background_task(engine):
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def step(request, messages):
+    async def step(request, messages, *, prepare_context=None):
+        if prepare_context is not None:
+            request, messages = await prepare_context(request, messages, False)
         entered.set()
         await release.wait()
         return ModelCompletions(text='<agent_result status="completed">Verified.</agent_result>')
 
     engine.agent.action_lock = asyncio.Lock()
-    engine.agent.build_request = lambda command: ModelRequest(command, tools=[])
+    engine.agent.build_request = lambda command, state=None: ModelRequest(command, tools=[])
     engine.agent.model.step = step
     engine.brain.generate_reply = AsyncMock(side_effect=["我去看看。<agent>Develop Daily</agent>", "我在呢。"])
     worker = asyncio.create_task(engine.agent_tasks.run())
@@ -265,39 +276,16 @@ async def test_chat_and_session_end_keep_background_task(engine, monkeypatch, db
         await asyncio.gather(worker, return_exceptions=True)
 
 
-async def test_failed_summary_preserves_session_and_can_retry(engine, monkeypatch):
-    from muika.core.constants import AUTO_SUMMARY_INTERVAL, AUTO_SUMMARY_MIN_TURNS
-
-    clock = [1000.0]
-    monkeypatch.setattr("muika.core.loop.time.monotonic", lambda: clock[0])
-    for index in range(AUTO_SUMMARY_MIN_TURNS):
-        engine.memory.add_context("user", str(index))
-    turns = list(engine.memory.recent_turns)
+async def test_session_end_keeps_raw_material_without_diary_or_model_call(engine):
+    await engine.memory.add_context("user", "A small detail worth keeping.")
     session_id = engine.memory.session.session_id
-    engine.agent.summarize_session = AsyncMock(side_effect=RuntimeError("summary unavailable"))
-    engine.memory.update_archive = AsyncMock()
     await engine._handle_session_end()
-    assert list(engine.memory.recent_turns) == turns
-    assert engine.memory.session.session_id == session_id
-    assert engine._last_summary_turn is None
-    engine.memory.update_archive.assert_not_awaited()
-    await engine._handle_session_end()
-    assert not await engine.update_session_memory()
-    engine.agent.summarize_session.assert_awaited_once()
-    clock[0] += AUTO_SUMMARY_INTERVAL
-
-    engine.agent.summarize_session.side_effect = None
-    engine.agent.summarize_session.return_value = "A shared memory."
-    engine.memory.update_archive.side_effect = RuntimeError("database unavailable")
-    await engine._handle_session_end()
-    assert list(engine.memory.recent_turns) == turns
-    assert engine._last_summary_turn is None
-
-    engine.memory.update_archive.side_effect = None
-    clock[0] += AUTO_SUMMARY_INTERVAL
-    await engine._handle_session_end()
-    assert not engine.memory.recent_turns
     assert engine.memory.session.session_id != session_id
+    assert not engine.memory.recent_turns
+    hits = await engine.memory.search(MemoryQuery(terms=["small detail"]))
+    assert len(hits) == 1
+    assert await engine.memory.recent_diaries(datetime.now().date()) == []
+    engine.agent.model.ask.assert_not_called()
 
 
 async def test_shutdown_waits_for_background_cleanup(engine):
@@ -322,89 +310,62 @@ async def test_shutdown_waits_for_background_cleanup(engine):
     assert engine._timeout_task is None
 
 
-async def test_memory_storage_does_not_block_task_controls_or_chat(engine):
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    stored = []
-
-    async def store(content, state):
-        stored.append(content)
-        if content == "first":
-            entered.set()
-            await release.wait()
-
-    task = TaskRecord(instruction="work", original_request="work")
-    engine.agent_tasks.submit = AsyncMock(return_value=task)
-    engine.agent_tasks.update = AsyncMock()
-    engine.agent.classify_and_store_memory = store
+async def test_notes_are_material_not_classified_facts(engine):
     engine.brain.generate_reply = AsyncMock(
-        side_effect=[
-            "I will check.<memory>first</memory><agent>work</agent>",
-            f'<memory>second</memory><agent task_id="{task.id}" action="cancel">stop</agent>',
-            "I hear you.",
-        ]
+        return_value="I noticed a rhyme.<memory>I want to explore this poem.</memory>"
     )
-    event = UserMessageEvent(payload=UserMessagePayload(message=Message(message="work")))
-    try:
-        await asyncio.wait_for(engine._run_brain_pipeline(event, []), 1)
-        await asyncio.wait_for(entered.wait(), 1)
-        engine.agent_tasks.submit.assert_awaited_once_with("work", "work")
-        await asyncio.wait_for(engine._run_brain_pipeline(event, []), 1)
-        engine.agent_tasks.update.assert_awaited_once_with(task.id, "stop", cancel=True)
-        await asyncio.wait_for(engine._run_brain_pipeline(event, []), 1)
-        assert engine.executor.send_message.await_args.args[0] == "I hear you."
-        assert stored == ["first"]
-    finally:
-        release.set()
-        await asyncio.gather(*list(engine._tasks))
-    assert stored == ["first", "second"]
+    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    hits = await engine.memory.search(MemoryQuery(terms=["explore this poem"]))
+    assert len(hits) == 1
+    assert engine.memory.facts == {}
+    engine.agent.model.ask.assert_not_called()
 
 
 async def test_failed_memory_does_not_discard_following_silent_notes(engine):
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing><memory>first</memory><memory>second</memory>")
-    engine.agent.classify_and_store_memory = AsyncMock(side_effect=[RuntimeError("offline"), None])
+    engine.memory.add_material = AsyncMock(side_effect=[RuntimeError("offline"), None])
     await engine._run_brain_pipeline(TimeTickEvent(), [])
     await asyncio.gather(*list(engine._tasks))
-    assert [call.args[0] for call in engine.agent.classify_and_store_memory.await_args_list] == ["first", "second"]
+    assert [call.args[1] for call in engine.memory.add_material.await_args_list] == ["first", "second"]
     engine.executor.send_message.assert_not_awaited()
 
 
-async def test_idle_ticks_wait_for_failed_archive_retry(engine, monkeypatch):
-    from muika.core.constants import (
-        AUTO_SUMMARY_INTERVAL,
-        AUTO_SUMMARY_MIN_TURNS,
-        SESSION_IDLE_TIMEOUT,
-    )
-    from muika.core.events import SessionEndEvent
+async def test_idle_session_end_does_not_depend_on_summary_service(engine):
+    from muika.core.constants import SESSION_IDLE_TIMEOUT
 
-    clock = [1000.0]
-    monkeypatch.setattr("muika.core.loop.time.monotonic", lambda: clock[0])
     engine.state.last_interaction = datetime.now() - timedelta(seconds=SESSION_IDLE_TIMEOUT + 1)
     engine._last_digest_time = datetime.now().timestamp()
-    for index in range(AUTO_SUMMARY_MIN_TURNS):
-        engine.memory.add_context("user", str(index))
-    engine.agent.summarize_session = AsyncMock(side_effect=RuntimeError("offline"))
-    engine.memory.update_archive = AsyncMock()
-    await engine._process_event(SessionEndEvent(), 0)
-    for _ in range(3):
-        await engine._tick_idle(TimeTickEvent(), 0)
-    assert engine.event_queue.empty()
-    assert not engine._tasks
-    engine.agent.summarize_session.assert_awaited_once()
-    clock[0] += AUTO_SUMMARY_INTERVAL
+    await engine.memory.add_context("user", "I will return.")
     await engine._tick_idle(TimeTickEvent(), 0)
     event = engine.event_queue.get_nowait()
     assert event.type == "session_end"
     await engine._process_event(event, 0)
-    assert engine.agent.summarize_session.await_count == 2
-    assert engine.memory.recent_turns
+    await engine._tick_idle(TimeTickEvent(), 0)
+    assert engine.event_queue.empty()
+    assert "I will return." in await engine.memory.read_source("experience:1")
 
 
-async def test_concurrent_archive_paths_share_failure_backoff(engine):
-    engine.memory.add_context("user", "A memory to keep.")
-    engine.agent.summarize_session = AsyncMock(side_effect=RuntimeError("offline"))
-    engine.memory.update_archive = AsyncMock()
-    results = await asyncio.gather(engine.update_session_memory(), engine.update_session_memory())
-    assert results == [False, False]
-    engine.agent.summarize_session.assert_awaited_once()
-    engine.memory.update_archive.assert_not_awaited()
+def test_private_state_updates_are_typed_and_never_visible():
+    parsed = Muika._parse_reply_tags('I hear you.<state>{"mood":"hurt","reason":"A broken promise"}</state>')
+    assert parsed.clean_reply == "I hear you."
+    assert parsed.state_updates[0].mood == "hurt"
+    invalid = Muika._parse_reply_tags('Hello<state>{"mood":123}</state>')
+    assert invalid.clean_reply == "Hello" and invalid.state_updates == []
+    incomplete = Muika._parse_reply_tags('Hello<state>{"mood":"secret"')
+    assert incomplete.clean_reply == "Hello"
+
+
+async def test_dissonance_initiative_allows_silence_and_uses_cooldown(engine):
+    from muika.core.memory_models import Intention
+
+    engine.memory.persistent.dissonance = 0.7
+    engine.memory.persistent.intentions = [Intention(id="poem", description="Read a poem")]
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=5)
+    assert engine.get_think_mode(TimeTickEvent()) == "emotional"
+    engine.brain.generate_reply = AsyncMock(return_value="<do_nothing>")
+    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    assert engine.get_think_mode(TimeTickEvent()) is None
+    engine.executor.send_message.assert_not_awaited()
+    engine.memory.persistent.last_considered_at = datetime.now() - timedelta(days=1)
+    engine.state.last_proactive_at = datetime.now()
+    assert engine.get_think_mode(TimeTickEvent()) is None

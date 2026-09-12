@@ -39,8 +39,6 @@ class MASConfig(BaseSettings):
 
     master_id: str = ""
     """对话目标ID。"""
-    max_memory_records: int = 100
-    """最大记忆记录数(最近的N条对话)"""
     persona_template: str = "Muika.md.jinja2"
     """默认人格模板"""
     agent_template: str = "Muika.agent.jinja2"
@@ -48,10 +46,8 @@ class MASConfig(BaseSettings):
 
     agent_model: Optional[str] = Field(None, validation_alias=AliasChoices("agent_model", "butler_model"))
     """分身 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
-    agent_tool_context_chars: int = Field(60000, ge=4000)
-    """行动任务保留在模型上下文中的工具正文预算，不限制私密思考。"""
     session_summarize_model: Optional[str] = None
-    """会话总结 Agent 所用模型的配置名，建议使用与核心模型相同型号或其量化版本。留空则使用分身模型"""
+    """工作上下文压缩和日记整理所用模型；留空则使用分身模型。"""
     load_user_skills: bool = False
     """是否加载用户文件夹中的技能（~/.agents/skills 与 ~/.claude/skills）"""
 
@@ -100,9 +96,7 @@ class MASConfig(BaseSettings):
     enable_core_proposals: bool = False
     """开启 Core 代码变更提案能力。"""
     enable_auto_reflection: bool = True
-    """开启每日定时自动自省（受冷却间隔与待处理会话数门控）。"""
-    reflection_cooldown_hours: int = 24
-    """自动自省的最小间隔（小时）。"""
+    """本地时间 05:00 后在空闲时按自然日整理日记，并补齐遗漏日期。"""
 
     self_mod_backup_dir: str = "./data/self_modifications"
     """自我修改备份目录。每次 self_write 前旧文件会被备份到此处。"""
@@ -149,7 +143,7 @@ class MASConfig(BaseSettings):
 
         env_path.write_text(env_data, encoding="utf-8")
 
-        logger.info(f"[Config] Auto-generated IPC secret and wrote to {env_path}")
+        logger.debug(f"[Config] Auto-generated IPC secret and wrote to {env_path}")
         return token
 
     @field_validator("ipc_secret")
