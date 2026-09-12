@@ -5,6 +5,8 @@ CRUD 方法不 commit（由真实 ``get_session`` 上下文管理），测试中
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from muika.database.crud import (
     ArchiveCRUD,
     MemoryRecordCRUD,
@@ -12,6 +14,7 @@ from muika.database.crud import (
     TopicHistoryCRUD,
     UsageORM,
 )
+from muika.database.orm_models import Usage
 
 
 def _today() -> str:
@@ -49,6 +52,21 @@ async def test_usage_get_records_recent(db_session):
     rows = await UsageORM.get_usage_records(db_session, days=7)
     assert len(rows) == 1
     assert rows[0].plugin == "p"
+
+
+async def test_usage_periods_include_today_without_an_extra_day(db_session):
+    today = datetime.now()
+    dates = [(today - timedelta(days=offset)).strftime("%Y.%m.%d") for offset in (0, 1, 6, 7, 365)]
+    db_session.add_all(
+        Usage(plugin="brain", model="m", type="chat", date=day, input_tokens=1, output_tokens=0, cached_tokens=0)
+        for day in dates
+    )
+    await db_session.commit()
+    assert [row.date for row in await UsageORM.get_usage_records(db_session, days=1)] == dates[:1]
+    assert [row.date for row in await UsageORM.get_usage_records(db_session, days=7)] == dates[:3]
+    assert [row.date for row in await UsageORM.get_usage_records(db_session, days=None)] == dates
+    with pytest.raises(ValueError, match="at least 1"):
+        await UsageORM.get_usage_records(db_session, days=0)
 
 
 # ---------------------------------------------------------------------------
