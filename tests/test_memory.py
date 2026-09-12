@@ -216,6 +216,28 @@ async def test_action_relief_is_small_and_task_link_is_idempotent():
     assert memory.persistent.dissonance == pytest.approx(0.75)
 
 
+@pytest.mark.parametrize("intention_status", ["resolved", "abandoned"])
+@pytest.mark.parametrize("task_status", ["completed", "cancelled", "failed"])
+async def test_task_result_preserves_closed_intention_and_explicit_reopening(intention_status, task_status):
+    memory = MemoryManager()
+    intention = Intention(id="poem", description="Read a poem")
+    await memory.update_state(StateUpdate(reason="I want to read", intentions=[intention]))
+    await memory.link_intention("poem", "task1")
+    intention.status = intention_status
+    await memory.update_state(StateUpdate(reason="I changed my mind", intentions=[intention]))
+    closed = memory.persistent.intentions[0].model_copy(deep=True)
+    await memory.record_task_result("task1", task_status)
+    restored = MemoryManager()
+    await restored.load()
+    assert restored.persistent.intentions[0] == closed
+    assert closed.task_id == "task1"
+    intention.status = "open"
+    await restored.update_state(StateUpdate(reason="I want to revisit it", intentions=[intention]))
+    await restored.load()
+    assert restored.persistent.intentions[0].status == "open"
+    assert restored.persistent.intentions[0].task_id == "task1"
+
+
 async def test_legacy_material_keeps_provenance_and_runtime_metadata(database):
     for layer, category, key, value in [
         ("core", "user", "name", "Alice"),

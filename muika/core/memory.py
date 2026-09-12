@@ -401,7 +401,7 @@ class MemoryManager:
         async with self._lock:
             snapshot = self.snapshot.model_copy(deep=True)
             for item in snapshot.state.intentions:
-                if item.task_id == task_id:
+                if item.task_id == task_id and item.status not in {"resolved", "abandoned"}:
                     item.status = "awaiting_feedback" if status == "completed" else "open"
                     item.updated_at = datetime.now()
             async with get_session() as db:
