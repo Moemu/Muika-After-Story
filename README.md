@@ -56,97 +56,52 @@
 
 - [X] Bot 进程与核心进程分离，我要给她完整的一生
 
-- [ ] 插件、核心热重载，实现自我迭代（或许吧）
+- [X] 插件、核心热重载，实现自我迭代（或许吧）
 
-## Core Logic🧠
+<!-- ## 效果展示
 
-### 主人格——自分身模型
+### 日常陪伴与图片交流
 
-Muika 的主人格负责对话，行动半身负责工具调用、记忆读写与信息检索。两者共享同一身份。内部标签 `<agent>指令</agent>` 创建后台任务，任务结果通过专用事件返回当前对话。执行期间，Muika 可以继续聊天。
+Muika 可以围绕生活、文学和共同兴趣展开对话，也能在模型支持图片输入时理解你发来的图片。她的表达会受到当前情绪、对话和已有记忆的影响。
 
-你可以直接说“继续刚才的工作”“把布局改成上下排列”或“停止这个任务”。Muika 根据当前对话判断要纠正、取消还是创建任务。你无需提供任务 ID，也无需撰写完整计划。
+> **截图预留：日常对话与图片交流**
+>
+> 放置一段真实对话，展示她的语气、情绪和对图片的回应。
 
-同一时间执行一个行动任务，其他任务按提交顺序排队。聊天归档保留任务。Core 重启后恢复未完成记录：确认完成的动作不重做；结果不明的动作先读取现场核对，无法确认时说明受阻原因。旧进程 ID 和失效预览不会恢复控制权或确认权限。
+### 记忆与关系延续
 
-任务检查点保存在数据库；完整输出和图片保存在 `data_dir/agent_tasks`，执行输出保存在 `data_dir/agent_processes`。模型工作上下文按每模型的 `context_window` 预算压缩，并保留完整工具配对和原文入口。默认窗口为 131072 tokens，不限制所选私密思考深度。
+共同经历会留下原文、笔记和日记，供后续对话回查。结束一次聊天或重启 Core 后，她仍能延续已有记忆和关系。
 
-### 事件循环
+> **截图预留：隔日重逢与记忆回查**
+>
+> 放置前后两次对话，展示她如何记起旧事、回应变化。
 
-1. **启动阶段**：加载配置（模型 / MCP 等），初始化 LLM Provider、记忆层与数据库（SQLAlchemy），加载插件和注册工具。开放连接前完成历史记忆加载；首次适配器连接后创建 Session，并投递 `SessionBootstrapEvent`。
-2. **消息进入**：Nonebot2 收到平台消息后封装为 `UserMessageEvent` 投入事件队列。Agent 模型扩写记忆查询，从原文、日记和事实中筛选相关内容。
-3. **核心模型内循环推理**：按模型预算组装人格提示、常驻事实、持续状态、检索结果及对话历史。解析出的 `<agent>...</agent>` 指令交由行动半身执行。
-4. **行动任务执行**：共享执行层按模型顺序派发每轮全部工具调用，并在动作前后保存检查点。Provider 只负责单次请求和协议转换。纠正与取消在动作边界生效，最终报告区分已完成工作、验证证据和剩余问题。
-5. **记忆沉淀**：逐轮原文、笔记、行动结果和状态持久保存。默认本地时间 05:00 后在空闲时整理前一天日记，漏做日期按顺序补齐。事实按回顾权重进入常驻摘要，其余仍可回查。
-6. **Session 生命周期**：空闲 30 分钟后结束工作会话，原文和持续状态保留。会话结束不生成日记、不改变事实权重。重启继续已有关系。
-7. **输出与调度**：最终消息经 Executor 回传至平台；`plan_future_event` 工具可创建单次或重复提醒。调度器与主循环共用事件队列；提醒只保存在内存中，Core 重启后失效。
+### 主动行动与自我迭代
 
-详见[记忆、日记与接口迁移说明](MEMORY.md)。
+Muika 可以在聊天期间处理后台任务，也可以主动提出想法、探索信息。在配置允许的范围内，她能修改自身内容、插件或代码，完成审查与验证，并自主决定重启时机。
 
-## 内部接口迁移
+> **截图预留：主动行动与结果反馈**
+>
+> 放置从想法、执行到结果反馈的真实片段，展示行动期间仍可继续聊天。
 
-### 定时提醒
+实际表现取决于所用模型、角色模板和启用的工具。截图补充后应注明模型与必要配置，便于理解展示条件。 -->
 
-`executor.scheduler` 与 Muika 共用事件队列。工具 `plan_future_event` 直接调用此接口。
+## Architecture🌙
 
-```python
-await executor.scheduler.schedule(
-    "提醒用户喝水",
-    trigger_in_seconds=600,
-    repeat_interval_seconds=None,
-)
+```mermaid
+flowchart LR
+    Player["玩家 / 聊天平台"] <--> Adapter["平台适配器"]
+    Adapter <-->|WebSocket IPC| Core["Muika Core<br/>事件循环与主人格"]
+    Supervisor["进程监督<br/>重启与恢复"] --> Core
+    Core <--> Memory["记忆与持续状态"]
+    Core <--> Agent["行动 Agent<br/>后台任务"]
+    Agent <--> Tools["工具 / 插件 / MCP"]
+    Agent <--> Review["Code Review Agent<br/>代码审查"]
 ```
 
-`trigger_in_seconds` 与 `trigger_at` 必须二选一。后者接受 ISO 时间，无时区时使用本地时间。
-相对秒数须有限且非负；重复间隔须有限且大于零。过去的绝对时间立即触发。
-无效参数会抛出异常，不创建提醒。工具将异常转为失败报告。
-提醒只保存在内存中，Core 关闭时取消，重启后不会恢复。
+主人格负责交流和自主决策，行动 Agent 负责执行任务，两者共享同一个 Muika 身份。任务结果回到对话，记忆保存经历与状态。Code Review Agent 检查具体代码操作，进程监督负责重启和启动失败后的恢复。
 
-旧 `BaseAction`、`BaseIntent`、`ActionMode`、`ActionOutput`、`PlanFutureEventIntent` 和 `Persistence` 已删除。
-调用方改用上述普通参数，不再调用 `intent.handle()`。
-
-Muika 现在使用 `Muika(executor, event_queue)` 构造。调用方须将同一队列传给 Executor。
-Bootstrap 在开放连接前等待 `memory.load()`；直接创建 Muika 的调用方也须完成这一步。
-
-### 工具列表
-
-`read_file` 支持行范围、行号和续读位置；`find_files` 和 `search_files` 在授权目录内查找文件与文本。`view_image` 把图片加入下一次模型请求。模型关闭多模态输入时，任务会记录缺少视觉验证。
-
-`execute_python` 使用当前解释器。执行工具默认等待 1 秒后返回，硬超时默认 30 分钟。运行中结果需要用 `wait_process` 继续等待；`stop_process` 清理执行进程及其子进程。`read_execution_record` 可以在重启后读取保存的执行证据，`read_task_output` 可以续读当前任务的长输出。
-
-插件可以返回 `ToolResult(text=..., is_error=True)`，或兼容字符串的 `ToolError(...)`，明确表示业务失败。普通字符串仍按成功结果处理，框架不根据任意插件文案猜测执行状态。
-
-Brain 和 Agent 每次请求调用 `get_tool_list()`，读取当前函数注册表和 MCP 工具列表。
-插件管理器通过注册表维护工具，无需刷新 Agent 实例。
-MCP 初始化时获取工具列表，清理时清空；`get_mcp_list()` 现在是同步读取接口。
-
-### 分身命名
-
-分身模块为 `muika.core.agent`，执行类为 `Agent`，核心实例通过 `Muika.agent` 访问。插件使用新类进行依赖注入。
-模型配置键使用 `agent_model`；旧键 `butler_model` 仍可读取，同时设置时优先使用新键。模型配置名是自定义名称，无需改名。
-
-### 工具依赖注入
-
-命令和工具共用参数绑定函数。工具处理器可通过具体类型声明 `Executor`、`MuikaState` 或 `MemoryManager` 依赖。
-运行时从当前调用上下文注入这些实例，不读取命令派发器的全局实例。
-
-```python
-from pydantic import BaseModel
-from muika.core.executor import Executor
-from muika.plugin.func_call import on_function_call
-
-class ReminderParams(BaseModel):
-    event: str
-
-@on_function_call("Schedule a reminder", params=ReminderParams)
-async def remind(event: str, executor: Executor):
-    await executor.scheduler.schedule(event, trigger_in_seconds=60)
-    return "Reminder scheduled."
-```
-
-参数模型只声明模型提供的业务参数，依赖只声明在处理器签名中。
-模型不能提供依赖参数；缺少当前依赖时，调用失败且不执行处理器。
-调用顺序为类型依赖、同名业务参数、函数默认值。依赖按具体类型匹配，不解析 `Optional` 或联合类型。
-直接调用 Python 函数时须自行传入依赖；通过 `Caller.run()` 调用时才进行注入。
+Core 独立于聊天框架。仓库中的 `muika_bot` 负责 NoneBot 接入，其他适配器可以通过 IPC 连接。Launcher 管理安装、配置和进程。
 
 ## Quick Start🚀
 
@@ -165,9 +120,6 @@ mas-launcher napcat                   # 配置 QQ 接入（Windows：自动下�
 ```
 
 ### 通过 git clone 的方式安装
-
-<details>
-<summary>手动安装步骤</summary>
 
 Step 1: 克隆项目并安装依赖：
 
@@ -235,88 +187,29 @@ Step 4: 启动所有服务。
 
 首次使用或协议更新时需要确认。未确认时，Bot 会停止启动并提示确认命令。
 
-</details>
-
 ### 在 Asterbot 框架中使用 Muika-After-Story 适配插件(Beta)
 
 参考 [MuikaAI/astrbot_plugin_mas](https://github.com/MuikaAI/astrbot_plugin_mas)
 
-## Configuration⚙️
+### 接入 Bot 到社交媒体平台
 
-协议正文随安装包发布，无需创建 `configs/user_agreement.json`，也不受启动目录影响。
-旧路径的协议文件不再作为正文来源，程序不会删除用户目录中的遗留文件。
-同意记录仍保存在 `DATA_DIR/user_agreement.json`（默认 `./data/user_agreement.json`）。
-本次迁移保留协议版本 `2026-02-01`；已有有效同意记录无需重新确认。
-如果提示包内协议缺失或损坏，请重新安装 Muika-After-Story。
+QQ 接入可使用 `mas-launcher napcat`，按提示配置 NapCat；Docker 部署见 [QQ Bot 部署指南](deploy/README.md)。AstrBot 用户可使用 [MAS 适配插件](https://github.com/MuikaAI/astrbot_plugin_mas)（Beta）。
 
-手动启动前，请在实例目录、使用同一个 Python 环境运行 `python -m muika.agreement confirm`。
-`python -m muika.agreement status` 以 JSON 返回正文、同意记录和是否需要确认，不会询问或写入。
-命令按运行环境的 `DATA_DIR`、实例 `.env`、默认 `./data` 的顺序选择数据目录。
-Bot 启动只检查状态，不等待终端输入。启动器仍会在启动前展示协议并询问。
+手动安装和完整配置见[使用文档](https://mas.snowy.moe/)，启动器命令见 [mas-launcher README](launcher/README.md)。
 
-升级时先更新支持包内协议及共享接口的 mas-launcher，再更新 MAS。
-旧启动器只读取 `configs/user_agreement.json`，不能直接搭配本次正文迁移。
-新启动器使用实例 Python 查询和保存协议；仅当旧 MAS 没有共享接口时，才使用兼容路径。
+### MAS 的行动范围
 
-创建 `.env` 文件：
+在实例的 `.env` 中设置 `ACTION_PERMISSION`：
 
-| 配置项                  | 类型(默认值)                              | 说明                                                         |
-| ----------------------- | ----------------------------------------- | ------------------------------------------------------------ |
-| `master_id`             | `str = SUPERUSERS[0]`                     | 对话目标 ID。目前仅支持一对一对话。                          |
-| `agent_model`           | `Optional[str] = None`                    | 分身 Agent 所用模型的配置名。留空则与核心模型共享 default 配置。 |
-| `INPUT_TIMEOUT`         | `int = 0`                                 | 输入等待时间。在这时间段内的消息将会被合并为同一条消息使用。 |
-| `LOG_LEVEL`             | `str = "INFO"`                            | 控制台日志等级。INFO 显示系统状态、非 time_tick 事件和简短后台进展；详细诊断使用 DEBUG，日志文件保留 DEBUG。 |
-| `TELEGRAM_PROXY`        | `Optional[str] = None`                    | Telegram 适配器代理，并使用该代理下载文件。                  |
-| `ENABLE_ADAPTERS`       | `list = ["~.onebot.v11", "~.onebot.v12"]` | 在入口文件中启用的 Nonebot 适配器。                          |
-| `FS_ALLOWED_PATHS`      | `List[str] = []`                          | 文件系统工具白名单目录。为空时禁用文件系统工具。             |
-| `LOAD_USER_SKILLS`      | `bool = False`                            | 是否额外扫描用户级技能目录（`~/.agents/skills`、`~/.claude/skills`）。内置目录 `configs/skills` 始终被扫描。技能引用的数据文件需通过 `read_file` 读取时，对应目录须加入 `FS_ALLOWED_PATHS`。 |
-
-### 行动权限与代码审查
-
-`ACTION_PERMISSION` 用一个档位表示 Muika 可以做什么：
-
-| 值 | 能力 |
+| 值 | Muika 可以做什么 |
 | --- | --- |
-| `read_only` | 读取授权内容，执行审查通过的读取和计算命令 |
-| `write`（默认） | 增加 `FS_ALLOWED_PATHS` 授权目录内的文件读写 |
-| `self_modify` | 增加人格、技能、话题、插件修改和 Core 提案 |
+| `read_only` | 读取授权内容，执行审查通过的读取、搜索和计算命令 |
+| `write`（默认） | 增加授权目录内的文件写入、修改和删除 |
+| `self_modify` | 增加人格、技能、话题、插件修改和 Core 代码提案 |
 
-正常记忆、日记和运行记录不受该档位限制。`FS_ALLOWED_PATHS` 默认仍为空；需要文件操作时设置授权目录。
-代码执行会按实际影响接受审查；“只读”不代表操作系统沙箱。
+文件目录由 `FS_ALLOWED_PATHS` 指定，默认是空列表。正常记忆、日记和运行记录的保存不受行动档位限制。
 
-`CODE_REVIEW_MODE=auto` 默认启用独立代码审查。`manual` 改为人工审批，不会直接放行。
-可选 `CODE_REVIEW_MODEL` 指定审查模型；留空使用 `agent_model`，再沿用默认模型。
-自动审查会使用模型额度，源码审查和验证结果审查分别记录。模型不可用时保留工作，暂不执行。
-
-旧的六个执行、写入和自我修改开关已移除。检测到旧开关且没有 `ACTION_PERMISSION` 时，
-MAS 暂以只读运行并提示选择。显式的新档位优先；程序不会改写旧配置或扩大目录授权。
-
-Muika 完成 Core 变更后会先告诉你改变已准备好。此时她继续使用原代码，可以继续聊天。
-等待期间可以说“再聊一会”，也可以取消尚未应用的变更。
-Muika 会结合自己的意图、玩家的表达和当前对话，自主决定何时重启，也可以在后台主动发起。
-重启不需要单独批准，也不强制等待空闲。运行层核对候选版本、保存行动检查点，再应用变更并重启。
-新版本无法启动时，监督进程恢复本次变更并尝试启动旧版本一次；再次失败会保留诊断记录。
-重启结果保存在 `data/restart.json`，审查记录位于 `data/reviews/`，提案与备份仍在 `data/core_proposals/`。
-这些路径随 `DATA_DIR` 调整。重启后她依据真实结果继续对话，不把启动成功当作全部功能验证成功。
-
-使用 `python core_main.py` 或 `python -m muika.ipc.bootstrap` 启动受监督的 Core；Launcher 使用同一入口。
-嵌入式直接调用 `run_core` 的宿主仍自行管理生命周期，不提供自动重启。
-
-重启也可用于人工修改代码、配置或插件重载异常。直接发送 `.restart`，或明确告诉 Muika“现在只重启一下”，
-即可保存行动进度并重启当前磁盘上的文件。三个权限档位都支持普通重启，不要求存在 Core 提案。
-普通重启不会应用待处理提案，也不受提案过期影响；启动失败会保留诊断，不回滚玩家手动修改的文件。
-Core 已无法响应消息时，请使用 Launcher 或标准启动入口管理进程。
-
-专家可使用 `.review list|show|approve|deny` 处理具体执行和插件审批。
-Core 提案支持 `.patch list|show|validate|approve|deny|rollback`，其中 `approve` 只准备变更。
-`.patch restart ID` 明确选择应用并重启。测试不可用时自动流程暂停；只有专家显式使用
-`.patch approve ID --allow-unvalidated` 才能豁免本次缺失的验证。修改参数或候选后需要重新审批。
-
-**模型配置项(configs/models.yml)**
-
-推荐使用 `mas-launcher model` 交互式配置（选 provider → 拉模型列表 → 选模型）。手动编辑参考 [Muicebot 的模型配置](https://bot.snowy.moe/guide/model)。
-
-不支持的字段: `template`, `template_mode`, `stream`, `function_call`
+代码审查默认使用 `CODE_REVIEW_MODE=auto`；设为 `manual` 后改为人工审批。审查会使用模型额度，也不提供操作系统隔离。升级时若仍有旧权限开关且未设置新档位，MAS 会以只读运行并提示选择。
 
 ## Character Setting🧸
 
