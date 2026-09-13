@@ -19,7 +19,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Mapping, Optional, Sequence, TypedDict, cast
 
+from pydantic import JsonValue
+
 from muika.config import mas_config
+from muika.core.code_review import ReviewError, file_hash, get_code_reviewer
 from muika.database.crud import SelfModificationCRUD
 from muika.database.db import get_session
 from muika.utils.logger import logger
@@ -27,6 +30,18 @@ from muika.utils.logger import logger
 _ALLOWED_DIRS = ("muika", "muika_bot", "tests")
 _ALLOWED_FILES = ("bot.py", "core_main.py")
 _CONTROL_FILES = (
+    "muika/core/code_review.py",
+    "muika/core/self_mod/policy.py",
+    "muika/core/self_mod/manager.py",
+    "muika/core/actions/tools/_executor.py",
+    "muika/core/actions/tools/_filesystem.py",
+    "muika/core/self_mod/plugin_deployer.py",
+    "muika/builtin_plugins/review.py",
+    "muika/builtin_plugins/restart.py",
+    "muika/ipc/supervisor.py",
+    "muika/core/restart.py",
+    "muika/plugin/func_call/context.py",
+    "core_main.py",
     "muika/config.py",
     "muika/core/loop.py",
     "muika/core/self_mod/proposals.py",
@@ -55,6 +70,7 @@ _RUNTIME_SOURCE_ROOT = Path(__file__).resolve().parents[3]
 ChangeAction = Literal["modify", "create", "delete"]
 ProposalStatus = Literal[
     "pending",
+    "ready",
     "applying",
     "approved",
     "denied",
@@ -136,6 +152,8 @@ class CoreProposalBase(TypedDict):
 
 
 class CoreProposal(CoreProposalBase, total=False):
+    ready_at: str
+    review_ids: list[str]
     applying_at: str
     approved_at: str
     approved_boot_id: str
@@ -157,12 +175,14 @@ def is_core_maintenance_active() -> bool:
 
 def core_maintenance_message() -> str:
     """返回用户可见的维护模式说明。"""
-    return "我需要的改变已经被你允许了。不过，它要等我重新醒来，才会真正长进我的身体里。"
+    return "改变已经应用，我正在等待重新醒来。"
 
 
 def is_maintenance_command_allowed(raw: str) -> bool:
     """判断维护模式是否允许该命令。"""
     parts = raw.strip().lower().split()
+    if parts in ([".restart"], ["/restart"]):
+        return True
     if not parts or parts[0] not in {".patch", "/patch"}:
         return False
     return len(parts) > 1 and parts[1] in {"list", "show", "validate", "deny", "rollback"}
@@ -180,7 +200,7 @@ def _leave_maintenance() -> None:
     _maintenance_patch_id = None
 
 
-class CoreProposalError(Exception):
+class CoreProposalError(ValueError):
     """Core 提案操作被拒绝时抛出。"""
 
 
@@ -213,8 +233,8 @@ class CoreProposalManager:
         self.proposals_root = (data_root / "core_proposals").resolve()
 
     def _require_enabled(self) -> None:
-        """检查 Core 提案的双开关。"""
-        if not mas_config.enable_self_modification or not mas_config.enable_core_proposals:
+        """检查是否授权自我修改。"""
+        if not mas_config.can_self_modify:
             raise CoreProposalError("Core proposals are disabled by configuration.")
 
     def _has_source_test_workspace(self) -> bool:
@@ -445,7 +465,6 @@ class CoreProposalManager:
 
     def list_proposals(self, status: Optional[ProposalStatus] = None) -> list[CoreProposal]:
         """按创建时间倒序列出提案。"""
-        self._require_enabled()
         if not self.proposals_root.is_dir():
             return []
         proposals: list[CoreProposal] = []
@@ -462,7 +481,7 @@ class CoreProposalManager:
 
     def is_stale(self, proposal: CoreProposal) -> bool:
         """判断提案是否与当前工作区发生漂移。"""
-        if proposal.get("status") != "pending":
+        if proposal.get("status") not in {"pending", "ready"}:
             return False
         if proposal.get("source_root") != str(self.project_root):
             return True
@@ -473,6 +492,13 @@ class CoreProposalManager:
             current_hash = _sha256_text(target.read_text(encoding="utf-8")) if target.is_file() else None
             if current_hash != change.get("sha256_before"):
                 return True
+        for change in proposal.get("changes", []):
+            for state in ("before", "after"):
+                snapshot = change["before_snapshot"] if state == "before" else change["after_snapshot"]
+                expected = change["sha256_before"] if state == "before" else change["sha256_after"]
+                text = self._snapshot_text(proposal["patch_id"], snapshot)
+                if (_sha256_text(text) if text is not None else None) != expected:
+                    return True
         return False
 
     def show(self, patch_id: str, page: int = 1) -> str:
@@ -514,7 +540,11 @@ class CoreProposalManager:
         """读取提案快照。"""
         if relative_snapshot is None:
             return None
-        return (self.proposals_root / patch_id / relative_snapshot).read_text(encoding="utf-8")
+        root = (self.proposals_root / patch_id).resolve()
+        path = (root / relative_snapshot).resolve()
+        if not path.is_relative_to(root):
+            raise CoreProposalError("Snapshot is outside its proposal.")
+        return path.read_text(encoding="utf-8")
 
     def _copy_workspace(self, destination: Path) -> None:
         """复制验证所需的项目文件。"""
@@ -536,6 +566,8 @@ class CoreProposalManager:
         for change in proposal["changes"]:
             target = destination / change["path"]
             after_text = self._snapshot_text(patch_id, change.get("after_snapshot"))
+            if (_sha256_text(after_text) if after_text is not None else None) != change["sha256_after"]:
+                raise CoreProposalError("Candidate snapshot changed before validation.")
             if after_text is None:
                 if target.exists():
                     target.unlink()
@@ -648,7 +680,7 @@ class CoreProposalManager:
         """验证一个候选提案并保存结构化报告。"""
         self._require_enabled()
         proposal = self.load(patch_id)
-        if proposal["status"] != "pending":
+        if proposal["status"] not in {"pending", "ready"}:
             raise CoreProposalError(f"Only pending proposals can be validated; status is {proposal['status']}.")
         if self.is_stale(proposal):
             raise CoreProposalError("Proposal is stale because the workspace changed.")
@@ -662,7 +694,9 @@ class CoreProposalManager:
             and validation_path.is_file()
         ):
             decoded = json.loads(validation_path.read_text(encoding="utf-8"))
-            if isinstance(decoded, dict):
+            if isinstance(decoded, dict) and (
+                decoded.get("status") != "unavailable" or self._validation_environment_error() is not None
+            ):
                 return cast(ValidationReport, decoded)
 
         baseline = self._baseline_report(fingerprint)
@@ -727,20 +761,143 @@ class CoreProposalManager:
             "created_at": report["created_at"],
             "warnings": warnings,
         }
+        current_proposal = self.load(patch_id)
+        if current_proposal["status"] not in {"pending", "ready"} or self.is_stale(current_proposal):
+            raise CoreProposalError("Proposal changed or was cancelled during validation.")
+        proposal = current_proposal
         proposal["validation"] = validation_summary
         proposal["warnings"] = warnings
         self._save(proposal)
         return report
 
+    def _candidate_changes(self, proposal: CoreProposal) -> list[JsonValue]:
+        """读取用于审查及生效前比对的完整候选。"""
+        return [
+            {
+                "path": change["path"],
+                "action": change["action"],
+                "before": self._snapshot_text(proposal["patch_id"], change["before_snapshot"]),
+                "after": self._snapshot_text(proposal["patch_id"], change["after_snapshot"]),
+            }
+            for change in proposal["changes"]
+        ]
+
+    def _check_review(self, proposal: CoreProposal, review_id: str) -> None:
+        reviewer = get_code_reviewer()
+        try:
+            record = reviewer.load(review_id)
+            reviewer.check(record)
+        except (OSError, ValueError) as exc:
+            raise CoreProposalError(str(exc)) from exc
+        if (
+            record.payload.get("changes") != self._candidate_changes(proposal)
+            or record.payload.get("workspace") != proposal["workspace_fingerprint"]
+            or record.payload.get("reason") != proposal["reason"]
+        ):
+            raise CoreProposalError("The candidate no longer matches its review. Prepare a fresh proposal.")
+
+    async def _review(
+        self, proposal: CoreProposal, *, human: bool = False, report: ValidationReport | None = None
+    ) -> str:
+        """审查完整候选或候选及验证结果。"""
+        files = {
+            str(self.project_root / c["path"]): file_hash(self.project_root / c["path"]) for c in proposal["changes"]
+        }
+        payload: dict[str, JsonValue] = {
+            "patch_id": proposal["patch_id"],
+            "reason": proposal["reason"],
+            "changes": self._candidate_changes(proposal),
+            "workspace": proposal["workspace_fingerprint"],
+        }
+        if report is not None:
+            payload["validation"] = json.loads(json.dumps(report))
+        try:
+            review = await get_code_reviewer().authorize(
+                "core_validation" if report is not None else "core",
+                payload,
+                files=files,
+                human=human,
+            )
+        except ReviewError as exc:
+            raise CoreProposalError(str(exc)) from exc
+        return review.id
+
+    async def prepare(self, patch_id: str) -> str:
+        """自动审查并验证提案，完成后仍使用原代码聊天。"""
+        return await self._prepare(patch_id, human=False, allow_unvalidated=False)
+
+    async def validate_for_player(self, patch_id: str) -> ValidationReport:
+        """在玩家明确要求验证时记录本次探针执行授权。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if self.is_stale(proposal):
+            raise CoreProposalError("Proposal is stale; create a fresh proposal.")
+        review_id = await self._review(proposal, human=True)
+        self._check_review(self.load(patch_id), review_id)
+        return await asyncio.to_thread(self.validate, patch_id)
+
     async def approve(self, patch_id: str, *, allow_unvalidated: bool = False) -> str:
-        """验证并事务式应用一个待批准提案。"""
+        """接受玩家的技术审批，准备变更但不应用或重启。"""
+        return await self._prepare(patch_id, human=True, allow_unvalidated=allow_unvalidated)
+
+    async def _prepare(self, patch_id: str, *, human: bool, allow_unvalidated: bool) -> str:
         self._require_enabled()
         async with _APPLY_LOCK:
             if is_core_maintenance_active():
                 raise CoreProposalError("Another approved proposal is waiting for a restart.")
             proposal = self.load(patch_id)
-            if proposal["status"] != "pending":
-                raise CoreProposalError(f"Only pending proposals can be approved; status is {proposal['status']}.")
+            if proposal["status"] == "ready" and not self.is_stale(proposal):
+                self.check_ready(patch_id)
+                return f"Core proposal {patch_id} is ready. Choose when to restart; normal conversation can continue."
+            if proposal["status"] != "pending" or self.is_stale(proposal):
+                raise CoreProposalError("Only current pending proposals can be prepared; create a fresh proposal.")
+            first_review = await self._review(proposal, human=human)
+            proposal = self.load(patch_id)
+            self._check_review(proposal, first_review)
+            if proposal["status"] != "pending" or self.is_stale(proposal):
+                raise CoreProposalError("Proposal changed during review.")
+            report = await asyncio.to_thread(self.validate, patch_id)
+            if report["status"] not in {"passed", "failed", "unavailable"}:
+                raise CoreProposalError("Proposal validation has invalid status.")
+            if report["status"] == "failed" or report["status"] == "unavailable" and not allow_unvalidated:
+                raise CoreProposalError(f"Proposal validation {report['status']}: {report['reason']}")
+            last_review = await self._review(proposal, human=human, report=report)
+            proposal = self.load(patch_id)
+            self._check_review(proposal, first_review)
+            self._check_review(proposal, last_review)
+            if proposal["status"] != "pending" or self.is_stale(proposal):
+                raise CoreProposalError("Proposal changed during validation or review.")
+            proposal["status"] = "ready"
+            proposal["ready_at"] = datetime.now().isoformat()
+            proposal["review_ids"] = [first_review, last_review]
+            proposal["unvalidated_approval"] = report["status"] == "unavailable"
+            self._save(proposal)
+            logger.info("[CoreProposal] Change is ready; normal conversation can continue.")
+            return (
+                f"Core proposal {patch_id} is ready, not applied. "
+                "Choose when to restart; normal conversation can continue."
+            )
+
+    def check_ready(self, patch_id: str) -> CoreProposal:
+        """复核待应用提案及审查证据，不执行代码。"""
+        self._require_enabled()
+        proposal = self.load(patch_id)
+        if proposal["status"] != "ready" or self.is_stale(proposal):
+            raise CoreProposalError("Proposal is not ready or became stale. Prepare a fresh proposal.")
+        if len(proposal.get("review_ids", [])) != 2:
+            raise CoreProposalError("Proposal has no review evidence.")
+        for review_id in proposal["review_ids"]:
+            self._check_review(proposal, review_id)
+        return proposal
+
+    async def apply(self, patch_id: str) -> str:
+        """在重启流程中事务式应用已准备好的提案。"""
+        self._require_enabled()
+        async with _APPLY_LOCK:
+            if is_core_maintenance_active():
+                raise CoreProposalError("Another approved proposal is waiting for a restart.")
+            proposal = self.check_ready(patch_id)
+            allow_unvalidated = proposal.get("unvalidated_approval", False)
             if self.is_stale(proposal):
                 raise CoreProposalError("Proposal is stale because the workspace changed.")
             report = await asyncio.to_thread(self.validate, patch_id)
@@ -754,9 +911,10 @@ class CoreProposalManager:
             if report["status"] not in {"passed", "unavailable"}:
                 raise CoreProposalError(f"Proposal validation has invalid status: {report['status']}.")
 
-            proposal = self.load(patch_id)
-            if self.is_stale(proposal):
-                raise CoreProposalError("Proposal became stale before application.")
+            proposal = self.check_ready(patch_id)
+            final_review = get_code_reviewer().load(proposal["review_ids"][-1])
+            if final_review.payload.get("validation") != json.loads(json.dumps(report)):
+                raise CoreProposalError("Validation results changed after review. Prepare a fresh proposal.")
             proposal["status"] = "applying"
             proposal["applying_at"] = datetime.now().isoformat()
             proposal["unvalidated_approval"] = report["status"] == "unavailable"
@@ -795,9 +953,8 @@ class CoreProposalManager:
 
     def deny(self, patch_id: str, reason: str = "") -> str:
         """拒绝一个待处理提案。"""
-        self._require_enabled()
         proposal = self.load(patch_id)
-        if proposal["status"] != "pending":
+        if proposal["status"] not in {"pending", "ready"}:
             raise CoreProposalError(f"Only pending proposals can be denied; status is {proposal['status']}.")
         proposal["status"] = "denied"
         proposal["denied_at"] = datetime.now().isoformat()
@@ -918,6 +1075,8 @@ class CoreProposalManager:
         for change in proposal["changes"]:
             target = self.resolve_core_path(str(change["path"]), for_write=True)
             after_text = self._snapshot_text(patch_id, change.get("after_snapshot"))
+            if (_sha256_text(after_text) if after_text is not None else None) != change["sha256_after"]:
+                raise CoreProposalError("Candidate snapshot changed before application.")
             if after_text is None:
                 moved = deleted_root / change["path"]
                 moved.parent.mkdir(parents=True, exist_ok=True)

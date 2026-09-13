@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Callable, List, Literal, Optional
 
 import yaml as yaml_
-from pydantic import AliasChoices, Field, ValidationError, field_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from watchdog.events import FileMovedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -73,28 +79,22 @@ class MASConfig(BaseSettings):
     fs_allowed_paths: List[str] = []
     """文件操作白名单目录列表。空列表时文件系统工具全部禁用。
     示例: ["D:/Documents", "D:/Downloads"]"""
-    enable_file_write: bool = False
-    """开启文件写入/删除操作。需同时在 fs_allowed_paths 中声明目标目录。"""
-    enable_code_execution: bool = False
-    """开启 Python 子进程代码执行能力。存在一定安全风险，请确认后再启用。"""
-    enable_shell_execution: bool = False
-    """开启 Shell 命令执行（PowerShell/Bash/Cmd）。存在一定安全风险，请确认后再启用。"""
+    action_permission: Literal["read_only", "write", "self_modify"] = "write"
+    """行动权限：只读、授权目录可写、可自我修改。命令执行仍需审查。"""
+    code_review_mode: Literal["auto", "manual"] = "auto"
+    """代码审查方式；manual 等待玩家批准，不会直接执行。"""
+    code_review_model: Optional[str] = None
+    """独立代码审查所用模型；留空使用 agent_model。"""
 
     data_dir: Path = Path("./data")
     """数据目录路径，用于存储连接记录等运行时数据。默认为当前工作目录。"""
     plugins_dir: str = "plugins"
     """插件目录路径。Core 启动时从此目录递归加载所有 MAS 插件。"""
 
-    enable_self_modification: bool = False
-    """开启 Muika 的内容自我修改能力。关闭时 self_* 工具全部禁用。"""
-    enable_plugin_self_modification: bool = False
-    """开启后允许 Muika 编写和修改自己的单文件插件。"""
     enable_plugin_hot_reload: bool = False
     """开启 plugins/ 目录热重载监听。"""
     plugin_import_blacklist: List[str] = ["subprocess", "socket", "ctypes", "multiprocessing", "shutil"]
     """自写插件静态检查拒绝的顶层 import 模块名。"""
-    enable_core_proposals: bool = False
-    """开启 Core 代码变更提案能力。"""
     enable_auto_reflection: bool = True
     """本地时间 05:00 后在空闲时按自然日整理日记，并补齐遗漏日期。"""
 
@@ -106,6 +106,40 @@ class MASConfig(BaseSettings):
         validation_alias=AliasChoices("HEART_INTENSITY", "heartbeat_intensity"),
     )
     """内心思考强度"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_action_permission(cls, values):
+        """旧权限配置不隐式扩大授权，并提示选择新档位。"""
+        legacy = {
+            "enable_file_write",
+            "enable_code_execution",
+            "enable_shell_execution",
+            "enable_self_modification",
+            "enable_plugin_self_modification",
+            "enable_core_proposals",
+        }
+        if isinstance(values, dict):
+            keys = {str(key).lower() for key in values} | {key.lower() for key in os.environ}
+            if keys & legacy:
+                values = {key: value for key, value in values.items() if str(key).lower() not in legacy}
+                if "action_permission" not in keys:
+                    values["action_permission"] = "read_only"
+                    logger.warning(
+                        "[Config] 旧权限开关已移除，暂以只读运行。请设置 ACTION_PERMISSION："
+                        "read_only（只读）、write（可写）或 self_modify（可自我修改）。"
+                    )
+        return values
+
+    @property
+    def can_write(self) -> bool:
+        """返回是否允许在授权目录写入。"""
+        return self.action_permission != "read_only"
+
+    @property
+    def can_self_modify(self) -> bool:
+        """返回是否允许修改自身。"""
+        return self.action_permission == "self_modify"
 
     @field_validator("master_id")
     def validate_master_id(cls, v):

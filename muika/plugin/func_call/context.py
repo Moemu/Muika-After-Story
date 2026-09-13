@@ -25,6 +25,8 @@ class ToolContext:
     task_id: str | None = None
     file_versions: dict[str, str] = field(default_factory=dict)
     execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None
+    review_context: str = ""
+    is_current: Callable[[], bool] | None = None
 
 
 _tool_context: ContextVar[ToolContext | None] = ContextVar("tool_context", default=None)
@@ -38,6 +40,8 @@ def tool_context(
     task_id: str | None = None,
     file_versions: dict[str, str] | None = None,
     execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None,
+    review_context: str = "",
+    is_current: Callable[[], bool] | None = None,
 ) -> Iterator[ToolContext]:
     """隔离本次调用的资源，并在退出时恢复外层上下文。"""
     context = ToolContext(
@@ -46,6 +50,8 @@ def tool_context(
         task_id=task_id,
         file_versions=file_versions if file_versions is not None else {},
         execute_tool=execute_tool,
+        review_context=review_context,
+        is_current=is_current,
     )
     token = _tool_context.set(context)
     try:

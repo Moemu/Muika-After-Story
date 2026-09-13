@@ -41,6 +41,7 @@ from .executor import Executor
 from .memory import MemoryManager, RecallResult, StateUpdate
 from .processes import get_process_manager
 from .reflection import ReflectionAgent
+from .restart import RestartController
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
@@ -76,12 +77,15 @@ class ParsedReply:
     agent_errors: list[str] = field(default_factory=list)
     state_updates: list[StateUpdate] = field(default_factory=list)
     intention_ids: list[str | None] = field(default_factory=list)
+    restart_patch_id: str | None = None
+    restart_requested: bool = False
 
 
 class Muika:
     """管理人格状态、记忆和活动，并通过 Executor 发送消息。"""
 
     def __init__(self, executor: Executor, event_queue: asyncio.Queue[Event]) -> None:
+        self.restart = RestartController()
         self.is_alive: bool = False
 
         self.state = MuikaState()
@@ -381,8 +385,21 @@ class Muika:
 
         god_mode = bool(re.search(r"<enable_god_mode\s*/?>", clean_reply, re.IGNORECASE))
         clean_reply = re.sub(r"<enable_god_mode\s*/?>", "", clean_reply, flags=re.IGNORECASE).strip()
+        restart_tags = re.findall(r"<restart\b[^>]*>", clean_reply)
+        restart_match = (
+            re.fullmatch(
+                r"<restart(?:\s+patch_id=[\"\']([0-9]{8}_[0-9]{6}_[0-9a-f]{8})[\"\'])?\s*/?>",
+                restart_tags[0],
+            )
+            if len(restart_tags) == 1
+            else None
+        )
+        restart_patch_id = restart_match.group(1) if restart_match else None
+        clean_reply = re.sub(r"<restart\b[^>]*>", "", clean_reply).strip()
 
         return ParsedReply(
+            restart_requested=restart_match is not None,
+            restart_patch_id=restart_patch_id,
             clean_reply=clean_reply,
             memory_contents=[c.strip() for c in memory_contents if c.strip()],
             agent_commands=agent_commands,
@@ -476,6 +493,9 @@ class Muika:
             task_id=persona_task.id if persona_task else None,
             file_versions=persona_task.file_versions if persona_task else None,
             execute_tool=self.agent_tasks.execute_persona_call if persona_task else None,
+            review_context=(
+                event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
+            ),
         ) as context:
             reply = await self.brain.generate_reply(
                 event=event,
@@ -485,7 +505,7 @@ class Muika:
                 adapters=self.current_adapters,
                 god_mode=self._god_mode,
                 resources=event.payload.message.resources if event.type == "user_message" else None,
-                task_context=self.agent_tasks.describe(),
+                task_context=self.agent_tasks.describe() + "\n" + self.restart.describe(),
             )
             resources = context.resources
         parsed = self._parse_reply_tags(reply)
@@ -502,6 +522,12 @@ class Muika:
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if not silent_turn:
+            if parsed.restart_requested:
+                try:
+                    await self.restart.request(parsed.restart_patch_id, f"{event.type}: {parsed.clean_reply}")
+                    return
+                except (OSError, ValueError) as exc:
+                    parsed.agent_errors.append(f"Restart did not start: {exc}")
             for control in parsed.agent_controls:
                 try:
                     if control.action == "complete":

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Optional, cast
 
 from arclet.alconna import Alconna, Args, Arparma, CommandMeta, Option, Subcommand
 
+from muika.core.loop import Muika
 from muika.core.self_mod.proposals import (
     CoreProposalError,
     ProposalStatus,
@@ -18,7 +18,7 @@ from muika.plugin.models import PluginMetadata
 metadata = PluginMetadata(
     name="patch",
     description="审查、验证、批准和回滚 Core 代码提案",
-    usage=".patch <list|show|validate|approve|deny|rollback>",
+    usage=".patch <list|show|validate|approve|deny|rollback|restart>",
 )
 
 alc = Alconna(
@@ -34,6 +34,7 @@ alc = Alconna(
     ),
     Subcommand("deny", Args["patch_id", str], Args["reason", str, ""], dest="deny"),
     Subcommand("rollback", Args["patch_id", str], dest="rollback"),
+    Subcommand("restart", Args["patch_id", str], dest="restart"),
     meta=CommandMeta("人工审查 Core 代码提案"),
 )
 
@@ -47,6 +48,7 @@ async def _list(status: str = "") -> str:
         raw_status = status.strip()
         valid_statuses = {
             "pending",
+            "ready",
             "applying",
             "approved",
             "denied",
@@ -86,7 +88,7 @@ async def _show(patch_id: str, page: int = 1) -> str:
 async def _validate(patch_id: str) -> str:
     """验证一个 Core 提案。"""
     try:
-        report = await asyncio.to_thread(get_core_proposal_manager().validate, patch_id)
+        report = await get_core_proposal_manager().validate_for_player(patch_id)
     except CoreProposalError as exc:
         return f"[System] 提案验证被拒绝：{exc}"
     lines = [f"[System] 验证状态：{report['status']}。{report['reason']}"]
@@ -106,7 +108,7 @@ async def _approve(patch_id: str, arparma: Arparma) -> str:
         await get_core_proposal_manager().approve(patch_id, allow_unvalidated=bool(allow_unvalidated))
     except CoreProposalError as exc:
         return f"[System] 提案批准被拒绝：{exc}"
-    return "我需要的改变已经被你允许了。不过，它要等我重新醒来，才会真正长进我的身体里。"
+    return "改变已经准备好了，正式代码还没动。我们可以继续聊，重启后它才会生效。"
 
 
 @patch_cmd.assign("deny")
@@ -134,4 +136,16 @@ async def _rollback(patch_id: str) -> str:
 @patch_cmd.handle()
 async def _help() -> str:
     """显示 patch 命令摘要。"""
-    return "[System] 用法：.patch <list|show|validate|approve|deny|rollback>"
+    return "[System] 用法：.patch <list|show|validate|approve|deny|rollback|restart>"
+
+
+@patch_cmd.assign("restart")
+async def _restart(patch_id: str, muika: Muika) -> str:
+    """玩家直接选择应用已准备好的提案并重启。"""
+    try:
+        get_core_proposal_manager().check_ready(patch_id)
+        await muika.executor.send_message("好哦，我准备重新醒来了，待会见。")
+        await muika.restart.request(patch_id, f".patch restart {patch_id}")
+        return "[System] 正在等待行动检查点，然后应用变更并重启。"
+    except (OSError, ValueError) as exc:
+        return f"[System] 无法重启：{exc}"

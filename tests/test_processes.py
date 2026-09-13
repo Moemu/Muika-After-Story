@@ -11,6 +11,8 @@ from muika.config import mas_config
 from muika.core.actions.tools import _executor
 from muika.core.processes import ProcessManager, ProcessResult
 
+pytestmark = pytest.mark.usefixtures("approved_review")
+
 
 @pytest.fixture
 async def processes():
@@ -32,7 +34,7 @@ async def test_python_compound_statement_survives_debugger_prefix(processes, tmp
         command[code_index] = "import sys; " + command[code_index]
         return await create_process(*command, **kwargs)
 
-    monkeypatch.setattr(mas_config, "enable_code_execution", True)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     monkeypatch.setattr(_executor, "get_process_manager", lambda: processes)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", debugger_create)
     result = await _executor.execute_python(
@@ -44,7 +46,7 @@ async def test_python_compound_statement_survives_debugger_prefix(processes, tmp
 
 
 async def test_short_python_job_finishes_without_another_wait_call(processes, tmp_path, monkeypatch):
-    monkeypatch.setattr(mas_config, "enable_code_execution", True)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     monkeypatch.setattr(_executor, "get_process_manager", lambda: processes)
     result = await _executor.execute_python(
         'import time; time.sleep(1.1); print("checked")', cwd=str(tmp_path), timeout=5

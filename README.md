@@ -187,7 +187,7 @@ DRIVER=~fastapi+~websockets+~httpx
 SUPERUSERS=["<your_qq_number>"]
 master_id="<your_qq_number>"
 enable_adapters = ["nonebot.adapters.onebot.v11"]
-enable_file_write=true
+ACTION_PERMISSION=write
 FS_ALLOWED_PATHS=["C:/Users/Muika/Desktop", "D:/"]
 agent_model=agent
 ```
@@ -269,10 +269,48 @@ Bot 启动只检查状态，不等待终端输入。启动器仍会在启动前�
 | `TELEGRAM_PROXY`        | `Optional[str] = None`                    | Telegram 适配器代理，并使用该代理下载文件。                  |
 | `ENABLE_ADAPTERS`       | `list = ["~.onebot.v11", "~.onebot.v12"]` | 在入口文件中启用的 Nonebot 适配器。                          |
 | `FS_ALLOWED_PATHS`      | `List[str] = []`                          | 文件系统工具白名单目录。为空时禁用文件系统工具。             |
-| `ENABLE_FILE_WRITE`     | `bool = False`                            | 是否允许文件写入/删除，需同时配置 `FS_ALLOWED_PATHS`。       |
-| `ENABLE_CODE_EXECUTION` | `bool = False`                            | 是否允许 Python 子进程代码执行。                             |
-| `ENABLE_SHELL_EXECUTION`| `bool = False`                            | 是否允许 Shell 命令执行（PowerShell/Bash/Cmd）。             |
 | `LOAD_USER_SKILLS`      | `bool = False`                            | 是否额外扫描用户级技能目录（`~/.agents/skills`、`~/.claude/skills`）。内置目录 `configs/skills` 始终被扫描。技能引用的数据文件需通过 `read_file` 读取时，对应目录须加入 `FS_ALLOWED_PATHS`。 |
+
+### 行动权限与代码审查
+
+`ACTION_PERMISSION` 用一个档位表示 Muika 可以做什么：
+
+| 值 | 能力 |
+| --- | --- |
+| `read_only` | 读取授权内容，执行审查通过的读取和计算命令 |
+| `write`（默认） | 增加 `FS_ALLOWED_PATHS` 授权目录内的文件读写 |
+| `self_modify` | 增加人格、技能、话题、插件修改和 Core 提案 |
+
+正常记忆、日记和运行记录不受该档位限制。`FS_ALLOWED_PATHS` 默认仍为空；需要文件操作时设置授权目录。
+代码执行会按实际影响接受审查；“只读”不代表操作系统沙箱。
+
+`CODE_REVIEW_MODE=auto` 默认启用独立代码审查。`manual` 改为人工审批，不会直接放行。
+可选 `CODE_REVIEW_MODEL` 指定审查模型；留空使用 `agent_model`，再沿用默认模型。
+自动审查会使用模型额度，源码审查和验证结果审查分别记录。模型不可用时保留工作，暂不执行。
+
+旧的六个执行、写入和自我修改开关已移除。检测到旧开关且没有 `ACTION_PERMISSION` 时，
+MAS 暂以只读运行并提示选择。显式的新档位优先；程序不会改写旧配置或扩大目录授权。
+
+Muika 完成 Core 变更后会先告诉你改变已准备好。此时她继续使用原代码，可以继续聊天。
+等待期间可以说“再聊一会”，也可以取消尚未应用的变更。
+Muika 会结合自己的意图、玩家的表达和当前对话，自主决定何时重启，也可以在后台主动发起。
+重启不需要单独批准，也不强制等待空闲。运行层核对候选版本、保存行动检查点，再应用变更并重启。
+新版本无法启动时，监督进程恢复本次变更并尝试启动旧版本一次；再次失败会保留诊断记录。
+重启结果保存在 `data/restart.json`，审查记录位于 `data/reviews/`，提案与备份仍在 `data/core_proposals/`。
+这些路径随 `DATA_DIR` 调整。重启后她依据真实结果继续对话，不把启动成功当作全部功能验证成功。
+
+使用 `python core_main.py` 或 `python -m muika.ipc.bootstrap` 启动受监督的 Core；Launcher 使用同一入口。
+嵌入式直接调用 `run_core` 的宿主仍自行管理生命周期，不提供自动重启。
+
+重启也可用于人工修改代码、配置或插件重载异常。直接发送 `.restart`，或明确告诉 Muika“现在只重启一下”，
+即可保存行动进度并重启当前磁盘上的文件。三个权限档位都支持普通重启，不要求存在 Core 提案。
+普通重启不会应用待处理提案，也不受提案过期影响；启动失败会保留诊断，不回滚玩家手动修改的文件。
+Core 已无法响应消息时，请使用 Launcher 或标准启动入口管理进程。
+
+专家可使用 `.review list|show|approve|deny` 处理具体执行和插件审批。
+Core 提案支持 `.patch list|show|validate|approve|deny|rollback`，其中 `approve` 只准备变更。
+`.patch restart ID` 明确选择应用并重启。测试不可用时自动流程暂停；只有专家显式使用
+`.patch approve ID --allow-unvalidated` 才能豁免本次缺失的验证。修改参数或候选后需要重新审批。
 
 **模型配置项(configs/models.yml)**
 

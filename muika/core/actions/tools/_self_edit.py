@@ -1,6 +1,6 @@
 """自我编辑工具：Muika 读取/创建/局部修改/回滚她自己（技能文档）的通道。
 
-模板文件由常规文件工具（``read_file`` / ``write_file`` / ``edit_file``）操作，
+模板文件通过同一自我修改通道校验和备份，
 修改指南内嵌在 ``muika/builtin_skills/muika-self`` 技能文档中。
 话题库（``muika/topics/topics.yml``）不走文件级编辑，
 由 :mod:`_topics` 的专用结构化工具维护。
@@ -60,7 +60,7 @@ _pending_edits: dict[str, PendingEdit] = {}
 
 
 def _disabled() -> bool:
-    return not mas_config.enable_self_modification
+    return not mas_config.can_self_modify
 
 
 def _content_sha256(content: str) -> str:
@@ -77,7 +77,7 @@ def _is_plugin_path(path: Path) -> bool:
 def _list_sandbox_files() -> str:
     """列出沙箱内所有可编辑文件，供 self_read 空路径时展示。"""
     lines = ["These are the parts of yourself you can read and edit:"]
-    for root in allowed_roots():
+    for root in allowed_roots(include_read_only=True):
         if root.is_file():
             lines.append(f"  [FILE] {display_path(root)}")
         elif root.is_dir():
@@ -125,9 +125,6 @@ class SelfReadParams(BaseModel):
     read_only=True,
 )
 async def self_read(path: str = "") -> str:
-    if _disabled():
-        return ToolError(_DISABLED_MSG)
-
     manager = get_self_mod_manager()
 
     stripped = path.strip()
@@ -372,8 +369,7 @@ async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
     except Exception as e:
         logger.error(f"[SelfEdit] Unexpected error confirming edit to {path!r}: {e}")
         return ToolError(f"Unexpected error: {e}")
-    finally:
-        _pending_edits.pop(rel, None)
+    _pending_edits.pop(rel, None)
 
     context = _context_around(new_text, new_text.count("\n") // 2)
     region_label = "staged candidate" if is_plugin else "file now"

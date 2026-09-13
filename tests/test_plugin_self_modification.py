@@ -23,6 +23,33 @@ from muika.plugin.loader import get_plugins, unload_plugin
 from muika.plugin.manager import PluginManager
 from muika.plugin.watcher import PluginFileHandler
 
+pytestmark = pytest.mark.usefixtures("approved_review")
+
+
+async def test_review_rejection_happens_before_plugin_probe(deploy_env, monkeypatch):
+    from muika.core.code_review import CodeReviewer, ReviewDecision
+
+    deployer, plugins, _ = deploy_env
+    probe = AsyncMock(return_value=(True, "ok"))
+    monkeypatch.setattr(deployer, "run_probe", probe)
+    monkeypatch.setattr(
+        CodeReviewer,
+        "assess",
+        AsyncMock(
+            return_value=ReviewDecision(
+                decision="revise",
+                effect="self_modify",
+                reason="The plugin duplicates handlers.",
+                suggestions=["Remove the duplicate registration."],
+                impact="插件尚未执行。",
+            )
+        ),
+    )
+    with pytest.raises(SelfModError, match="duplicates handlers"):
+        await deployer.deploy(str(plugins / "reviewed.py"), "value = 1\n", "test")
+    probe.assert_not_awaited()
+    assert not (plugins / "reviewed.py").exists()
+
 
 class FakeSelfModManager:
     """为部署事务提供内存版本栈。"""
@@ -39,7 +66,7 @@ class FakeSelfModManager:
         path.write_text(content, encoding="utf-8")
         return "applied"
 
-    async def revert(self, raw_path: str, revision_id=None) -> str:
+    async def revert(self, raw_path: str, revision_id=None, *, expected_sha256=None) -> str:
         path = Path(raw_path).resolve()
         old = self.before[path].pop()
         if old is None:
@@ -62,8 +89,7 @@ def deploy_env(tmp_path, monkeypatch):
     plugins = tmp_path / "plugins"
     plugins.mkdir()
     monkeypatch.setattr(mas_config, "plugins_dir", str(plugins))
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
-    monkeypatch.setattr(mas_config, "enable_plugin_self_modification", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     fake = FakeSelfModManager()
     monkeypatch.setattr("muika.core.self_mod.plugin_deployer.get_self_mod_manager", lambda: fake)
     for name in list(sys.modules):
@@ -318,6 +344,25 @@ async def test_plugin_load_tool_activates_staged_candidate(deploy_env, monkeypat
     assert "plugins.manual" in get_plugins()
 
 
+async def test_activation_rechecks_candidate_before_probe(deploy_env, monkeypatch):
+    deployer, plugins, _ = deploy_env
+    await deployer.deploy(str(plugins / "changed.py"), "value = 1\n", "manual")
+    review = deployer._review
+
+    async def change_during_review(target, content, reason):
+        result = await review(target, content, reason)
+        (plugins / "_staging/changed.py").write_text("raise RuntimeError('unreviewed')\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deployer, "_review", change_during_review)
+    probe = AsyncMock()
+    monkeypatch.setattr(deployer, "run_probe", probe)
+    with pytest.raises(SelfModError, match="changed during review"):
+        await deployer.activate("changed")
+    probe.assert_not_awaited()
+    assert not (plugins / "changed.py").exists()
+
+
 @pytest.mark.asyncio
 async def test_quarantine_restore_response_hides_internal_tool_name(monkeypatch):
     deployer = SimpleNamespace(restore_quarantine=AsyncMock(return_value="Call plugin_load(name='x')"))
@@ -330,7 +375,7 @@ async def test_quarantine_restore_response_hides_internal_tool_name(monkeypatch)
 
 def test_feature_switch_rejects_plugin_writes(deploy_env, monkeypatch):
     deployer, plugins, _ = deploy_env
-    monkeypatch.setattr(mas_config, "enable_plugin_self_modification", False)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     with pytest.raises(SelfModError):
         deployer.resolve_plugin_path(str(plugins / "off.py"))
 

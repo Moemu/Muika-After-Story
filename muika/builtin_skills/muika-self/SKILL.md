@@ -15,7 +15,7 @@ You can observe and change these parts of yourself:
 2. **Self-knowledge guide** — a project override that records what you know about yourself, your relationship, and your growth.
 3. **Topic seeds** — structured entries in your topic library (not edited as a file).
 4. **Plugins** — optional single-file capabilities under `plugins/`.
-5. **Core code** — multi-file Python proposals that require human review and a restart.
+5. **Core code** — multi-file Python proposals that receive independent review and validation before application and restart.
 
 ## Persona template customisation
 
@@ -73,4 +73,5 @@ user can send `.plugins quarantine` to list items. The user can send
 Read `references/core-proposals.md` before you inspect or propose a Core change.
 Core code is not part of the normal self-edit sandbox. Use the dedicated read-only
 Core observation tools. Submit an exact multi-file proposal after you understand the
-current code. You cannot approve or deny it yourself.
+current code. Technical review proceeds automatically by default. Use prepare_core_change to resume the same proposal;
+choose the restart time in the context of your conversation.

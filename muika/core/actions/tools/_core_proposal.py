@@ -20,7 +20,6 @@ async def core_list(path: str = "muika") -> str:
     """列出 Core 观察范围内的 Python 文件。"""
     manager = get_core_proposal_manager()
     try:
-        manager._require_enabled()
         raw = path.strip() or "muika"
         candidate = manager.resolve_observation_path(raw)
         if candidate.is_file():
@@ -51,7 +50,6 @@ async def core_read(path: str, line_start: int = 1, line_end: int = 200) -> str:
     """读取 Core 文件的行区间。"""
     manager = get_core_proposal_manager()
     try:
-        manager._require_enabled()
         resolved = manager.resolve_core_path(path)
         if not resolved.is_file():
             return ToolError(f"File not found: {path}")
@@ -76,7 +74,6 @@ async def core_search(query: str, path: str = "muika") -> str:
     """搜索 Core Python 文件。"""
     manager = get_core_proposal_manager()
     try:
-        manager._require_enabled()
         candidate = manager.resolve_observation_path(path)
         if not candidate.exists():
             return ToolError(f"Path not found: {path}")
@@ -116,7 +113,8 @@ class ProposeCoreChangeParams(BaseModel):
 
 
 @on_function_call(
-    "Create a Core code proposal for human review. This does not change active code.",
+    "Create a Core proposal, review it and validate it. A ready proposal keeps active code unchanged. "
+    "Choose when to apply it and restart in the context of your conversation.",
     params=ProposeCoreChangeParams,
 )
 async def propose_core_change(changes: list[CoreChange], reason: str) -> str:
@@ -124,10 +122,43 @@ async def propose_core_change(changes: list[CoreChange], reason: str) -> str:
     try:
         raw_changes = [change.model_dump() if isinstance(change, CoreChange) else change for change in changes]
         patch_id = get_core_proposal_manager().create(raw_changes, reason)
-        return (
-            f"Core proposal created: {patch_id}. No active code changed.\n"
-            f"Reason: {reason}\n"
-            "Tell the user what you want to change and why. The user must review and decide."
-        )
+        try:
+            return await get_core_proposal_manager().prepare(patch_id)
+        except CoreProposalError as exc:
+            return ToolError(f"Core proposal {patch_id} was saved but is not ready: {exc}")
     except CoreProposalError as exc:
         return ToolError(f"Core proposal rejected: {exc}")
+
+
+class PrepareCoreChangeParams(BaseModel):
+    patch_id: str = Field(..., description="Existing proposal ID, including one waiting for review.")
+
+
+@on_function_call(
+    "Continue reviewing and validating an existing Core proposal after approval or a resolved review error. "
+    "Do not create another proposal just to resume the same change.",
+    params=PrepareCoreChangeParams,
+)
+async def prepare_core_change(patch_id: str) -> str:
+    """继续已有提案，保留其候选和审批关联。"""
+    try:
+        return await get_core_proposal_manager().prepare(patch_id)
+    except CoreProposalError as exc:
+        return ToolError(f"Core proposal {patch_id} is not ready: {exc}")
+
+
+class DiscardCoreChangeParams(PrepareCoreChangeParams):
+    reason: str = Field(..., min_length=1, description="Why this pending or ready proposal is no longer wanted.")
+
+
+@on_function_call(
+    "Discard a pending or ready Core proposal. This cancels the draft without changing active code. "
+    "It cannot undo an already applied change.",
+    params=DiscardCoreChangeParams,
+)
+async def discard_core_change(patch_id: str, reason: str) -> str:
+    """取消未应用的提案，不改动正式代码。"""
+    try:
+        return get_core_proposal_manager().deny(patch_id, reason)
+    except CoreProposalError as exc:
+        return ToolError(str(exc))

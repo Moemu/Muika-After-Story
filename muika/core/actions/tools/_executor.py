@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
+from muika.core.code_review import ReviewError, get_code_reviewer
 from muika.core.processes import ProcessResult, get_process_manager
 from muika.llm._schema import ToolResult
 from muika.llm.utils.tools import ToolError
@@ -73,28 +74,37 @@ class ExecutePythonParams(ExecutionParams):
 async def _start(command: list[str], timeout: float, yield_time: float, cwd: str | None) -> ToolResult:
     manager = get_process_manager()
     try:
+        directory = str(Path(cwd).resolve() if cwd else Path.cwd())
+        reviewer = get_code_reviewer()
+        review = await reviewer.authorize(
+            "execution",
+            {
+                "command": list(command),
+                "cwd": directory,
+                "timeout": timeout,
+            },
+        )
+        reviewer.consume(review)
         process_id = await manager.start(
             command,
             env=_sanitize_env(),
-            cwd=str(Path(cwd).resolve() if cwd else Path.cwd()),
+            cwd=directory,
             owner=_owner(),
             timeout=timeout,
         )
         return _result(await manager.wait(process_id, owner=_owner(), seconds=yield_time))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ReviewError) as exc:
         return ToolResult(text=f"Could not start execution: {exc}", is_error=True)
 
 
 @on_function_call(
     "Run Python in Muika's interpreter with UTF-8 output. A running result is not completion. "
-    "Use wait_process to continue waiting. Requires ENABLE_CODE_EXECUTION=true.",
+    "Use wait_process to continue waiting. Every execution requires code review within ACTION_PERMISSION.",
     params=ExecutePythonParams,
 )
 async def execute_python(
     code: str, timeout: float = _DEFAULT_TIMEOUT, yield_time: float = _DEFAULT_YIELD_TIME, cwd: str | None = None
 ):
-    if not mas_config.enable_code_execution:
-        return ToolError("Code execution is disabled. Set ENABLE_CODE_EXECUTION=true to enable.")
     # 调试器会在源码前拼接分号语句，换行保留 try/with 等复合语句的语法。
     return await _start([sys.executable, "-u", "-c", "\n" + code], timeout, yield_time, cwd)
 
@@ -108,7 +118,7 @@ class ExecuteShellParams(ExecutionParams):
 
 @on_function_call(
     "Run a shell command and return a process ID, exit status and output. "
-    "Use wait_process for running work. Requires ENABLE_SHELL_EXECUTION=true.",
+    "Use wait_process for running work. Every execution requires code review within ACTION_PERMISSION.",
     params=ExecuteShellParams,
 )
 async def execute_shell(
@@ -118,8 +128,6 @@ async def execute_shell(
     yield_time: float = _DEFAULT_YIELD_TIME,
     cwd: str | None = None,
 ):
-    if not mas_config.enable_shell_execution:
-        return ToolError("Shell execution is disabled. Set ENABLE_SHELL_EXECUTION=true to enable.")
     if shell == "powershell":
         args = [
             "powershell.exe",

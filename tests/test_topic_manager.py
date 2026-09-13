@@ -104,7 +104,7 @@ async def test_topic_mutations_hold_lock_until_write(tmp_path, monkeypatch):
     monkeypatch.setattr(topic_tools, "TOPICS_PATH", topic_path)
     monkeypatch.setattr(topic_tools, "BUILTIN_TOPICS_PATH", topic_path)
     monkeypatch.setattr(topic_tools, "_TOPICS_LOCK", asyncio.Lock())
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     active = 0
     max_active = 0
 

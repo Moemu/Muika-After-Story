@@ -76,7 +76,7 @@ def test_unknown_operation_raises():
 
 async def test_external_edit_requires_fresh_read(tmp_path, monkeypatch):
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
-    monkeypatch.setattr(mas_config, "enable_file_write", True)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     file = tmp_path / "draft.txt"
     file.write_text("original\nsecond", encoding="utf-8")
     with tool_context(MuikaState(), MagicMock(), task_id="task"):

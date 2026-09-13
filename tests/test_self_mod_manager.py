@@ -15,7 +15,7 @@ def _use_test_session(monkeypatch, db_session, session_ctx_factory) -> None:
 
 
 def test_builtin_template_is_read_only(monkeypatch):
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     path = Path(manager_module.__file__).resolve().parents[2] / "builtin_templates/Muika.md.jinja2"
 
     assert resolve_self_path(str(path)) == path
@@ -24,10 +24,25 @@ def test_builtin_template_is_read_only(monkeypatch):
 
 
 def test_project_skill_override_is_writable(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     path = tmp_path / "configs/skills/muika-self/SKILL.md"
 
     assert resolve_self_path(str(path), require_write=True) == path
+
+
+async def test_revert_rejects_changed_reviewed_snapshot(tmp_path, monkeypatch, db_session, session_ctx_factory):
+    _use_test_session(monkeypatch, db_session, session_ctx_factory)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
+    target = tmp_path / "plugins/sample.py"
+    target.parent.mkdir()
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    manager = SelfModManager()
+    await manager.apply(str(target), "VALUE = 2\n", "replace sample")
+    with pytest.raises(SelfModError, match="changed after review"):
+        await manager.revert(str(target), expected_sha256="missing")
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+    record = await SelfModificationCRUD.latest_write_for_path(db_session, "plugins/sample.py")
+    assert record is not None and record.status == "applied"
 
 
 @pytest.mark.asyncio
@@ -38,8 +53,7 @@ async def test_revert_validation_failure_keeps_revision_applied(
     session_ctx_factory,
 ):
     _use_test_session(monkeypatch, db_session, session_ctx_factory)
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
-    monkeypatch.setattr(mas_config, "enable_plugin_self_modification", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     plugins = tmp_path / "plugins"
     plugins.mkdir()
     target = plugins / "sample.py"
@@ -65,8 +79,7 @@ async def test_revert_write_failure_keeps_revision_applied(
     session_ctx_factory,
 ):
     _use_test_session(monkeypatch, db_session, session_ctx_factory)
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
-    monkeypatch.setattr(mas_config, "enable_plugin_self_modification", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     plugins = tmp_path / "plugins"
     plugins.mkdir()
     target = plugins / "sample.py"

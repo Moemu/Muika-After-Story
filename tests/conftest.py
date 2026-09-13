@@ -33,6 +33,27 @@ def sandbox(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture
+def approved_review(monkeypatch):
+    """用明确通过的审查结论隔离非审查测试中的模型调用。"""
+    from unittest.mock import AsyncMock
+
+    from muika.core.code_review import CodeReviewer, ReviewDecision
+
+    assess = AsyncMock(
+        return_value=ReviewDecision(
+            decision="approve",
+            effect="read_only",
+            reason="Fixture reviewed the candidate.",
+            suggestions=[],
+            impact="检查通过。",
+        )
+    )
+    monkeypatch.setattr(CodeReviewer, "assess", assess)
+    monkeypatch.setattr(mas_config, "code_review_mode", "auto")
+    return assess
+
+
 @pytest.fixture(autouse=True)
 def reset_heartbeat():
     """每个测试结束后将 Heart 强度回归配置默认值，防止污染其他用例。
