@@ -140,6 +140,9 @@ def supervise(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory(prefix="muika-lifecycle-") as temporary:
         directory = Path(temporary)
         env = dict(os.environ, MUIKA_LIFECYCLE_DIR=str(directory), MUIKA_SUPERVISOR_PID=str(os.getpid()))
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NO_WINDOW
         restart: RestartRecord | None = None
         restored = False
         while True:
@@ -148,7 +151,7 @@ def supervise(argv: list[str]) -> int:
             child = subprocess.Popen(
                 [sys.executable, "-m", "muika.ipc.bootstrap", *argv],
                 env=env,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                creationflags=creationflags,
             )
             started = time.monotonic()
             healthy = False
