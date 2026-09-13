@@ -33,7 +33,7 @@ def test_template_configuration_fails_before_startup(tmp_path: Path, monkeypatch
 @pytest.mark.asyncio
 async def test_persona_switch_respects_self_modification_switch(tmp_path: Path, monkeypatch):
     original_template = mas_config.persona_template
-    monkeypatch.setattr(mas_config, "enable_self_modification", False)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
 
     result = await persona_switch("missing.jinja2")
 

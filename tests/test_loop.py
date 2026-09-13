@@ -18,6 +18,141 @@ from muika.llm.context import ContextCompactor
 from muika.models import Message
 
 
+def test_restart_tag_is_private_and_never_taken_from_inner_monologue():
+    tag = '<restart patch_id="20260913_120000_abcdef12">'
+    assert Muika._parse_reply_tags(f"<heart>{tag}</heart>继续聊吧。").restart_patch_id is None
+    parsed = Muika._parse_reply_tags(f"待会见。{tag}")
+    assert parsed.clean_reply == "待会见。"
+    assert parsed.restart_patch_id == "20260913_120000_abcdef12"
+
+
+@pytest.mark.parametrize("tag", ["<restart>", "<restart/>", "<restart />"])
+def test_plain_restart_tag_is_distinct_from_no_restart(tag):
+    parsed = Muika._parse_reply_tags(f"待会见。{tag}")
+    assert parsed.restart_requested and parsed.restart_patch_id is None
+    assert parsed.clean_reply == "待会见。"
+    assert not Muika._parse_reply_tags(f"<heart>{tag}</heart>继续聊吧。").restart_requested
+
+
+@pytest.mark.parametrize(
+    "tag", ['<restart patch_id="invalid">', '<restart><restart patch_id="20260913_120000_abcdef12">']
+)
+def test_invalid_or_conflicting_restart_tags_do_not_fall_back_to_plain_restart(tag):
+    parsed = Muika._parse_reply_tags(f"待会见。{tag}")
+    assert not parsed.restart_requested and parsed.clean_reply == "待会见。"
+
+
+async def test_prepared_change_allows_chat_then_restarts_after_farewell(engine, monkeypatch):
+    from muika.core import restart as restart_module
+
+    patch_id = "20260913_120000_abcdef12"
+    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: MagicMock())
+    calls = []
+
+    async def restart(patch, trigger):
+        calls.append((patch, trigger))
+        assert engine.executor.send_message.await_args.args[0] == "好哦，待会见。"
+
+    engine.restart.handler = restart
+    engine.brain.generate_reply = AsyncMock(
+        side_effect=[
+            "做好了。需要重新醒来才会生效，你想现在重启，还是再聊一会？",
+            "嗯，那就再陪我一会。",
+            f'好哦，待会见。<restart patch_id="{patch_id}">',
+        ]
+    )
+    for message in ("按你说的做吧", "再聊一会"):
+        await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))), RecallResult())
+        assert calls == []
+    await engine._run_brain_pipeline(
+        UserMessageEvent(UserMessagePayload(Message(message="现在就重启吧"))),
+        RecallResult(),
+    )
+    assert calls == [(patch_id, "user_message: 好哦，待会见。")]
+    engine.agent.model.ask.assert_not_called()
+
+
+@pytest.mark.parametrize("patch_id", [None, "20260913_120000_abcdef12"])
+async def test_background_initiative_can_restart_after_saving_its_reply(engine, monkeypatch, patch_id):
+    from muika.core import restart as restart_module
+
+    manager = MagicMock()
+    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
+    calls = []
+
+    async def restart(patch, trigger):
+        calls.append((patch, trigger))
+        assert engine.memory.recent_turns[-1].content == "准备好了。"
+
+    engine.restart.handler = restart
+    tag = f'<restart patch_id="{patch_id}">' if patch_id else "<restart>"
+    engine.brain.generate_reply = AsyncMock(return_value=f"准备好了。{tag}")
+    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    assert calls == [(patch_id, "time_tick: 准备好了。")]
+    engine.agent.model.ask.assert_not_called()
+    if patch_id:
+        manager.check_ready.assert_called_once_with(patch_id)
+    else:
+        manager.check_ready.assert_not_called()
+
+
+async def test_plain_restart_needs_no_confirmation_or_proposal(engine, monkeypatch):
+    from muika.config import mas_config
+    from muika.core import restart as restart_module
+
+    monkeypatch.setattr(mas_config, "action_permission", "read_only")
+    manager = MagicMock()
+    manager.check_ready.side_effect = ValueError("Stale proposal")
+    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
+    engine.restart.handler = AsyncMock()
+    engine.brain.generate_reply = AsyncMock(return_value="待会见。<restart>")
+    message = "刚才那个插件好像影响了你的状态。"
+    await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))), RecallResult())
+    manager.check_ready.assert_not_called()
+    engine.restart.handler.assert_awaited_once_with(None, "user_message: 待会见。")
+    engine.agent.model.ask.assert_not_called()
+
+
+async def test_autonomous_restart_keeps_candidate_checks_and_reports_failure(engine, monkeypatch):
+    from muika.core import restart as restart_module
+
+    manager = MagicMock()
+    manager.check_ready.side_effect = ValueError("Candidate changed during conversation.")
+    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
+    engine.restart.handler = AsyncMock()
+    engine.brain.generate_reply = AsyncMock(return_value='准备好了。<restart patch_id="20260913_120000_abcdef12">')
+    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    engine.restart.handler.assert_not_awaited()
+    event = engine.event_queue.get_nowait()
+    assert event.task_id == "control-error" and "Candidate changed" in event.report
+
+
+@pytest.mark.parametrize("action", ["complete", "cancel"])
+async def test_restart_saves_task_control_before_handoff(engine, action):
+    task = await engine.agent_tasks.submit("Prepare change", "Make the change")
+    await engine.agent_tasks.handoff()
+    engine._god_mode = True
+    body = '<agent_result status="completed">Change verified.</agent_result>' if action == "complete" else "Stop it."
+    engine.brain.generate_reply = AsyncMock(
+        return_value=f'<agent task_id="{task.id}" action="{action}">{body}</agent>待会见。<restart>'
+    )
+    snapshots = []
+
+    async def restart(patch_id, trigger):
+        saved = next(item for item in await engine.agent_tasks.store.load() if item.id == task.id)
+        snapshots.append(saved)
+
+    engine.restart.handler = restart
+    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    assert len(snapshots) == 1
+    assert snapshots[0].status == ("completed" if action == "complete" else "cancelled")
+    if action == "complete":
+        assert snapshots[0].report.summary == "Change verified."
+        assert not snapshots[0].handoff
+    else:
+        assert snapshots[0].cancel_requested
+
+
 def test_parse_no_tags():
     r = Muika._parse_reply_tags("Hello there")
     assert r == ParsedReply(clean_reply="Hello there", memory_contents=[], agent_commands=[], target=None)

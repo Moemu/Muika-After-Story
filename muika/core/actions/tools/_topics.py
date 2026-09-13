@@ -133,7 +133,7 @@ def _atomic_write_topics(content: str) -> None:
 
 def _disabled_or_reason_missing(reason: str) -> Optional[str]:
     """公共门控检查，返回错误提示或 None。"""
-    if not mas_config.enable_self_modification:
+    if not mas_config.can_self_modify:
         return ToolError(_DISABLED_MSG)
     if not reason or not reason.strip():
         return ToolError("A non-empty 'reason' is required: every change to your topic library is journaled.")

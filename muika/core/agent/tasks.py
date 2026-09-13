@@ -446,7 +446,22 @@ class AgentTasks:
                 and not task.handoff
             ):
                 return ToolResult(text="Not executed: task instructions or execution ownership changed.", is_error=True)
-            with tool_context(self.state, self.executor, task_id=task.id, file_versions=task.file_versions):
+            with tool_context(
+                self.state,
+                self.executor,
+                task_id=task.id,
+                file_versions=task.file_versions,
+                review_context=json.dumps(
+                    {
+                        "goal": task.instruction,
+                        "original_request": task.original_request,
+                        "corrections": task.corrections,
+                        "revision": task.revision,
+                    },
+                    ensure_ascii=False,
+                ),
+                is_current=lambda: task.revision == revision and not task.cancel_requested and not self._closing,
+            ):
                 return await dispatch_call(call)
 
         action_task = asyncio.create_task(action())
@@ -583,6 +598,8 @@ class AgentTasks:
             task
             and task.revision == event.revision
             and task.status == event.status
+            and event.report
+            == (task.report.describe() if task.report else task.error or task.report_error or "Task cancelled.")
             and not (task.notified_revision == event.revision and task.notified_status == event.status)
         )
 
@@ -686,3 +703,29 @@ class AgentTasks:
         self._wake.set()
         for task in self.tasks.values():
             await get_process_manager().stop_owner(task.id)
+
+    async def resume_review(self, task_id: str, review_id: str, instruction: str = "") -> None:
+        """让原任务继续处理已批准的具体请求，不改变授权对应的任务版本。"""
+        await self.initialize()
+        async with self._lock:
+            task = self.tasks.get(task_id)
+            if task is None or task.cancel_requested or task.status == "cancelled":
+                return
+            task.messages.append(
+                ModelMessage(
+                    role="user",
+                    content=(
+                        f"Review {review_id} was approved by the player. Retry that exact pending operation; "
+                        "changed inputs require a new review. Do not repeat completed operations. " + instruction
+                    ),
+                )
+            )
+            if task.status in {"blocked", "failed", "completed"}:
+                task.status = "queued"
+                task.report = None
+                task.error = None
+                task.notified_revision = 0
+                task.notified_status = ""
+                self._notifications = {key for key in self._notifications if key[0] != task.id}
+            await self._save(task)
+            self._wake.set()

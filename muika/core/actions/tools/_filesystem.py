@@ -10,7 +10,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
-from muika.core.self_mod.policy import is_protected_path
+from muika.core.self_mod.policy import is_protected_path, is_self_path
 from muika.llm._schema import MediaReference, ToolResult
 from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
@@ -45,9 +45,12 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
         )
 
     if require_write and is_protected_path(resolved):
-        raise _FSError(f"Access denied: {resolved} is protected core code and can never be modified.")
+        raise _FSError(f"Access denied: {resolved} is protected core code or runtime control data.")
 
-    if require_write and not mas_config.enable_file_write:
+    if require_write and is_self_path(resolved):
+        raise _FSError("Use self_write/self_edit or the topic tools to change Muika's content and plugins.")
+
+    if require_write and not mas_config.can_write:
         raise _FSError("File write/delete is disabled by configuration.")
 
     return resolved
@@ -107,7 +110,9 @@ async def list_directory(path: str, show_hidden: bool = False):
 def _remember_file(path: Path) -> None:
     context = get_dependencies().get(ToolContext)
     if isinstance(context, ToolContext):
-        context.file_versions[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        context.file_versions[str(path)] = (
+            hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+        )
 
 
 def _check_read_version(path: Path) -> None:
@@ -207,7 +212,7 @@ class WriteFileParams(BaseModel):
 async def write_file(path: str, content: str, write_mode: str = "overwrite", encoding: str = "utf-8"):
     if not mas_config.fs_allowed_paths:
         return ToolError("File system tools are disabled by configuration.")
-    if not mas_config.enable_file_write:
+    if not mas_config.can_write:
         return ToolError("File write/delete is disabled by configuration.")
 
     try:
@@ -282,7 +287,7 @@ async def edit_file(
 ):
     if not mas_config.fs_allowed_paths:
         return ToolError("File system tools are disabled by configuration.")
-    if not mas_config.enable_file_write:
+    if not mas_config.can_write:
         return ToolError("File write/delete is disabled by configuration.")
 
     try:
@@ -379,7 +384,7 @@ class DeleteFileParams(BaseModel):
 async def delete_file(path: str):
     if not mas_config.fs_allowed_paths:
         return ToolError("File system tools are disabled by configuration.")
-    if not mas_config.enable_file_write:
+    if not mas_config.can_write:
         return ToolError("File write/delete is disabled by configuration.")
 
     try:
@@ -395,6 +400,7 @@ async def delete_file(path: str):
 
     try:
         resolved.unlink()
+        _remember_file(resolved)
         logger.warning(f"[DeleteFile] Deleted: {resolved}")
         return f"File deleted: {resolved}"
     except PermissionError:

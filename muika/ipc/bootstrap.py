@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import signal
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +52,9 @@ from .protocol import SessionBootstrapEvent as IpcSessionBootstrapEvent
 from .protocol import SessionEndEvent as IpcSessionEndEvent
 from .protocol import UserMessageEvent as IpcUserMessageEvent
 from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
+from .supervisor import RESTART_EXIT_CODE, RestartRecord, lifecycle_directory
+from .supervisor import main as supervisor_main
+from .supervisor import watch_parent, write_json
 
 MCP_CONFIG_PATH = Path("./configs/mcp.json")
 BUILTIN_PLUGINS_PATH = Path("muika/builtin_plugins")
@@ -99,6 +104,11 @@ class CoreBootstrap:
         self._muika = Muika(self._executor, event_queue)
 
         self._shutdown_event = asyncio.Event()
+        self.stop_requested = asyncio.Event()
+        self.restart_requested = False
+        self._restart_task: asyncio.Task[None] | None = None
+        if lifecycle_directory() is not None:
+            self._muika.restart.handler = self.request_restart
         self.is_bootstraped = False
 
         CommandDispatcher.setup(self._muika, _send_command_result)
@@ -114,13 +124,75 @@ class CoreBootstrap:
         self._register_adapter_callbacks()
         await self._ws_server.start()
 
-        self._muika.start()
-
         logger.debug(
             f"Muika Core is ready -- ws://{self._host}:{self._port}/ws "
             f"(health: http://{self._host}:{self._port}/health)"
         )
         logger.success("Muika is ready.")
+        directory = lifecycle_directory()
+        if directory is not None:
+            write_json(directory / "ready.json", {"pid": os.getpid()})
+            record_path = mas_config.data_dir.resolve() / "restart.json"
+            if record_path.is_file():
+                try:
+                    for _ in range(30):
+                        record = json.loads(record_path.read_text(encoding="utf-8"))
+                        if record.get("status") in {"started", "restored", "failed"}:
+                            await self._muika.memory.add_material(
+                                "agent",
+                                f"Core restart outcome: {record['status']}. "
+                                f"Purpose: {record.get('reason', '')}. "
+                                "Startup readiness is not full feature verification.",
+                                source=f"restart:{record.get('id') or record['patch_id']}:{record['status']}",
+                            )
+                            break
+                        await asyncio.sleep(0.1)
+                except (OSError, ValueError, KeyError) as exc:
+                    logger.error(f"[Restart] Could not load the saved restart outcome: {exc}")
+        self._muika.start()
+
+    async def request_restart(self, patch_id: str | None, trigger: str) -> None:
+        """暂停行动，按需应用指定提案，再请求父进程重启。"""
+        if self._restart_task is not None and not self._restart_task.done():
+            raise ValueError("A restart is already pending.")
+        directory = lifecycle_directory()
+        if directory is None:
+            raise ValueError("A supervisor is required to restart Core.")
+        manager = get_core_proposal_manager()
+        proposal = manager.check_ready(patch_id) if patch_id is not None else None
+        record_path = mas_config.data_dir.resolve() / "restart.json"
+        record: RestartRecord = {
+            "id": uuid.uuid4().hex,
+            "patch_id": patch_id,
+            "reason": proposal["reason"] if proposal is not None else trigger,
+            "trigger": trigger,
+            "proposal_file": str(manager.proposals_root / patch_id / "proposal.json") if patch_id is not None else None,
+            "record_path": str(record_path),
+            "status": "preparing",
+        }
+
+        async def restart() -> None:
+            try:
+                await self._muika.agent_tasks.handoff()
+                if patch_id is not None:
+                    manager.check_ready(patch_id)
+                write_json(record_path, record)
+                if patch_id is not None:
+                    await manager.apply(patch_id)
+                record["status"] = "restarting"
+                write_json(record_path, record)
+                write_json(directory / "restart.json", record)
+                self.restart_requested = True
+                self.stop_requested.set()
+            except Exception as exc:
+                record["status"] = "failed"
+                record["error"] = str(exc)
+                write_json(record_path, record)
+                await self._muika.agent_tasks.release_persona()
+                await self._executor.send_message(f"这次还不能重启：{exc}")
+                logger.exception("[Restart] Could not prepare the requested restart.")
+
+        self._restart_task = asyncio.create_task(restart())
 
     async def stop(self) -> None:
         """停止接入和后台活动，再关闭数据库。"""
@@ -130,6 +202,9 @@ class CoreBootstrap:
         logger.info("Stopping Muika...")
 
         self._shutdown_event.set()
+        if self._restart_task is not None and not self._restart_task.done():
+            self._restart_task.cancel()
+            await asyncio.gather(self._restart_task, return_exceptions=True)
         try:
             await self._ws_server.stop()
         finally:
@@ -267,11 +342,7 @@ async def run_core(
         recovered = get_core_proposal_manager().recover_incomplete()
         if recovered:
             logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
-        if mas_config.enable_core_proposals and (mas_config.enable_code_execution or mas_config.enable_shell_execution):
-            logger.warning(
-                "[CoreProposal] Code or shell execution is enabled. "
-                "These trusted tools can bypass Core proposal controls."
-            )
+        logger.info(f"[Permissions] {mas_config.action_permission}; code review: {mas_config.code_review_mode}.")
 
         if MCP_CONFIG_PATH.exists():
             logger.debug("Loading MCP Server config")
@@ -285,7 +356,7 @@ async def run_core(
         if mas_config.enable_plugin_hot_reload:
             start_plugin_watcher(get_plugin_manager(), Path(mas_config.plugins_dir))
 
-        stop_event = asyncio.Event()
+        stop_event = bootstrap.stop_requested
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -307,10 +378,16 @@ async def run_core(
                 await close_db()
         finally:
             await cleanup_servers()
+    if bootstrap is not None and bootstrap.restart_requested:
+        raise SystemExit(RESTART_EXIT_CODE)
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     """解析命令行参数并运行核心进程。"""
+    if lifecycle_directory() is None:
+        supervisor_main(argv)
+        return
+    watch_parent()
     args = _parse_args(argv)
     asyncio.run(run_core(host=args.host, port=args.port))
 

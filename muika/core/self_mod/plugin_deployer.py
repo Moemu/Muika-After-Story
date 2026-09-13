@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Optional
 
 from muika.config import mas_config
+from muika.core.code_review import (
+    ReviewError,
+    ReviewRecord,
+    file_hash,
+    get_code_reviewer,
+)
 from muika.plugin.command import _commands
 from muika.plugin.exceptions import PluginLoadError
 from muika.plugin.func_call.caller import _caller_data
@@ -81,10 +87,8 @@ class PluginDeployer:
 
     def resolve_plugin_path(self, raw_path: str) -> tuple[Path, str]:
         """校验插件路径，并返回正式路径和模块名。"""
-        if not mas_config.enable_self_modification:
+        if not mas_config.can_self_modify:
             raise SelfModError("Self-modification is disabled by configuration.")
-        if not mas_config.enable_plugin_self_modification:
-            raise SelfModError("Plugin self-modification is disabled by configuration.")
 
         resolved = resolve_self_path(raw_path, require_write=True)
         if resolved.parent != self._plugins_dir or resolved.suffix != ".py":
@@ -163,6 +167,7 @@ class PluginDeployer:
         target, module_name = self.resolve_plugin_path(path)
         validate_content(target, content)
         base_hash = _sha256_file(target)
+        review = await self._review(target, content, reason)
         self._atomic_write(self._staging_dir / target.name, content)
         staging_module = f"{self._plugins_dir.name}._staging.{target.stem}"
         probe_ok, probe_message = await self.run_probe(staging_module)
@@ -173,6 +178,9 @@ class PluginDeployer:
         if _sha256_file(target) != base_hash:
             self._remove_staging(target.name)
             raise SelfModError("The plugin changed during validation. Create a new preview and try again.")
+        get_code_reviewer().check(review)
+        if _sha256_text((self._staging_dir / target.name).read_text(encoding="utf-8")) != _sha256_text(content):
+            raise SelfModError("The candidate changed during validation.")
 
         record = StagingRecord(
             target_path=str(target),
@@ -198,13 +206,27 @@ class PluginDeployer:
             f"The active plugin is unchanged. Call plugin_load(name={target.stem!r}) to activate it."
         )
 
+    async def _review(self, target: Path, content: str | None, reason: str) -> ReviewRecord:
+        """在任何候选探针执行前审查完整代码与正式文件版本。"""
+        try:
+            return await get_code_reviewer().authorize(
+                "plugin",
+                {
+                    "target": str(target),
+                    "before": target.read_text(encoding="utf-8") if target.is_file() else None,
+                    "after": content,
+                    "reason": reason,
+                },
+                files={str(target): file_hash(target)},
+            )
+        except ReviewError as exc:
+            raise SelfModError(str(exc)) from exc
+
     async def activate(self, name: str) -> str:
         """手动激活一个已验证的 staging 候选。"""
         async with _deploy_lock:
-            if not mas_config.enable_self_modification:
+            if not mas_config.can_self_modify:
                 raise SelfModError("Self-modification is disabled by configuration.")
-            if not mas_config.enable_plugin_self_modification:
-                raise SelfModError("Plugin self-modification is disabled by configuration.")
             if not _PLUGIN_NAME_RE.fullmatch(name):
                 raise SelfModError("Plugin names must match ^[a-z][a-z0-9_]{0,63}$.")
             candidate_path = self._staging_dir / f"{name}.py"
@@ -225,6 +247,9 @@ class PluginDeployer:
             if _sha256_file(target) != record.expected_base_sha256:
                 raise SelfModError("The formal plugin changed after staging. Activation is refused.")
             validate_content(target, content)
+            review = await self._review(target, content, record.reason)
+            if _sha256_text(candidate_path.read_text(encoding="utf-8")) != record.candidate_sha256:
+                raise SelfModError("The candidate changed during review.")
             probe_ok, probe_message = await self.run_probe(f"{self._plugins_dir.name}._staging.{name}")
             if not probe_ok:
                 quarantine_id = self._quarantine_candidate(
@@ -237,6 +262,10 @@ class PluginDeployer:
                 raise SelfModError(
                     f"Plugin validation failed: {probe_message} Candidate quarantined as {quarantine_id}."
                 )
+            get_code_reviewer().check(review)
+            if _sha256_text(candidate_path.read_text(encoding="utf-8")) != record.candidate_sha256:
+                raise SelfModError("The candidate changed during validation.")
+            get_code_reviewer().consume(review)
             return await self._activate_record(record, target, content)
 
     async def _activate_record(self, record: StagingRecord, target: Path, content: str) -> str:
@@ -297,6 +326,7 @@ class PluginDeployer:
             self_mod_manager = get_self_mod_manager()
             old_content = target.read_text(encoding="utf-8") if target.is_file() else None
             revert_content = await self_mod_manager.read_revert_target(str(target), revision_id)
+            review = await self._review(target, revert_content, f"Revert plugin revision {revision_id}")
             if revert_content is not None:
                 validate_content(target, revert_content)
                 self._atomic_write(self._staging_dir / target.name, revert_content)
@@ -305,10 +335,16 @@ class PluginDeployer:
                 if not success:
                     raise SelfModError(f"The revert target failed plugin validation: {message}")
 
+            get_code_reviewer().check(review)
+            get_code_reviewer().consume(review)
             manager = get_plugin_manager()
             manager.suppress_watcher(module_name)
             was_loaded = module_name in get_plugins()
-            report = await self_mod_manager.revert(str(target), revision_id=revision_id)
+            report = await self_mod_manager.revert(
+                str(target),
+                revision_id=revision_id,
+                expected_sha256=_sha256_text(revert_content) if revert_content is not None else "missing",
+            )
             if target.exists():
                 try:
                     reload_plugin(module_name)

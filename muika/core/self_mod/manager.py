@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -86,11 +87,14 @@ class SelfModManager:
         self,
         raw_path: str,
         revision_id: Optional[int] = None,
+        *,
+        expected_sha256: str | None = None,
     ) -> str:
         """将文件回滚到指定版本（默认上一版本），返回结果报告。
 
         :param raw_path: 目标文件路径
         :param revision_id: 审计记录 id；为 None 时回滚到最近一次修改之前
+        :param expected_sha256: 已审查的回滚内容指纹；missing 表示删除
         """
         resolved = resolve_self_path(raw_path, require_write=True)
         rel = display_path(resolved)
@@ -113,13 +117,16 @@ class SelfModManager:
         if resolved.exists():
             current_text = resolved.read_text(encoding="utf-8", errors="replace")
 
-        if before_path_rel is None:
+        target_text = self._read_snapshot(before_path_rel) if before_path_rel is not None else None
+        target_sha256 = hashlib.sha256(target_text.encode()).hexdigest() if target_text is not None else "missing"
+        if expected_sha256 is not None and target_sha256 != expected_sha256:
+            raise SelfModError("The revert candidate changed after review. Request a new review.")
+        if target_text is None:
             if resolved.exists():
                 resolved.unlink()
             report_action = "deleted (restored to built-in / non-existent state)"
             after_path_rel = None
         else:
-            target_text = self._read_snapshot(before_path_rel)
             validate_content(resolved, target_text)
             self._atomic_write(resolved, target_text)
             after_path_rel = self._write_snapshot(resolved, target_text, suffix=".after")

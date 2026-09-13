@@ -64,8 +64,8 @@ Muika 保存经历，再在空闲时理解这些经历。日记包含她的兴�
 她可以行动、观察、修改愿望或沉默。行动使用 `<agent intention_id="已有ID">指令</agent>` 关联真实任务。
 同一意愿不会重复派发新任务；继续已有行动应使用任务控制。
 
-日记整理只受 `ENABLE_AUTO_REFLECTION` 控制，与 `ENABLE_SELF_MODIFICATION` 无关。
-自我修改工具原有的开关、批准、验证和回退边界保持有效。
+日记整理只受 `ENABLE_AUTO_REFLECTION` 控制，与 `ACTION_PERMISSION` 无关。
+自我修改使用 `ACTION_PERMISSION=self_modify`；代码审查、验证和回退机制保持有效。重启时机由 Muika 结合对话自主决定。
 
 ## 检索与回查
 

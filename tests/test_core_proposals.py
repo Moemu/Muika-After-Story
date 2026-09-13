@@ -10,6 +10,7 @@ import pytest
 
 from muika.config import mas_config
 from muika.core.actions.tools import _filesystem
+from muika.core.code_review import get_code_reviewer
 from muika.core.events import UserMessageEvent, UserMessagePayload
 from muika.core.loop import Muika
 from muika.core.self_mod import proposals as proposals_module
@@ -22,8 +23,7 @@ def core_workspace(tmp_path: Path, monkeypatch):
     """创建独立的最小 Core 工作区。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(mas_config, "data_dir", Path("data"))
-    monkeypatch.setattr(mas_config, "enable_self_modification", True)
-    monkeypatch.setattr(mas_config, "enable_core_proposals", True)
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     (tmp_path / "muika" / "core").mkdir(parents=True)
     (tmp_path / "muika_bot").mkdir()
     (tmp_path / "tests").mkdir()
@@ -119,7 +119,7 @@ def test_show_reports_derived_stale_and_test_warning(core_workspace):
 async def test_generic_file_tools_cannot_write_protected_core(core_workspace, monkeypatch):
     root, _ = core_workspace
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(root)])
-    monkeypatch.setattr(mas_config, "enable_file_write", True)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     target = root / "muika/core/sample.py"
 
     write_result = await _filesystem.write_file(str(target), "VALUE = 9\n")
@@ -132,11 +132,123 @@ async def test_generic_file_tools_cannot_write_protected_core(core_workspace, mo
     assert target.read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
-def test_dual_switch_is_required(core_workspace, monkeypatch):
+def test_self_modify_permission_is_required(core_workspace, monkeypatch):
     _, manager = core_workspace
-    monkeypatch.setattr(mas_config, "enable_core_proposals", False)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     with pytest.raises(CoreProposalError, match="disabled"):
         manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "No.")
+
+
+async def test_ready_proposal_keeps_chat_and_code_active_until_apply(core_workspace, monkeypatch, approved_review):
+    root, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
+    await manager.prepare(patch_id)
+    assert manager.load(patch_id)["status"] == "ready"
+    assert approved_review.await_count == 2
+    assert not (root / "muika/core/new.py").exists()
+    assert not proposals_module.is_core_maintenance_active()
+    await manager.apply(patch_id)
+    assert (root / "muika/core/new.py").read_text(encoding="utf-8") == "X = 1\n"
+    assert proposals_module.is_core_maintenance_active()
+
+
+async def test_ready_proposal_cannot_reuse_consent_after_candidate_change(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    await manager.approve(patch_id)
+    (manager.proposals_root / patch_id / "after/muika/core/new.py").write_text("X = 2\n", encoding="utf-8")
+    with pytest.raises(CoreProposalError, match="stale"):
+        await manager.apply(patch_id)
+    assert not proposals_module.is_core_maintenance_active()
+
+
+async def test_candidate_and_metadata_changes_cannot_reuse_review(core_workspace, monkeypatch):
+    _, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    await manager.approve(patch_id)
+    proposal = manager.load(patch_id)
+    content = "X = 2\n"
+    (manager.proposals_root / patch_id / "after/muika/core/new.py").write_text(content, encoding="utf-8")
+    proposal["changes"][0]["sha256_after"] = proposals_module._sha256_text(content)
+    manager._save(proposal)
+    with pytest.raises(CoreProposalError, match="no longer matches"):
+        manager.check_ready(patch_id)
+
+
+async def test_ready_change_can_be_cancelled_without_touching_code(core_workspace, monkeypatch):
+    root, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
+    await manager.approve(patch_id)
+    monkeypatch.setattr(mas_config, "action_permission", "read_only")
+    manager.deny(patch_id, "The player changed their mind.")
+    assert manager.load(patch_id)["status"] == "denied"
+    assert not (root / "muika/core/new.py").exists()
+
+
+@pytest.mark.parametrize("change", ["cancel", "revoke", "permission", "report"])
+async def test_application_rechecks_decisions_after_validation(core_workspace, monkeypatch, change):
+    root, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    report = {"status": "passed", "reason": "ok"}
+    monkeypatch.setattr(manager, "validate", lambda patch_id: report)
+    await manager.approve(patch_id)
+
+    def validate(patch_id):
+        if change == "cancel":
+            manager.deny(patch_id)
+        elif change == "revoke":
+            get_code_reviewer().decide(manager.load(patch_id)["review_ids"][0], False)
+        elif change == "permission":
+            monkeypatch.setattr(mas_config, "action_permission", "read_only")
+        else:
+            return {"status": "passed", "reason": "different evidence"}
+        return report
+
+    monkeypatch.setattr(manager, "validate", validate)
+    with pytest.raises(CoreProposalError):
+        await manager.apply(patch_id)
+    assert not (root / "muika/core/new.py").exists()
+    assert not proposals_module.is_core_maintenance_active()
+
+
+async def test_unavailable_validation_never_becomes_automatically_ready(core_workspace, monkeypatch, approved_review):
+    _, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "unavailable", "reason": "no tests"})
+    with pytest.raises(CoreProposalError, match="unavailable"):
+        await manager.prepare(patch_id)
+    assert manager.load(patch_id)["status"] == "pending"
+    assert approved_review.await_count == 1
+
+
+async def test_rejected_core_candidate_is_not_executed(core_workspace, monkeypatch):
+    from muika.core.code_review import CodeReviewer, ReviewDecision
+
+    _, manager = core_workspace
+    patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Grow.")
+    monkeypatch.setattr(
+        CodeReviewer,
+        "assess",
+        AsyncMock(
+            return_value=ReviewDecision(
+                decision="revise",
+                effect="self_modify",
+                reason="The implementation loses memories.",
+                suggestions=["Preserve the memory path."],
+                impact="需要修复记忆连续性。",
+            )
+        ),
+    )
+    validate = AsyncMock()
+    monkeypatch.setattr(manager, "validate", validate)
+    with pytest.raises(CoreProposalError, match="loses memories"):
+        await manager.prepare(patch_id)
+    validate.assert_not_called()
 
 
 def test_default_source_root_is_the_running_muika_installation(monkeypatch, tmp_path):
@@ -238,14 +350,16 @@ def test_validate_rejects_new_failure_and_test_count_only_warns(core_workspace, 
 async def test_unavailable_validation_requires_explicit_override(core_workspace, monkeypatch):
     root, manager = core_workspace
     patch_id = manager.create([{"action": "create", "path": "muika/core/new.py", "content": "X = 1\n"}], "Add code.")
-    probes = [_probe(status="unavailable"), _probe(status="unavailable")]
-    monkeypatch.setattr(manager, "_run_probe", lambda workspace: probes.pop(0))
+    monkeypatch.setattr(manager, "_validation_environment_error", lambda: "pytest is unavailable")
+    monkeypatch.setattr(manager, "_run_probe", lambda workspace: _probe(status="unavailable"))
     monkeypatch.setattr(manager, "_copy_workspace", lambda destination: destination.mkdir(parents=True))
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
 
     with pytest.raises(CoreProposalError, match="unavailable"):
         await manager.approve(patch_id)
-    report = await manager.approve(patch_id, allow_unvalidated=True)
+        await manager.apply(patch_id)
+    await manager.approve(patch_id, allow_unvalidated=True)
+    report = await manager.apply(patch_id)
 
     assert "explicit risk override" in report
     assert (root / "muika/core/new.py").read_text(encoding="utf-8") == "X = 1\n"
@@ -261,6 +375,7 @@ async def test_failed_validation_cannot_be_overridden(core_workspace, monkeypatc
 
     with pytest.raises(CoreProposalError, match="validation failed"):
         await manager.approve(patch_id, allow_unvalidated=True)
+        await manager.apply(patch_id)
 
 
 @pytest.mark.asyncio
@@ -273,6 +388,7 @@ async def test_candidate_probe_error_cannot_be_overridden(core_workspace, monkey
 
     with pytest.raises(CoreProposalError, match="validation failed"):
         await manager.approve(patch_id, allow_unvalidated=True)
+        await manager.apply(patch_id)
 
 
 @pytest.mark.asyncio
@@ -296,6 +412,8 @@ async def test_approve_applies_modify_create_delete_transaction(core_workspace, 
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
 
     await manager.approve(patch_id)
+
+    await manager.apply(patch_id)
 
     assert (root / "muika/core/sample.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert (root / "muika/core/new.py").is_file()
@@ -330,6 +448,7 @@ async def test_application_failure_restores_all_before_files(core_workspace, mon
 
     with pytest.raises(CoreProposalError, match="files were restored"):
         await manager.approve(patch_id)
+        await manager.apply(patch_id)
     assert (root / "muika/core/sample.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert not (root / "muika/core/new.py").exists()
     assert manager.load(patch_id)["status"] == "failed"
@@ -343,6 +462,8 @@ async def test_audit_failure_does_not_rollback_applied_code(core_workspace, monk
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value="muika/core/new.py: database down"))
 
     await manager.approve(patch_id)
+
+    await manager.apply(patch_id)
 
     assert (root / "muika/core/new.py").is_file()
     proposal = manager.load(patch_id)
@@ -358,6 +479,8 @@ async def test_same_boot_rollback_restores_files_and_ends_maintenance(core_works
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
 
     await manager.approve(patch_id)
+
+    await manager.apply(patch_id)
     assert proposals_module.is_core_maintenance_active()
     report = await manager.rollback(patch_id)
 
@@ -376,8 +499,11 @@ async def test_maintenance_rejects_second_approval(core_workspace, monkeypatch):
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
 
     await manager.approve(first)
+
+    await manager.apply(first)
     with pytest.raises(CoreProposalError, match="waiting for a restart"):
         await manager.approve(second)
+        await manager.apply(second)
 
 
 @pytest.mark.asyncio
@@ -387,6 +513,7 @@ async def test_rollback_rejects_hash_drift(core_workspace, monkeypatch):
     monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
     await manager.approve(patch_id)
+    await manager.apply(patch_id)
     (root / "muika/core/new.py").write_text("X = 2\n", encoding="utf-8")
 
     with pytest.raises(CoreProposalError, match="changed"):
@@ -400,6 +527,7 @@ async def test_cross_boot_rollback_requires_another_restart(core_workspace, monk
     monkeypatch.setattr(manager, "validate", lambda patch_id: {"status": "passed", "reason": "ok"})
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
     await manager.approve(patch_id)
+    await manager.apply(patch_id)
     proposals_module._leave_maintenance()
     monkeypatch.setattr(proposals_module, "_BOOT_ID", "new-boot")
 
@@ -499,6 +627,8 @@ def test_recovery_refuses_proposal_from_another_source_location(core_workspace):
         (".patch deny id", True),
         (".patch rollback id", True),
         (".patch approve id", False),
+        (".restart", True),
+        ("/restart", True),
         (".help", False),
     ],
 )

@@ -28,7 +28,7 @@ def reflection(redirect_get_session):
 
 
 async def test_auto_dream_is_independent_of_self_modification(reflection, monkeypatch):
-    monkeypatch.setattr(mas_config, "enable_self_modification", False)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
     monkeypatch.setattr(mas_config, "enable_auto_reflection", True)
     for days in (3, 2):
         await reflection._memory.add_context(

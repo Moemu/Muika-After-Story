@@ -56,6 +56,11 @@ def is_protected_path(resolved: Path) -> bool:
 
     同时拒绝"位于受保护路径内"与"包含受保护路径"（如项目根目录本身）两种情况。
     """
+    data = mas_config.data_dir.resolve()
+    controls = [data / name for name in ("reviews", "core_proposals", "restart.json", "agent_tasks", "agent_processes")]
+    controls.append(Path(mas_config.self_mod_backup_dir).resolve())
+    if any(resolved == path or path in resolved.parents or resolved in path.parents for path in controls):
+        return True
     for root in {_project_root(), _runtime_source_root()}:
         for prefix in PROTECTED_PREFIXES:
             p = Path(prefix)
@@ -68,7 +73,7 @@ def is_protected_path(resolved: Path) -> bool:
 def allowed_roots(include_read_only: bool = False) -> list[Path]:
     """解析当前生效的沙箱为绝对路径列表。"""
     paths: list[str] = list(_SANDBOX_PATHS)
-    if mas_config.enable_plugin_self_modification:
+    if mas_config.can_self_modify or include_read_only:
         paths.append(mas_config.plugins_dir)
     roots = [Path(p).resolve() for p in paths if p]
     if include_read_only:
@@ -83,11 +88,11 @@ def resolve_self_path(
     """解析并校验自我编辑路径，拒绝越界访问。
 
     :param raw_path: LLM 传入的相对或绝对路径
-    :param require_write: 是否要求写权限（当前沙箱读写同权，保留参数以镜像文件系统工具语义）
+    :param require_write: 是否要求自我修改权限
     :return: 解析后的绝对路径
     :raises SelfModError: 路径非法、命中保护清单或不在白名单内
     """
-    if not mas_config.enable_self_modification:
+    if require_write and not mas_config.can_self_modify:
         raise SelfModError("Self-modification is disabled by configuration.")
 
     try:
@@ -112,6 +117,12 @@ def resolve_self_path(
             raise SelfModError(f"Access denied: {resolved} is inside the plugin {part} area.")
 
     return resolved
+
+
+def is_self_path(resolved: Path) -> bool:
+    """识别人格、技能、话题和插件目录及其父目录。"""
+    roots = [Path(p).resolve() for p in (*_SANDBOX_PATHS, mas_config.plugins_dir, "configs/topics.yml")]
+    return any(resolved == root or root in resolved.parents or resolved in root.parents for root in roots)
 
 
 def display_path(resolved: Path) -> str:

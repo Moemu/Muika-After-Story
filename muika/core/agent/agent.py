@@ -78,6 +78,8 @@ class Agent:
             f"\n\nExecution environment: OS={platform.system()}; cwd={Path.cwd()}; "
             f"Python={sys.executable}. Default shell={'powershell' if sys.platform == 'win32' else 'bash'}. "
             "Use this environment's syntax. A running process is not a completed check."
+            f" Action permission={mas_config.action_permission}; code review={mas_config.code_review_mode}; "
+            f"allowed file roots={mas_config.fs_allowed_paths}."
         )
         return ModelRequest(prompt=f"Command: {command}", system=system, tools=get_tool_list())
 
@@ -94,7 +96,7 @@ class Agent:
     async def _execute_command(self, command: str, state: MuikaState, executor: Executor) -> tuple[str, list[Resource]]:
         logger.debug(f"[Agent] Executing command: {command!r}")
 
-        with tool_context(state, executor) as context:
+        with tool_context(state, executor, review_context=command) as context:
             request = self.build_request(command, state)
 
             try:
