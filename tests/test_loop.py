@@ -127,6 +127,32 @@ async def test_autonomous_restart_keeps_candidate_checks_and_reports_failure(eng
     assert event.task_id == "control-error" and "Candidate changed" in event.report
 
 
+@pytest.mark.parametrize("action", ["complete", "cancel"])
+async def test_restart_saves_task_control_before_handoff(engine, action):
+    task = await engine.agent_tasks.submit("Prepare change", "Make the change")
+    await engine.agent_tasks.handoff()
+    engine._god_mode = True
+    body = '<agent_result status="completed">Change verified.</agent_result>' if action == "complete" else "Stop it."
+    engine.brain.generate_reply = AsyncMock(
+        return_value=f'<agent task_id="{task.id}" action="{action}">{body}</agent>待会见。<restart>'
+    )
+    snapshots = []
+
+    async def restart(patch_id, trigger):
+        saved = next(item for item in await engine.agent_tasks.store.load() if item.id == task.id)
+        snapshots.append(saved)
+
+    engine.restart.handler = restart
+    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    assert len(snapshots) == 1
+    assert snapshots[0].status == ("completed" if action == "complete" else "cancelled")
+    if action == "complete":
+        assert snapshots[0].report.summary == "Change verified."
+        assert not snapshots[0].handoff
+    else:
+        assert snapshots[0].cancel_requested
+
+
 def test_parse_no_tags():
     r = Muika._parse_reply_tags("Hello there")
     assert r == ParsedReply(clean_reply="Hello there", memory_contents=[], agent_commands=[], target=None)

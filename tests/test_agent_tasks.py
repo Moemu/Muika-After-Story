@@ -428,6 +428,35 @@ async def test_old_notification_is_ignored_after_followup(factory):
     assert not manager.is_current_event(event)
 
 
+@pytest.mark.parametrize("delivered", [False, True])
+async def test_review_resume_delivers_each_approval_request(factory, delivered):
+    manager = factory(
+        [
+            ModelCompletions(text='<agent_result status="blocked">Approve source review.</agent_result>'),
+            ModelCompletions(text='<agent_result status="blocked">Approve validation review.</agent_result>'),
+        ]
+    )
+    task = await manager.submit("Prepare the proposal", "Please make this change")
+    await manager._run_task(task)
+    first = await _event(manager)
+    if delivered:
+        await manager.delivered(first)
+    revision = task.revision
+    await manager.resume_review(task.id, "source-review")
+    assert task.revision == revision
+    await manager._run_task(task)
+    assert not manager.is_current_event(first)
+    second = await _event(manager)
+    assert "validation review" in second.report
+    assert manager.is_current_event(second)
+    await manager.delivered(second)
+    await manager.notify_pending()
+    assert manager.events.empty()
+    restored = factory([])
+    await restored.initialize()
+    assert restored.events.empty()
+
+
 async def test_failed_process_arguments_are_not_reclassified_as_unknown_actions(factory):
     manager = factory([_done("No work remains")])
     task = await manager.submit("work", "original")

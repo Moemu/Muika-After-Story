@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -181,3 +182,34 @@ async def test_enabling_auto_review_processes_existing_manual_request(monkeypatc
     record = await reviewer.authorize("execution", {"command": "read"})
     assert record.status == "approved"
     approved_review.assert_awaited_once()
+
+
+async def test_deleted_file_does_not_block_later_review(tmp_path, monkeypatch, approved_review):
+    monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
+    monkeypatch.setattr(mas_config, "action_permission", "write")
+    path = tmp_path / "obsolete.txt"
+    path.write_text("old content", encoding="utf-8")
+    reviewer = CodeReviewer()
+    executor = Executor(asyncio.Queue(), AsyncMock())
+    with tool_context(MuikaState(), executor, task_id="cleanup"):
+        await _filesystem.read_file(str(path))
+        await _filesystem.delete_file(str(path))
+        assert not path.exists()
+        record = await reviewer.authorize("execution", {"command": "print(1)"})
+        reviewer.check(record)
+        path.write_text("new content", encoding="utf-8")
+        with pytest.raises(ReviewError, match="files changed"):
+            reviewer.check(record)
+
+
+@pytest.mark.parametrize("tool", ["review_read", "review_search"])
+async def test_reviewer_can_inspect_adapter_source_without_filesystem_grant(monkeypatch, approved_review, tool):
+    monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
+    source = Path(__file__).resolve().parents[1] / "muika_bot" / "__init__.py"
+    reviewer = CodeReviewer()
+    record = await reviewer.authorize("core", {"path": "muika_bot/__init__.py"})
+    result = reviewer.read_tool(
+        ToolCall(id="adapter", name=tool, arguments=json.dumps({"path": str(source), "query": "import"})), record
+    )
+    assert str(source) in result.text
+    assert record.files[str(source)] == file_hash(source)

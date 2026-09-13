@@ -522,12 +522,6 @@ class Muika:
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if not silent_turn:
-            if parsed.restart_requested:
-                try:
-                    await self.restart.request(parsed.restart_patch_id, f"{event.type}: {parsed.clean_reply}")
-                    return
-                except (OSError, ValueError) as exc:
-                    parsed.agent_errors.append(f"Restart did not start: {exc}")
             for control in parsed.agent_controls:
                 try:
                     if control.action == "complete":
@@ -542,6 +536,12 @@ class Muika:
                             await self.agent_tasks.release_persona()
                 except (KeyError, ValueError) as exc:
                     parsed.agent_errors.append(f"Task control failed: {exc}")
+            if parsed.restart_requested:
+                try:
+                    await self.restart.request(parsed.restart_patch_id, f"{event.type}: {parsed.clean_reply}")
+                    return
+                except (OSError, ValueError) as exc:
+                    parsed.agent_errors.append(f"Restart did not start: {exc}")
             for index, command in enumerate(parsed.agent_commands):
                 intention_id = parsed.intention_ids[index] if index < len(parsed.intention_ids) else None
                 intention = next((item for item in self.memory.persistent.intentions if item.id == intention_id), None)

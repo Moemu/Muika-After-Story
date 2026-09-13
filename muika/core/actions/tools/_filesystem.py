@@ -110,7 +110,9 @@ async def list_directory(path: str, show_hidden: bool = False):
 def _remember_file(path: Path) -> None:
     context = get_dependencies().get(ToolContext)
     if isinstance(context, ToolContext):
-        context.file_versions[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        context.file_versions[str(path)] = (
+            hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
+        )
 
 
 def _check_read_version(path: Path) -> None:
@@ -398,6 +400,7 @@ async def delete_file(path: str):
 
     try:
         resolved.unlink()
+        _remember_file(resolved)
         logger.warning(f"[DeleteFile] Deleted: {resolved}")
         return f"File deleted: {resolved}"
     except PermissionError:

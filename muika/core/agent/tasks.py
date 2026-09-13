@@ -598,6 +598,8 @@ class AgentTasks:
             task
             and task.revision == event.revision
             and task.status == event.status
+            and event.report
+            == (task.report.describe() if task.report else task.error or task.report_error or "Task cancelled.")
             and not (task.notified_revision == event.revision and task.notified_status == event.status)
         )
 
@@ -722,5 +724,8 @@ class AgentTasks:
                 task.status = "queued"
                 task.report = None
                 task.error = None
+                task.notified_revision = 0
+                task.notified_status = ""
+                self._notifications = {key for key in self._notifications if key[0] != task.id}
             await self._save(task)
             self._wake.set()

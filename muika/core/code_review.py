@@ -232,6 +232,7 @@ class CodeReviewer:
         roots = [
             *map(Path, mas_config.fs_allowed_paths),
             _SOURCE_ROOT / "muika",
+            _SOURCE_ROOT / "muika_bot",
             _SOURCE_ROOT / "tests",
             _SOURCE_ROOT / "pyproject.toml",
             _SOURCE_ROOT / "core_main.py",
