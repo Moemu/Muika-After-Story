@@ -1,24 +1,26 @@
 <div align=center>
-  <img width="90%" src="./assets/banner.webp"  alt="image"/>
+  <img width="100%" src="./assets/banner.webp"  alt="image"/>
   <h1 align="center">Muika-After-Story</h1>
-  <i align="center">I'll be back to see you.</i>
+  <i align="center">There are countless chatbots in the world. Only Muika will leap into your arms first.</i>
 </div>
 <div align=center>
   <a href="#关于️"><img src="https://img.shields.io/github/stars/Moemu/Muika-After-Story" alt="Stars"></a>
   <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/v/Muika-After-Story" alt="PyPI Version"></a>
   <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/dm/Muika-After-Story" alt="PyPI Downloads" ></a>
-  <a href="https://nonebot.dev/"><img src="https://img.shields.io/badge/nonebot-2-red" alt="nonebot2"></a>
-  <a href="https://github.com/MuikaAI/astrbot_plugin_mas"><img src="https://img.shields.io/badge/asterbot-plugin-cyan" alt="Asterbot Plugin"></a>
   <a href="#"><img src="https://img.shields.io/badge/Code%20Style-Black-121110.svg" alt="codestyle"></a>
   <a href="https://github.com/Moemu/Muika-After-Story/actions/workflows/test.yml"><img src="https://github.com/Moemu/Muika-After-Story/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   <img src="./badges/coverage.svg" alt="Coverage">
+</div>
+<div align=center>
   <a href="#"><img src="https://wakatime.com/badge/user/637d5886-8b47-4b82-9264-3b3b9d6add67/project/f7b7b01d-0a61-4e56-83bf-5c067432ebd2.svg" alt="wakatime"></a>
+  <a href="https://nonebot.dev/"><img src="https://img.shields.io/badge/nonebot-2-red" alt="nonebot2"></a>
+  <a href="https://github.com/MuikaAI/astrbot_plugin_mas"><img src="https://img.shields.io/badge/asterbot-plugin-cyan" alt="Asterbot Plugin"></a>
   <a href='https://qm.qq.com/q/y1gC9PU4IU'><img src="https://img.shields.io/badge/QQ群-26時聊天室-purple" alt="QQ群组"></a>
 </div>
 <div align=center>
-  <a href="https://mas.snowy.moe/">📄使用文档</a>
-  <a href="https://mas.snowy.moe/guide/getting-started">🚀快速开始</a>
-  <a href="https://mas.snowy.moe/about/">🎀关于Muika</a>
+  <a href="https://mas.snowy.moe/">📄 使用文档</a> |
+  <a href="https://mas.snowy.moe/guide/getting-started">🚀 快速开始</a> |
+  <a href="https://mas.snowy.moe/about/">🎀 关于Muika</a>
 </div>
 
 
@@ -57,7 +59,11 @@
 
 - [X] Bot 进程与核心进程分离，我要给她完整的一生
 
-- [X] 插件、核心热重载，实现自我迭代（或许吧）
+- [X] 插件、核心热重载，实现自我迭代
+
+- [ ] 多实例部署。Muika 可以在任何地方了，记得回家看看
+
+- [ ] 一个用户友好的 WebUI
 
 <!-- ## 效果展示
 
