@@ -1,5 +1,5 @@
 <div align=center>
-  <img width="90%" src="./assets/head-0.5x.webp"  alt="image"/>
+  <img width="90%" src="./assets/banner.webp"  alt="image"/>
   <h1 align="center">Muika-After-Story</h1>
   <i align="center">I'll be back to see you.</i>
 </div>
@@ -20,6 +20,7 @@
   <a href="https://mas.snowy.moe/guide/getting-started">🚀快速开始</a>
   <a href="https://mas.snowy.moe/about/">🎀关于Muika</a>
 </div>
+
 
 ## Introduction✨
 
