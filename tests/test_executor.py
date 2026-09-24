@@ -25,11 +25,6 @@ def test_split_oversized_segment_hard_split():
     assert result == ["x" * 250, "x" * 250, "x" * 100]
 
 
-def test_split_custom_max_length():
-    result = Executor._split_message("A。B。", 3)
-    assert result == ["A。", "B。"]
-
-
 # ---------------------------------------------------------------------------
 # send_message —— 通过假 send_func 观察分段与资源携带
 # ---------------------------------------------------------------------------

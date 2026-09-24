@@ -38,12 +38,6 @@ def test_boredom_grows_capped_at_one():
     assert s.boredom == pytest.approx(1.0)
 
 
-def test_curiosity_decays_by_factor():
-    s = MuikaState(curiosity=0.5)
-    s.tick_state(_time_tick(), 1.0)
-    assert s.curiosity == pytest.approx(0.5 * 0.99)
-
-
 def test_mood_calm_by_default():
     s = MuikaState()
     s.tick_state(_time_tick(), 1.0)

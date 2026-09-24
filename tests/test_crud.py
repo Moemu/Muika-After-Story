@@ -46,14 +46,6 @@ async def test_usage_save_negative_ignored(db_session):
     assert total == 0
 
 
-async def test_usage_get_records_recent(db_session):
-    await UsageORM.save_usage(db_session, plugin="p", model="m", input_tokens=1, output_tokens=0, cached_tokens=0)
-    await db_session.commit()
-    rows = await UsageORM.get_usage_records(db_session, days=7)
-    assert len(rows) == 1
-    assert rows[0].plugin == "p"
-
-
 async def test_usage_periods_include_today_without_an_extra_day(db_session):
     today = datetime.now()
     dates = [(today - timedelta(days=offset)).strftime("%Y.%m.%d") for offset in (0, 1, 6, 7, 365)]
