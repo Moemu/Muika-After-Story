@@ -225,6 +225,7 @@ class AgentTasks:
         applied_revision = 0
         logger.info(f"[AgentTask] Task {task.id[:8]}: {task.status}")
         recovery_reads: set[str] = set()
+        consecutive_errors: dict[str, int] = {}
         while not self._closing:
             if await self._stop_at_boundary(task):
                 return
@@ -297,6 +298,8 @@ class AgentTasks:
                 task.resources.append(self.store.archive_resource(task.id, resource))
             await self._save(task)
             if message.tool_calls:
+                call_names = ", ".join(call.name for call in message.tool_calls)
+                task.progress_summary = f"Executing: {call_names}"
                 observations = []
                 for call in message.tool_calls:
                     if task.revision != revision or task.cancel_requested or self._persona_owner:
@@ -316,6 +319,22 @@ class AgentTasks:
                         await self._save(task)
                         continue
                     result = await self._record_call(task, call, message_index)
+                    if result.is_error:
+                        err_key = f"{call.name}:{result.text[:120]}"
+                        consecutive_errors[err_key] = consecutive_errors.get(err_key, 0) + 1
+                        if consecutive_errors[err_key] >= 2:
+                            guidance = (
+                                "\n[System Guidance] This tool call failed with the same error twice. "
+                                "Stop repeating this exact action. Analyze the root cause, consider alternative tools "
+                                "or report status='blocked' if the goal cannot be achieved with available tools."
+                            )
+                            result = ToolResult(
+                                text=result.text + guidance,
+                                is_error=True,
+                                resources=result.resources,
+                            )
+                    else:
+                        consecutive_errors.clear()
                     if uncertain and not result.is_error:
                         recovery_reads.add(call.id)
                     observations.extend(result.resources)
@@ -522,6 +541,9 @@ class AgentTasks:
         if report:
             task.report = report
             task.status = report.status
+            task.progress_summary = ""
+            if task.intention_id and self.state.memory is not None:
+                await self.state.memory.record_task_result(task.id, report.status)
             await self._save(task)
             await self._notify(task)
             return True

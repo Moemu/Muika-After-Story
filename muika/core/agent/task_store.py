@@ -52,6 +52,7 @@ class TaskRecord(BaseModel):
     format_retry: bool = False
     resources: list[MediaReference] = Field(default_factory=list)
     file_versions: dict[str, str] = Field(default_factory=dict)
+    progress_summary: str = ""
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
 

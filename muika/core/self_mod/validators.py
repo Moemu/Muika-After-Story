@@ -41,7 +41,7 @@ def validate_content(path: Path, content: str) -> None:
 
 
 def validate_template(content: str) -> None:
-    """校验 Jinja2 人格模板：语法检查 + 用最小数据试渲染。"""
+    """校验 Jinja2 人格与 Agent 模板：语法检查 + 用最小数据试渲染。"""
     env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
 
     try:
@@ -49,13 +49,20 @@ def validate_template(content: str) -> None:
     except Exception as e:
         raise SelfModError(f"Jinja2 syntax error: {e}") from e
 
+    render_err = None
     try:
         data = PromptTemplatesData(event_type="self_check", state=MuikaState(), is_chat=True)
         env.from_string(content).render(data.model_dump())
+        return
     except SelfModError:
         raise
     except Exception as e:
-        raise SelfModError(f"Template renders but fails with prompt data: {e}") from e
+        render_err = e
+
+    try:
+        env.from_string(content).render()
+    except Exception:
+        raise SelfModError(f"Template renders but fails with prompt data: {render_err}") from render_err
 
 
 def _validate_yaml_syntax(content: str) -> dict:

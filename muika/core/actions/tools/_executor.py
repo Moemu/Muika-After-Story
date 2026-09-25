@@ -74,7 +74,15 @@ class ExecutePythonParams(ExecutionParams):
 async def _start(command: list[str], timeout: float, yield_time: float, cwd: str | None) -> ToolResult:
     manager = get_process_manager()
     try:
-        directory = str(Path(cwd).resolve() if cwd else Path.cwd())
+        owner = _owner()
+        if cwd:
+            directory = str(Path(cwd).resolve())
+        elif owner:
+            task_scratch = mas_config.scratch_dir / "tasks" / owner
+            task_scratch.mkdir(parents=True, exist_ok=True)
+            directory = str(task_scratch)
+        else:
+            directory = str(Path.cwd())
         reviewer = get_code_reviewer()
         review = await reviewer.authorize(
             "execution",

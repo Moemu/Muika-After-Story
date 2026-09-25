@@ -131,6 +131,14 @@ class MASConfig(BaseSettings):
                     )
         return values
 
+    scratch_retention_days: int = 3
+    """任务临时工作区文件保留天数，超时自动清理。"""
+
+    @property
+    def scratch_dir(self) -> Path:
+        """返回专用的 Agent 临时工作目录。"""
+        return self.data_dir.resolve() / "tmp"
+
     @property
     def can_write(self) -> bool:
         """返回是否允许在授权目录写入。"""

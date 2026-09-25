@@ -57,7 +57,24 @@ def is_protected_path(resolved: Path) -> bool:
     同时拒绝"位于受保护路径内"与"包含受保护路径"（如项目根目录本身）两种情况。
     """
     data = mas_config.data_dir.resolve()
-    controls = [data / name for name in ("reviews", "core_proposals", "restart.json", "agent_tasks", "agent_processes")]
+    if resolved == data:
+        return True
+    if resolved.parent == data and resolved.name not in {"tmp"}:
+        if resolved.is_file() or resolved.suffix:
+            return True
+
+    controls = [
+        data / name
+        for name in (
+            "reviews",
+            "core_proposals",
+            "restart.json",
+            "agent_tasks",
+            "agent_processes",
+            "muika.db",
+            "user_agreement.json",
+        )
+    ]
     controls.append(Path(mas_config.self_mod_backup_dir).resolve())
     if any(resolved == path or path in resolved.parents or resolved in path.parents for path in controls):
         return True
