@@ -64,6 +64,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --cov=muika --cov-report=term-missing"
+markers = [
+    "e2e: end-to-end scenario tests driving the real core loop with a scripted LLM",
+]
 
 # 覆盖率只统计 core 的可测试逻辑；以下为明确不做单元测试的集成/框架层
 # （provider 适配器、IPC、迁移、插件框架、内置命令、OS/网络工具、引导/日志，
