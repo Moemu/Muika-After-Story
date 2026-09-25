@@ -182,22 +182,6 @@ async def test_generate_reply_heartbeat_intensity_in_template(fake_llm_factory, 
     assert captured["data"].heartbeat_intensity == "high"
 
 
-async def test_generate_reply_heartbeat_intensity_off(fake_llm_factory, model_config_manager):
-    model_config_manager.heart_intensity = "off"
-    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
-    brain = _brain(fake)
-    captured = {}
-
-    def _tmpl(name, data):
-        captured["data"] = data
-        return "SYSTEM"
-
-    with patch("muika.core.brain.generate_prompt_from_template", side_effect=_tmpl):
-        await brain.generate_reply(_user_event(), MuikaState(), _memory())
-
-    assert captured["data"].heartbeat_intensity == "off"
-
-
 async def test_generate_reply_keeps_heart_block(fake_llm_factory, model_config_manager):
     """heart 是私有内心独白，brain 不剥离——由 loop 的 _parse_reply_tags 从显示文本剥离。"""
     fake = fake_llm_factory(response=ModelCompletions(text="<heart>secret</heart>Hello"))

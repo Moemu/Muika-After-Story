@@ -13,13 +13,27 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from muika.config import get_name_from_config
+from muika.config import get_model_config_manager
 
 # revision identifiers, used by Alembic.
 revision: str = "27385c0c4fbb"
 down_revision: str | Sequence[str] | None = "78ae56f30d1a"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+
+def _default_model_name() -> str:
+    """解析默认模型名；CI 等无 models.yml 环境回退为空字符串。"""
+    try:
+        manager = get_model_config_manager()
+    except (FileNotFoundError, ValueError):
+        return ""
+    if manager.current_config is None:
+        return ""
+    try:
+        return manager.get_name_from_config(manager.current_config)
+    except ValueError:
+        return ""
 
 
 def upgrade() -> None:
@@ -31,7 +45,7 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("output_tokens", sa.Integer(), nullable=True))
         batch_op.add_column(sa.Column("cached_tokens", sa.Integer(), nullable=True))
 
-    default_model = get_name_from_config()
+    default_model = _default_model_name()
 
     op.execute(
         sa.text(

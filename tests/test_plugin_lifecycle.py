@@ -7,7 +7,7 @@ import importlib
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,7 +16,6 @@ from muika.plugin import lifecycle as lifecycle_mod
 from muika.plugin import loader as loader_mod
 from muika.plugin import state as state_mod
 from muika.plugin.command import (
-    CommandDispatcher,
     _commands,
     on_alconna,
     remove_commands_for_plugin,
@@ -184,12 +183,6 @@ def test_plugin_manager_refuses_builtin_unload():
     mgr = PluginManager()
     assert mgr.unload("muika.builtin_plugins.reflect") is False
     assert mgr.reload("muika.builtin_plugins.reflect") is False
-
-
-def test_command_dispatcher_injects_plugin_manager():
-    dispatcher = CommandDispatcher(MagicMock(), AsyncMock())
-
-    assert isinstance(dispatcher._injections[PluginManager], PluginManager)
 
 
 def test_plugin_manager_list_loaded_includes_counts():

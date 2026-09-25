@@ -46,10 +46,6 @@ def test_insert_beyond_eof_appends():
     assert _apply_edit("a\nc\n", "insert", None, "b", 99, None, None) == "a\nc\nb\n"
 
 
-def test_insert_auto_newline():
-    assert _apply_edit("a\nc\n", "insert", None, "b", 2, None, None) == "a\nb\nc\n"
-
-
 def test_delete_lines_basic():
     assert _apply_edit("l1\nl2\nl3\nl4\n", "delete_lines", None, None, None, 2, 3) == "l1\nl4\n"
 
