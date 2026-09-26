@@ -59,9 +59,10 @@ def is_protected_path(resolved: Path) -> bool:
     data = mas_config.data_dir.resolve()
     if resolved == data:
         return True
-    if resolved.parent == data and resolved.name not in {"tmp"}:
-        if resolved.is_file() or resolved.suffix:
-            return True
+    # data 根目录 deny-first：核心持久数据所在，普通文件工具不得直接写入任何
+    # 直接子路径；任务临时工作区 scratch_dir 是唯一例外。子目录内部不受此条约束。
+    if resolved.parent == data and resolved != mas_config.scratch_dir:
+        return True
 
     controls = [
         data / name

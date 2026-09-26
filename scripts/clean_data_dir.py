@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
 from datetime import datetime
 from pathlib import Path
 
-# 核心受保护资产，禁止移动
+# 白名单是编写时的运行时快照：核心后续若在 data 根新增合法子目录，
+# 必须同步补充此处，否则再次运行本脚本时会被归档。仅针对一次性历史清理。
 PROTECTED_NAMES = {
     "muika.db",
     "muika.db-shm",
     "muika.db-wal",
+    "muika.db-journal",
     "muika.dev.db",
     "user_agreement.json",
     "restart.json",
@@ -78,5 +81,15 @@ def clean_data_directory(data_dir: Path | None = None, dry_run: bool = False) ->
     return archived
 
 
+def main() -> int:
+    """运行命令行清理。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("data_dir", nargs="?", default="data", help="数据目录路径，默认 ./data")
+    parser.add_argument("--dry-run", action="store_true", help="仅报告将归档的条目，不执行移动")
+    args = parser.parse_args()
+    clean_data_directory(Path(args.data_dir).resolve(), dry_run=args.dry_run)
+    return 0
+
+
 if __name__ == "__main__":
-    clean_data_directory()
+    raise SystemExit(main())

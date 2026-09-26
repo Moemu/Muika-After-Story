@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import shutil
+import time
 import warnings
 from collections.abc import Sequence
 from dataclasses import replace
@@ -13,6 +15,7 @@ from time import perf_counter
 
 from pydantic import BaseModel, Field, ValidationError
 
+from muika.config import mas_config
 from muika.core.events import AgentTaskEvent, Event
 from muika.core.executor import Executor
 from muika.core.processes import get_process_manager
@@ -37,6 +40,19 @@ class RecoveryReport(BaseModel):
     resolved: bool
     evidence: str
     evidence_call_ids: list[str] = Field(default_factory=list)
+
+
+def _call_signature(call: ToolCall) -> str:
+    """以工具名和规整后的参数作为重试签名。
+
+    结果文本含 process_id 等每次不同的字段，不能作为"相同错误"的判据；
+    重复同一动作才计入熔断。
+    """
+    try:
+        arguments = json.dumps(json.loads(call.arguments), sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        arguments = call.arguments
+    return f"{call.name}:{arguments}"
 
 
 class AgentTasks:
@@ -87,8 +103,36 @@ class AgentTasks:
                     task.handoff = False
                     await self._save(task)
                 await self._notify(task)
+            self._cleanup_expired_scratch()
             self._initialized = True
             self._wake.set()
+
+    def _cleanup_expired_scratch(self) -> None:
+        """删除超过保留期的任务临时工作区，防止 scratch 目录无限累积。
+
+        仍在进行中的任务（非终态）的目录不按时间清理，避免长任务工作区被误删。
+        """
+        root = mas_config.scratch_dir / "tasks"
+        if mas_config.scratch_retention_days <= 0 or not root.is_dir():
+            return
+        deadline = time.time() - mas_config.scratch_retention_days * 86400
+        removed = 0
+        for entry in root.iterdir():
+            record = self.tasks.get(entry.name)
+            if record is not None and record.status not in {"completed", "cancelled", "failed", "blocked"}:
+                continue
+            try:
+                if entry.stat().st_mtime >= deadline:
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                removed += 1
+            except OSError as exc:
+                logger.debug(f"[AgentTask] Scratch cleanup skipped {entry.name}: {exc}")
+        if removed:
+            logger.info(f"[AgentTask] Cleaned {removed} expired scratch dir(s).")
 
     async def submit(self, instruction: str, original_request: str, *, intention_id: str | None = None) -> TaskRecord:
         """保存新任务，执行工作由后台循环负责。"""
@@ -142,7 +186,10 @@ class AgentTasks:
         lines = []
         for task in active + recent:
             details = task.report.summary if task.report else task.error or task.instruction[:500]
-            lines.append(f"Task {task.id} revision={task.revision} status={task.status}: {details}")
+            line = f"Task {task.id} revision={task.revision} status={task.status}: {details}"
+            if task.progress_summary:
+                line += f" (progress: {task.progress_summary})"
+            lines.append(line)
         return "\n".join(lines) or "No action tasks."
 
     async def run(self) -> None:
@@ -226,6 +273,7 @@ class AgentTasks:
         logger.info(f"[AgentTask] Task {task.id[:8]}: {task.status}")
         recovery_reads: set[str] = set()
         consecutive_errors: dict[str, int] = {}
+        guidances: list[str] = []
         while not self._closing:
             if await self._stop_at_boundary(task):
                 return
@@ -320,18 +368,13 @@ class AgentTasks:
                         continue
                     result = await self._record_call(task, call, message_index)
                     if result.is_error:
-                        err_key = f"{call.name}:{result.text[:120]}"
+                        err_key = _call_signature(call)
                         consecutive_errors[err_key] = consecutive_errors.get(err_key, 0) + 1
                         if consecutive_errors[err_key] >= 2:
-                            guidance = (
-                                "\n[System Guidance] This tool call failed with the same error twice. "
-                                "Stop repeating this exact action. Analyze the root cause, consider alternative tools "
+                            guidances.append(
+                                "[System Guidance] This exact tool call has failed twice in a row. "
+                                "Stop repeating it. Analyze the root cause, change the approach or parameters, "
                                 "or report status='blocked' if the goal cannot be achieved with available tools."
-                            )
-                            result = ToolResult(
-                                text=result.text + guidance,
-                                is_error=True,
-                                resources=result.resources,
                             )
                     else:
                         consecutive_errors.clear()
@@ -342,6 +385,12 @@ class AgentTasks:
                     task.messages.append(
                         observation_message(observations, multimodal=self.agent.model.config.multimodal)
                     )
+                    await self._save(task)
+                if guidances:
+                    # 引导必须以独立消息进入对话历史；工具消息已在 _record_call 中落盘，
+                    # 事后改写 ToolResult 无法触及模型。
+                    task.messages.append(ModelMessage(role="user", content="\n\n".join(dict.fromkeys(guidances))))
+                    guidances.clear()
                     await self._save(task)
                 continue
             if uncertain:
@@ -543,6 +592,8 @@ class AgentTasks:
             task.status = report.status
             task.progress_summary = ""
             if task.intention_id and self.state.memory is not None:
+                # 直调保证心愿状态即时联动：maintenance 模式会延迟 AgentTaskEvent 的投递，
+                # loop.py 的事件路径要等事件真正被处理时才补记。重复记录是幂等的。
                 await self.state.memory.record_task_result(task.id, report.status)
             await self._save(task)
             await self._notify(task)
