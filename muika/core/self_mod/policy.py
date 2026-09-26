@@ -57,7 +57,25 @@ def is_protected_path(resolved: Path) -> bool:
     同时拒绝"位于受保护路径内"与"包含受保护路径"（如项目根目录本身）两种情况。
     """
     data = mas_config.data_dir.resolve()
-    controls = [data / name for name in ("reviews", "core_proposals", "restart.json", "agent_tasks", "agent_processes")]
+    if resolved == data:
+        return True
+    # data 根目录 deny-first：核心持久数据所在，普通文件工具不得直接写入任何
+    # 直接子路径；任务临时工作区 scratch_dir 是唯一例外。子目录内部不受此条约束。
+    if resolved.parent == data and resolved != mas_config.scratch_dir:
+        return True
+
+    controls = [
+        data / name
+        for name in (
+            "reviews",
+            "core_proposals",
+            "restart.json",
+            "agent_tasks",
+            "agent_processes",
+            "muika.db",
+            "user_agreement.json",
+        )
+    ]
     controls.append(Path(mas_config.self_mod_backup_dir).resolve())
     if any(resolved == path or path in resolved.parents or resolved in path.parents for path in controls):
         return True

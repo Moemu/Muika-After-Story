@@ -2,13 +2,16 @@
 
 import asyncio
 import json
+import os
+import time
 from collections import deque
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from muika.core.agent.task_store import CallRecord
+from muika.config import mas_config
+from muika.core.agent.task_store import CallRecord, TaskRecord
 from muika.core.agent.tasks import AgentTasks
 from muika.core.events import AgentTaskEvent
 from muika.core.memory import MemoryManager, MemoryQuery, StateUpdate
@@ -507,3 +510,39 @@ async def test_same_intention_does_not_submit_duplicate_task_after_restart(facto
     duplicate = await restored.submit("Read", "Read", intention_id="poem")
     assert duplicate.id == task.id
     assert len(restored.tasks) == 1
+
+
+def test_describe_includes_progress_summary(factory):
+    manager = factory([])
+    task = TaskRecord(
+        original_request="Write the poem",
+        instruction="Write the poem",
+        status="running",
+        progress_summary="Executing: write_file",
+    )
+    manager.tasks[task.id] = task
+    assert "(progress: Executing: write_file)" in manager.describe()
+    task.progress_summary = ""
+    assert "(progress:" not in manager.describe()
+
+
+async def test_cleanup_expired_scratch_keeps_active_task_dir(factory):
+    manager = factory([])
+    tasks_root = mas_config.scratch_dir / "tasks"
+    expired_time = time.time() - (mas_config.scratch_retention_days + 1) * 86400
+    stale = tasks_root / "stale-task"
+    fresh = tasks_root / "fresh-task"
+    active = tasks_root / "active-task"
+    for directory in (stale, fresh, active):
+        directory.mkdir(parents=True)
+    os.utime(stale, (expired_time, expired_time))
+    os.utime(active, (expired_time, expired_time))
+    manager.tasks["active-task"] = TaskRecord(
+        id="active-task", original_request="Long job", instruction="Long job", status="running"
+    )
+
+    manager._cleanup_expired_scratch()
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert active.exists()

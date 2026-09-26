@@ -33,15 +33,36 @@ def validate_content(path: Path, content: str) -> None:
 
     suffix = path.suffix.lower()
     if suffix in (".jinja2", ".j2"):
-        validate_template(content)
+        validate_template(content, agent=_is_agent_template(path.name))
     elif suffix in (".yml", ".yaml"):
         _validate_yaml_syntax(content)
     elif suffix == ".py":
         validate_python(content)
 
 
-def validate_template(content: str) -> None:
-    """校验 Jinja2 人格模板：语法检查 + 用最小数据试渲染。"""
+_BUILTIN_AGENT_TEMPLATE = "muika.agent.jinja2"
+
+
+def _is_agent_template(name: str) -> bool:
+    """按文件名判断是否为 Agent 行动半身模板（运行时以空上下文渲染）。"""
+    normalized = name.lower()
+    if not normalized.endswith((".j2", ".jinja2")):
+        normalized += ".jinja2"
+    configured = mas_config.agent_template.lower()
+    if not configured.endswith((".j2", ".jinja2")):
+        configured += ".jinja2"
+    return normalized in {configured, _BUILTIN_AGENT_TEMPLATE}
+
+
+def validate_template(content: str, *, agent: bool = False) -> None:
+    """校验 Jinja2 模板：语法检查 + 按运行时语义试渲染。
+
+    persona 模板运行时携带提示词数据，必须用最小数据渲染通过；
+    agent 模板运行时以空上下文渲染，故仅做空渲染校验。
+
+    :param content: 待校验的模板全文
+    :param agent: 是否为 Agent 模板（决定试渲染的数据语义）
+    """
     env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
 
     try:
@@ -50,12 +71,14 @@ def validate_template(content: str) -> None:
         raise SelfModError(f"Jinja2 syntax error: {e}") from e
 
     try:
-        data = PromptTemplatesData(event_type="self_check", state=MuikaState(), is_chat=True)
-        env.from_string(content).render(data.model_dump())
-    except SelfModError:
-        raise
+        if agent:
+            env.from_string(content).render()
+        else:
+            data = PromptTemplatesData(event_type="self_check", state=MuikaState(), is_chat=True)
+            env.from_string(content).render(data.model_dump())
     except Exception as e:
-        raise SelfModError(f"Template renders but fails with prompt data: {e}") from e
+        scope = "empty context" if agent else "prompt data"
+        raise SelfModError(f"Template renders but fails with {scope}: {e}") from e
 
 
 def _validate_yaml_syntax(content: str) -> dict:

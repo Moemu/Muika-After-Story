@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import os
+import traceback
 
 from muika.plugin.exceptions import PluginLoadError
 from muika.plugin.loader import load_plugin, unload_plugin
@@ -25,7 +26,10 @@ def probe(module_name: str) -> tuple[bool, str]:
     try:
         load_plugin(module_name)
     except PluginLoadError as exc:
-        return False, str(exc)
+        tb = f"\n{traceback.format_exc()}" if exc.__cause__ else ""
+        return False, f"{exc}{tb}"
+    except Exception as exc:
+        return False, f"Unexpected error during plugin load: {exc}\n{traceback.format_exc()}"
     if not unload_plugin(module_name):
         return False, "Plugin unload failed"
     return True, "Plugin load and unload succeeded"

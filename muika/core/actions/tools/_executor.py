@@ -62,7 +62,13 @@ class ExecutionParams(BaseModel):
     yield_time: float = Field(
         _DEFAULT_YIELD_TIME, ge=0, le=30, description="Seconds to wait for output before returning a process ID."
     )
-    cwd: str | None = Field(None, description="Working directory. Defaults to the current Muika working directory.")
+    cwd: str | None = Field(
+        None,
+        description=(
+            "Working directory. Inside an action task this defaults to the task's scratchpad "
+            "(data/tmp/tasks/<task_id>); otherwise Muika's working directory."
+        ),
+    )
 
 
 class ExecutePythonParams(ExecutionParams):
@@ -74,7 +80,14 @@ class ExecutePythonParams(ExecutionParams):
 async def _start(command: list[str], timeout: float, yield_time: float, cwd: str | None) -> ToolResult:
     manager = get_process_manager()
     try:
-        directory = str(Path(cwd).resolve() if cwd else Path.cwd())
+        owner = _owner()
+        scratch_cwd = not cwd and owner is not None
+        if cwd:
+            directory = str(Path(cwd).resolve())
+        elif owner:
+            directory = str(mas_config.scratch_dir / "tasks" / owner)
+        else:
+            directory = str(Path.cwd())
         reviewer = get_code_reviewer()
         review = await reviewer.authorize(
             "execution",
@@ -85,6 +98,9 @@ async def _start(command: list[str], timeout: float, yield_time: float, cwd: str
             },
         )
         reviewer.consume(review)
+        if scratch_cwd:
+            # 审查通过后再落盘建目录，被拒绝的执行不留下空沙箱
+            Path(directory).mkdir(parents=True, exist_ok=True)
         process_id = await manager.start(
             command,
             env=_sanitize_env(),

@@ -107,6 +107,9 @@ class MASConfig(BaseSettings):
     )
     """内心思考强度"""
 
+    scratch_retention_days: int = 3
+    """任务临时工作区文件保留天数，启动时清理超期目录。"""
+
     @model_validator(mode="before")
     @classmethod
     def migrate_action_permission(cls, values):
@@ -130,6 +133,11 @@ class MASConfig(BaseSettings):
                         "read_only（只读）、write（可写）或 self_modify（可自我修改）。"
                     )
         return values
+
+    @property
+    def scratch_dir(self) -> Path:
+        """返回专用的 Agent 临时工作目录。"""
+        return self.data_dir.resolve() / "tmp"
 
     @property
     def can_write(self) -> bool:
