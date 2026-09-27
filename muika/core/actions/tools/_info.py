@@ -5,6 +5,7 @@ from urllib.parse import quote, urlparse
 from aiohttp import ClientSession, ClientTimeout
 from pydantic import BaseModel, Field
 
+from muika.config import mas_config
 from muika.core.state import MuikaState
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
@@ -95,7 +96,7 @@ async def search_wikipedia(query: str, state: MuikaState, language: str = "zh") 
     logger.debug(f"[SearchWikipedia] OpenSearch: {search_url}")
     try:
         async with ClientSession() as session:
-            async with session.get(search_url, timeout=ClientTimeout(total=10)) as resp:
+            async with session.get(search_url, timeout=ClientTimeout(total=10), proxy=mas_config.proxy) as resp:
                 result = await resp.json(content_type=None)
     except Exception as e:
         logger.error(f"[SearchWikipedia] Search failed: {e}")
@@ -111,7 +112,7 @@ async def search_wikipedia(query: str, state: MuikaState, language: str = "zh") 
     logger.debug(f"[SearchWikipedia] Summary: {summary_url}")
     try:
         async with ClientSession() as session:
-            async with session.get(summary_url, timeout=ClientTimeout(total=10)) as resp:
+            async with session.get(summary_url, timeout=ClientTimeout(total=10), proxy=mas_config.proxy) as resp:
                 data = await resp.json(content_type=None)
     except Exception as e:
         logger.error(f"[SearchWikipedia] Summary fetch failed: {e}")

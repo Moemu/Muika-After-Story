@@ -65,8 +65,13 @@ class MASConfig(BaseSettings):
 
     input_timeout: int = 0
     """输入等待时间"""
-    telegram_proxy: Optional[str] = None
-    """telegram代理，这个配置项用于获取图片时使用"""
+    proxy: Optional[str] = None
+    """通用出站代理地址（如 ``http://127.0.0.1:7890``）。Core 的联网工具与 Bot 文件下载会经过它；
+    LLM 供应商 SDK 流量不在此列，继续遵循标准 HTTP_PROXY/HTTPS_PROXY 环境变量。"""
+    web_search_provider: Optional[Literal["tavily", "perplexity"]] = None
+    """联网搜索后端：``tavily`` 或 ``perplexity``。留空时 web_search 工具不可用。"""
+    web_search_api_key: str = ""
+    """联网搜索后端的 API 密钥。"""
     client_name: str = ""
     """适配器唯一名称。用于多适配器场景下标识当前 Bot 实例的身份。
     例如 ``"qq-desktop"``, ``"qq-phone"``。留空时自动分配。"""
@@ -132,6 +137,23 @@ class MASConfig(BaseSettings):
                         "[Config] 旧权限开关已移除，暂以只读运行。请设置 ACTION_PERMISSION："
                         "read_only（只读）、write（可写）或 self_modify（可自我修改）。"
                     )
+        return values
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_telegram_proxy(cls, values):
+        """旧 telegram_proxy 配置迁移到通用出站代理 proxy，并提示更名。"""
+        legacy = values.get("telegram_proxy") if isinstance(values, dict) else None
+        if legacy is None:
+            legacy = os.environ.get("TELEGRAM_PROXY")
+        if not legacy:
+            return values
+
+        logger.warning("[Config] telegram_proxy 已更名为通用出站代理 proxy，请更新 .env 配置。")
+        if isinstance(values, dict):
+            values.pop("telegram_proxy", None)
+            if not values.get("proxy"):
+                values["proxy"] = legacy
         return values
 
     @property

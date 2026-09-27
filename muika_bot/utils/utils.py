@@ -88,6 +88,6 @@ async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optiona
 
         url = f"https://api.telegram.org/file/bot{bot.bot_config.token}/{file.file_path}"  # type: ignore
         # filename = file.file_path.split("/")[1]
-        return await download_file(url, proxy=mas_config.telegram_proxy)
+        return await download_file(url, proxy=mas_config.proxy)
 
     return None

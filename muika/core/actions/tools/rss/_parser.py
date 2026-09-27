@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 from aiohttp import ClientSession
 
+from muika.config import mas_config
+
 
 @dataclass
 class ParsedResult:
@@ -38,7 +40,7 @@ async def fetch_web_content(link: str) -> bytes:
     直接从链接获取网页内容的原始字节数据。
     """
     async with ClientSession() as session:
-        async with session.get(link) as response:
+        async with session.get(link, proxy=mas_config.proxy) as response:
             return await response.read()
 
 
