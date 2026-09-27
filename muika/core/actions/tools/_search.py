@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.state import MuikaState
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -149,27 +150,27 @@ async def web_search(query: str, state: MuikaState, time_range: str | None = Non
     """联网搜索并返回结果列表；未配置后端时提示不可用。"""
     q = query.strip()
     if not q:
-        return "Search query is empty."
+        return ToolError("Search query is empty.")
 
     provider = (mas_config.web_search_provider or "").strip().lower()
     if not provider or not mas_config.web_search_api_key:
-        return (
+        return ToolError(
             "Web search is not configured. Ask the player to set WEB_SEARCH_PROVIDER "
             "(e.g. 'tavily' or 'perplexity') and WEB_SEARCH_API_KEY. Report that web search is unavailable."
         )
     if provider not in SEARCH_BACKENDS:
-        return (
+        return ToolError(
             f"Unknown web search provider: {provider!r}. " f"Available providers: {', '.join(sorted(SEARCH_BACKENDS))}."
         )
     if time_range is not None and time_range not in _ALLOWED_TIME_RANGES:
-        return f"Invalid time_range {time_range!r}: allowed values are 'day', 'week', 'month' and 'year'."
+        return ToolError(f"Invalid time_range {time_range!r}: allowed values are 'day', 'week', 'month' and 'year'.")
 
     logger.debug(f"[WebSearch] provider={provider} query={q!r} time_range={time_range!r}")
     try:
         results = await SEARCH_BACKENDS[provider](q, time_range)
     except Exception as e:
         logger.error(f"[WebSearch] Search failed: {e}")
-        return f"Web search failed: {e}"
+        return ToolError(f"Web search failed: {e}")
 
     if not results:
         return f'No search results for: "{q}"'

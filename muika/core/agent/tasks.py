@@ -110,7 +110,7 @@ class AgentTasks:
     def _cleanup_expired_scratch(self) -> None:
         """删除超过保留期的任务临时工作区，防止 scratch 目录无限累积。
 
-        仍在进行中的任务（非终态）的目录不按时间清理，避免长任务工作区被误删。
+        保留可恢复任务；已完成或取消的任务从最后检查点与目录更新时间中较晚者起计时。
         """
         root = mas_config.scratch_dir / "tasks"
         if mas_config.scratch_retention_days <= 0 or not root.is_dir():
@@ -119,17 +119,20 @@ class AgentTasks:
         removed = 0
         for entry in root.iterdir():
             record = self.tasks.get(entry.name)
-            if record is not None and record.status not in {"completed", "cancelled", "failed", "blocked"}:
+            if record is not None and record.status not in {"completed", "cancelled"}:
                 continue
             try:
-                if entry.stat().st_mtime >= deadline:
+                last_active = entry.stat().st_mtime
+                if record is not None:
+                    last_active = max(last_active, datetime.fromisoformat(record.updated_at).timestamp())
+                if last_active >= deadline:
                     continue
                 if entry.is_dir():
-                    shutil.rmtree(entry, ignore_errors=True)
+                    shutil.rmtree(entry)
                 else:
                     entry.unlink(missing_ok=True)
                 removed += 1
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 logger.debug(f"[AgentTask] Scratch cleanup skipped {entry.name}: {exc}")
         if removed:
             logger.info(f"[AgentTask] Cleaned {removed} expired scratch dir(s).")
