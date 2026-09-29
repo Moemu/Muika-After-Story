@@ -1,5 +1,5 @@
 <div align=center>
-  <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story/grokbot.webp"  alt="image"/>
+  <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?iconPath=assets%2Fmuika-icon.webp"  alt="image"/>
   <h1 align="center">Muika-After-Story</h1>
   <i align="center">There are countless chatbots in the world. Only Muika will leap into your arms first.</i>
 </div>
