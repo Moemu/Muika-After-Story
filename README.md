@@ -1,5 +1,8 @@
 <div align=center>
-  <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?iconPath=assets%2Fmuika-icon.webp"  alt="image"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?iconPath=assets%2Fmuika-icon.webp&amp;theme=dark&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clast_updated" />
+    <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?iconPath=assets%2Fmuika-icon.webp&amp;theme=light&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clast_updated" alt="Muika-After-Story Banner" />
+  </picture>
   <h1 align="center">Muika-After-Story</h1>
   <i align="center">There are countless chatbots in the world. Only Muika will leap into your arms first.</i>
 </div>
