@@ -72,9 +72,20 @@ from .bundle import CognitiveBundle
 from .clock import local_time, utc_time
 from .config import PluginBinding
 from .event_protocol import RuntimeEvent
-from .execution_protocol import ExecutionSpec, InspectExecution, SubmitExecution
+from .execution_protocol import (
+    ExecutionSpec,
+    InspectExecution,
+    SubmitExecution,
+    ToolCapability,
+)
 from .executor_node import ExecutorWorker, capabilities
-from .models import ClaimedMessage, CoreLease, IncomingMessage, OutgoingMessage
+from .models import (
+    ClaimedMessage,
+    CoreLease,
+    IncomingMessage,
+    OutgoingMessage,
+    ResourceReference,
+)
 from .plugins import load_node_plugins, unload_node_plugins
 from .remote_memory import RemoteMemoryManager
 from .remote_processes import RemoteTaskProcesses
@@ -700,47 +711,8 @@ class CoreNode:
             if not any(node.id == target and node.role == "bot" for node in status.nodes):
                 raise ValueError("Explicit reply target is not a paired Bot.")
             route = ClientRoute(client_id=target, conversation_id="master")
-        replies = list(scope.replies)
-        if content is not None and (content or references):
-            messages = Executor._split_message(content) if content else [""]
-            for index, text in enumerate(messages):
-                replies.append(
-                    OutgoingMessage(
-                        id=f"{scope.record.turn_id}:reply:{index}",
-                        client_id=route.client_id,
-                        conversation_id=route.conversation_id,
-                        text=text,
-                        resources=references if index == len(messages) - 1 else [],
-                    )
-                )
-        persistent = self.memory().persistent.model_copy(deep=True)
-        for update in updates:
-            MemoryManager._apply_state(persistent, update, datetime.now())
-        tasks = []
-        for index, intent in enumerate(intents):
-            intention = next((item for item in persistent.intentions if item.id == intent.intention_id), None)
-            if intent.intention_id and (intention is None or intention.task_id or intention.status != "open"):
-                logger.warning("[Node] Intention already has an action or is unavailable.")
-                continue
-            tasks.append(
-                TaskRecord(
-                    id=uuid5(NAMESPACE_URL, f"{scope.record.turn_id}:task:{index}").hex,
-                    instruction=intent.instruction,
-                    original_request=intent.original_request,
-                    intention_id=intent.intention_id,
-                    execution_node_id=self.snapshot.selected_executor,
-                    reply_client_id=scope.claim.message.client_id,
-                    reply_conversation_id=scope.claim.message.conversation_id,
-                    resources=[
-                        MediaReference(
-                            type=reference.kind,
-                            path=self.memory().vault.materialize(reference).path,
-                            mimetype=reference.media_type,
-                        )
-                        for reference in scope.claim.message.resources
-                    ],
-                )
-            )
+        replies = self.prepare_replies(scope, content, references, route)
+        tasks = self.prepare_tasks(scope, updates, intents)
         if self.muika is None:
             raise RuntimeError("Core is not ready to commit a reply.")
         task_files = [
@@ -794,6 +766,59 @@ class CoreNode:
                 self.muika.state.boredom = 0.0
             self.muika.commit_controls(pending)
         scope.committed = True
+        return tasks
+
+    def prepare_replies(
+        self, scope: TurnScope, content: str | None, references: list[ResourceReference], route: ClientRoute
+    ) -> list[OutgoingMessage]:
+        """为同一回合准备稳定的回复身份和目标会话。"""
+        replies = list(scope.replies)
+        if content is not None and (content or references):
+            messages = Executor._split_message(content) if content else [""]
+            for index, text in enumerate(messages):
+                replies.append(
+                    OutgoingMessage(
+                        id=f"{scope.record.turn_id}:reply:{index}",
+                        client_id=route.client_id,
+                        conversation_id=route.conversation_id,
+                        text=text,
+                        resources=references if index == len(messages) - 1 else [],
+                    )
+                )
+        return replies
+
+    def prepare_tasks(
+        self, scope: TurnScope, updates: list[StateUpdate], intents: list[TaskIntent]
+    ) -> list[TaskRecord]:
+        """基于候选人格状态准备行动任务，不提前改变活动内存。"""
+        persistent = self.memory().persistent.model_copy(deep=True)
+        for update in updates:
+            MemoryManager._apply_state(persistent, update, datetime.now())
+        tasks = []
+        for index, intent in enumerate(intents):
+            intention = next((item for item in persistent.intentions if item.id == intent.intention_id), None)
+            if intent.intention_id and (intention is None or intention.task_id or intention.status != "open"):
+                logger.warning("[Node] Intention already has an action or is unavailable.")
+                continue
+            tasks.append(
+                TaskRecord(
+                    id=uuid5(NAMESPACE_URL, f"{scope.record.turn_id}:task:{index}").hex,
+                    instruction=intent.instruction,
+                    original_request=intent.original_request,
+                    intention_id=intent.intention_id,
+                    execution_node_id=self.snapshot.selected_executor,
+                    reply_client_id=scope.claim.message.client_id,
+                    reply_conversation_id=scope.claim.message.conversation_id,
+                    resources=[
+                        MediaReference(
+                            type=reference.kind,
+                            path=self.memory().vault.materialize(reference).path,
+                            mimetype=reference.media_type,
+                        )
+                        for reference in scope.claim.message.resources
+                    ],
+                )
+            )
         return tasks
 
     async def complete_empty(self, claim: ClaimedMessage) -> None:
@@ -891,10 +916,8 @@ class CoreNode:
         """使用持久调用身份选择原设备，结果未知时不发起第二次动作。"""
         context = get_dependencies().get(ToolContext)
         context = context if isinstance(context, ToolContext) else None
-        scope = _turn_scope.get()
         task_id = context.task_id if context else None
         caller = get_function_calls().get(call.name)
-        source = f"task:{task_id}" if task_id else scope.record.turn_id if scope else f"background:{call.id}"
         task = self.muika.agent_tasks.tasks.get(task_id) if self.muika is not None and task_id else None
         node_id = (
             self.node_id
@@ -916,7 +939,51 @@ class CoreNode:
                 is_error=True,
                 outcome="not_executed",
             )
-        inputs = {}
+        try:
+            spec = await self.prepare_execution(call, node_id, capability, context, task)
+        except ValueError as exc:
+            return ToolResult(text=f"Invalid tool arguments: {exc}", is_error=True, outcome="not_executed")
+        return await self.run_execution(spec, capability, context)
+
+    async def prepare_execution(
+        self,
+        call: ToolCall,
+        node_id: str,
+        capability: ToolCapability,
+        context: ToolContext | None,
+        task: TaskRecord | None,
+    ) -> ExecutionSpec:
+        """准备动作的稳定身份、原任务归属和附件副本。"""
+        scope = _turn_scope.get()
+        task_id = context.task_id if context else None
+        source = f"task:{task_id}" if task_id else scope.record.turn_id if scope else f"background:{call.id}"
+        call, inputs = self.prepare_tool_arguments(call, task)
+        for reference in inputs:
+            await self.connection().upload_resource(self.memory().vault.materialize(reference), self.memory().vault)
+        id = (
+            f"call:{context.execution_id}"
+            if context and context.execution_id
+            else uuid5(
+                NAMESPACE_URL,
+                f"{source}:{call.name}:{call.arguments}" if capability.retry != "read_only" else f"{source}:{call.id}",
+            ).hex
+        )
+        return ExecutionSpec(
+            id=id,
+            node_id=node_id,
+            source_id=source,
+            call=call,
+            task_id=task_id,
+            file_versions=dict(context.file_versions) if context else {},
+            review_context=context.review_context if context else "",
+            inputs=inputs,
+        )
+
+    def prepare_tool_arguments(
+        self, call: ToolCall, task: TaskRecord | None
+    ) -> tuple[ToolCall, list[ResourceReference]]:
+        """只把已有附件路径转换为不可变资源引用。"""
+        inputs: dict[str, ResourceReference] = {}
         known_paths = {media.path for media in task_media(task)} if task is not None else set()
 
         def reference_argument(value: str) -> str:
@@ -931,32 +998,15 @@ class CoreNode:
                 return f"resource:{reference.sha256}"
             return value
 
-        try:
-            call = call.model_copy(
-                update={"arguments": json.dumps(map_resource_values(json.loads(call.arguments), reference_argument))}
-            )
-        except ValueError as exc:
-            return ToolResult(text=f"Invalid tool arguments: {exc}", is_error=True, outcome="not_executed")
-        for reference in inputs.values():
-            await self.connection().upload_resource(self.memory().vault.materialize(reference), self.memory().vault)
-        id = (
-            f"call:{context.execution_id}"
-            if context and context.execution_id
-            else uuid5(
-                NAMESPACE_URL,
-                f"{source}:{call.name}:{call.arguments}" if capability.retry != "read_only" else f"{source}:{call.id}",
-            ).hex
+        call = call.model_copy(
+            update={"arguments": json.dumps(map_resource_values(json.loads(call.arguments), reference_argument))}
         )
-        spec = ExecutionSpec(
-            id=id,
-            node_id=node_id,
-            source_id=source,
-            call=call,
-            task_id=task_id,
-            file_versions=dict(context.file_versions) if context else {},
-            review_context=context.review_context if context else "",
-            inputs=list(inputs.values()),
-        )
+        return call, list(inputs.values())
+
+    async def run_execution(
+        self, spec: ExecutionSpec, capability: ToolCapability, context: ToolContext | None
+    ) -> ToolResult:
+        """提交唯一动作身份，等待原设备结果，并恢复附件与审查上下文。"""
         submitted = False
         try:
             response = await self.connection().request(
@@ -973,7 +1023,7 @@ class CoreNode:
             while record.status in {"pending", "running"}:
                 await asyncio.sleep(0.1)
                 response = await self.connection().request(
-                    ExecutionRequest(epoch=self.epoch(), body=InspectExecution(id=id))
+                    ExecutionRequest(epoch=self.epoch(), body=InspectExecution(id=spec.id))
                 )
                 if response.execution is None:
                     raise ConnectionError("State service omitted its execution result.")

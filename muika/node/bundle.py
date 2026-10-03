@@ -65,7 +65,7 @@ class CognitiveBundle(BaseModel):
                     raise ValueError(f"Selected cognitive template is missing: {name}")
                 text = builtin.read_text(encoding="utf-8")
             try:
-                Environment().parse(text)
+                Environment(autoescape=True).parse(text)
             except TemplateError as exc:
                 raise ValueError(f"Cognitive template syntax is invalid: {name}") from exc
 

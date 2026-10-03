@@ -198,3 +198,11 @@ async def test_kill_pc_and_restart_state_with_real_nodes(tmp_path, recorder):
         await asyncio.gather(*(job.wait() for job in jobs))
         for log in logs:
             log.close()
+        artifact = recorder.write()
+        for log, job in zip(logs, jobs):
+            path = Path(log.name)
+            content = path.read_text(encoding="utf-8", errors="replace")
+            recorder.record("process_exit", process=path.parent.name, returncode=job.returncode)
+            if artifact is not None:
+                (artifact.parent / f"{path.parent.name}-{path.name}").write_text(content, encoding="utf-8")
+            print(f"{path.parent.name} process {job.returncode}:\n" + "\n".join(content.splitlines()[-40:]))

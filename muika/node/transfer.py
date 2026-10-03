@@ -118,42 +118,55 @@ async def export_snapshot(source: Path, destination: Path, workspace: Path) -> d
         lock.close()
 
 
+def read_manifest(archive: zipfile.ZipFile) -> dict:
+    """校验快照版本、时区及文件清单，拒绝缺失和重复条目。"""
+    if "manifest.json" not in archive.namelist():
+        raise ValueError("Export has no manifest.")
+    manifest = json.loads(archive.read("manifest.json"))
+    if not isinstance(manifest, dict) or manifest.get("data_revision") != DATA_REVISION:
+        raise ValueError("Export data version is incompatible.")
+    try:
+        if not isinstance(manifest.get("timezone"), str):
+            raise ValueError("Export has no relationship timezone.")
+        ZoneInfo(manifest["timezone"])
+    except ZoneInfoNotFoundError as error:
+        raise ValueError("Export relationship timezone is invalid.") from error
+    names = manifest.get("files")
+    if not isinstance(names, dict) or "muika.db" not in names or not isinstance(manifest.get("tables"), dict):
+        raise ValueError("Export has no database or verification inventory.")
+    if set(names) != set(archive.namelist()) - {"manifest.json"} or len(archive.namelist()) != len(names) + 1:
+        raise ValueError("Export contains missing or duplicate files.")
+    return manifest
+
+
+def verify_archive_files(archive: zipfile.ZipFile, target: Path, manifest: dict) -> None:
+    """逐文件核对摘要和目的路径，禁止覆盖或越过部署目录。"""
+    names = manifest["files"]
+    for name, digest in names.items():
+        if not isinstance(name, str) or not isinstance(digest, str):
+            raise ValueError("Export contains an invalid file entry.")
+        path = Path(name)
+        if not path.parts or name.endswith("/") or path.is_absolute() or ".." in path.parts or "\\" in name:
+            raise ValueError("Export contains an invalid file path.")
+        if name != "muika.db" and path.parts[0] not in {"agent_tasks", "context_sources", "memory_resources"}:
+            raise ValueError("Export contains an unsupported file.")
+        if not (target.parent / path).resolve().is_relative_to(target.parent):
+            raise ValueError("Import destination contains a path outside its data directory.")
+        if (target.parent / path).exists():
+            raise ValueError("Import would overwrite existing deployment data.")
+        if checksum(archive.read(name)) != digest:
+            raise ValueError("Export file checksum does not match.")
+
+
 def import_snapshot(source: Path, profile: ServerProfile) -> dict:
     """向空部署导入已核对的快照，原单机库仍保留用于回滚。"""
     target = profile.database.resolve()
     if target.exists():
         raise ValueError("Import requires a new deployment without a database.")
     with zipfile.ZipFile(source) as archive:
-        if "manifest.json" not in archive.namelist():
-            raise ValueError("Export has no manifest.")
-        manifest = json.loads(archive.read("manifest.json"))
-        if not isinstance(manifest, dict) or manifest.get("data_revision") != DATA_REVISION:
-            raise ValueError("Export data version is incompatible.")
-        try:
-            if not isinstance(manifest.get("timezone"), str):
-                raise ValueError("Export has no relationship timezone.")
-            ZoneInfo(manifest["timezone"])
-        except ZoneInfoNotFoundError as error:
-            raise ValueError("Export relationship timezone is invalid.") from error
-        names = manifest.get("files")
-        if not isinstance(names, dict) or "muika.db" not in names or not isinstance(manifest.get("tables"), dict):
-            raise ValueError("Export has no database or verification inventory.")
-        if set(names) != set(archive.namelist()) - {"manifest.json"} or len(archive.namelist()) != len(names) + 1:
-            raise ValueError("Export contains missing or duplicate files.")
-        for name, digest in names.items():
-            if not isinstance(name, str) or not isinstance(digest, str):
-                raise ValueError("Export contains an invalid file entry.")
-            path = Path(name)
-            if not path.parts or name.endswith("/") or path.is_absolute() or ".." in path.parts or "\\" in name:
-                raise ValueError("Export contains an invalid file path.")
-            if name != "muika.db" and path.parts[0] not in {"agent_tasks", "context_sources", "memory_resources"}:
-                raise ValueError("Export contains an unsupported file.")
-            if not (target.parent / path).resolve().is_relative_to(target.parent):
-                raise ValueError("Import destination contains a path outside its data directory.")
-            if (target.parent / path).exists():
-                raise ValueError("Import would overwrite existing deployment data.")
-            if checksum(archive.read(name)) != digest:
-                raise ValueError("Export file checksum does not match.")
+        manifest = read_manifest(archive)
+        verify_archive_files(archive, target, manifest)
+        names = manifest["files"]
         with tempfile.TemporaryDirectory(prefix="mas-import-", dir=profile.directory.parent) as temporary:
             staging = Path(temporary)
             for name in [item for item in names if item != "muika.db"] + ["muika.db"]:

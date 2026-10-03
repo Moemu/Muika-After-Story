@@ -30,6 +30,15 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+      - name: Save E2E traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-traces
+          path: tests/e2e/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Generate coverage badge
         run: |
           uv run coverage xml

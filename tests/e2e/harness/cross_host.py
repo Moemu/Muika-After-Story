@@ -35,6 +35,11 @@ from muika.node.config import ServerProfile, write_private_json  # noqa: E402
 from muika.node.core_node import CoreNode  # noqa: E402
 from muika.node.models import IncomingMessage  # noqa: E402
 
+if sys.platform == "win32":
+    SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW
+else:
+    SUBPROCESS_FLAGS = 0
+
 
 async def docker(*args: str) -> str:
     process = await asyncio.create_subprocess_exec(
@@ -42,7 +47,7 @@ async def docker(*args: str) -> str:
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        creationflags=SUBPROCESS_FLAGS,
     )
     output, _ = await process.communicate()
     if process.returncode:
@@ -97,7 +102,7 @@ async def main() -> None:
             directory=Path("/state"),
             database=Path("/state/state.db"),
             public_address="wss://localhost:8766/node/ws",
-            host="0.0.0.0",
+            host="0.0.0.0",  # nosec B104: 独立测试容器，宿主机只映射到回环地址，连接使用 TLS。
             port=8766,
             certificate=Path("/state/cert.pem"),
             private_key=Path("/state/key.pem"),

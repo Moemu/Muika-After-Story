@@ -60,27 +60,7 @@ class ProbeStore:
         if operation in {"renew", "claim", "commit"}:
             if role != "core" or owner != client or epoch != payload["epoch"] or now >= deadline:
                 raise ValueError("stale_owner")
-            if operation == "renew":
-                db.execute("UPDATE authority SET deadline=? WHERE id=1", (now + 1.0,))
-                return {"epoch": epoch}
-            if operation == "claim":
-                row = db.execute(
-                    "SELECT id, client, body FROM inbox WHERE processed=0 ORDER BY rowid LIMIT 1"
-                ).fetchone()
-                if row is None:
-                    return {"input": None}
-                db.execute("UPDATE inbox SET epoch=? WHERE id=?", (epoch, row[0]))
-                return {"input": {"id": row[0], "client": row[1], "body": row[2]}}
-            row = db.execute("SELECT client, epoch, processed FROM inbox WHERE id=?", (payload["id"],)).fetchone()
-            if row is None or row[1] != epoch:
-                raise ValueError("not_claimed")
-            if not row[2]:
-                db.execute(
-                    "INSERT INTO outbox(id, client, body) VALUES (?, ?, ?)", (payload["id"], row[0], payload["reply"])
-                )
-                db.execute("INSERT OR REPLACE INTO checkpoint VALUES (1, ?)", (payload["checkpoint"],))
-                db.execute("UPDATE inbox SET processed=1 WHERE id=?", (payload["id"],))
-            return {"processed": payload["id"]}
+            return self._apply_core(client, payload, epoch, now)
         if role != "bot":
             raise ValueError("forbidden")
         if operation == "receive":
@@ -105,6 +85,30 @@ class ProbeStore:
             db.execute("UPDATE outbox SET delivered=1 WHERE id=? AND client=?", (payload["id"], client))
             return {"acknowledged": payload["id"]}
         raise ValueError("unsupported_operation")
+
+    def _apply_core(self, client: str, payload: dict, epoch: int, now: float) -> dict:
+        """在已验证任期的事务中续期、认领或提交消息。"""
+        db = self.connection
+        operation = payload["op"]
+        if operation == "renew":
+            db.execute("UPDATE authority SET deadline=? WHERE id=1", (now + 1.0,))
+            return {"epoch": epoch}
+        if operation == "claim":
+            row = db.execute("SELECT id, client, body FROM inbox WHERE processed=0 ORDER BY rowid LIMIT 1").fetchone()
+            if row is None:
+                return {"input": None}
+            db.execute("UPDATE inbox SET epoch=? WHERE id=?", (epoch, row[0]))
+            return {"input": {"id": row[0], "client": row[1], "body": row[2]}}
+        row = db.execute("SELECT client, epoch, processed FROM inbox WHERE id=?", (payload["id"],)).fetchone()
+        if row is None or row[1] != epoch:
+            raise ValueError("not_claimed")
+        if not row[2]:
+            db.execute(
+                "INSERT INTO outbox(id, client, body) VALUES (?, ?, ?)", (payload["id"], row[0], payload["reply"])
+            )
+            db.execute("INSERT OR REPLACE INTO checkpoint VALUES (1, ?)", (payload["checkpoint"],))
+            db.execute("UPDATE inbox SET processed=1 WHERE id=?", (payload["id"],))
+        return {"processed": payload["id"]}
 
 
 async def serve(directory: Path, ready: Path, token: str) -> None:

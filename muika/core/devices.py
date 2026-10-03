@@ -17,7 +17,7 @@ class ExecutionEnvironment(BaseModel):
     os: str = "unavailable"
     working_directory: str = ""
     python: str = ""
-    shell: str = ""
+    shell_name: str = ""
     action_permission: Literal["read_only", "write", "self_modify"] = "read_only"
     code_review_mode: Literal["auto", "manual"] = "auto"
     allowed_file_roots: list[str] = Field(default_factory=list)
@@ -28,7 +28,7 @@ class ExecutionEnvironment(BaseModel):
             os=platform.system(),
             working_directory=str(Path.cwd()),
             python=sys.executable,
-            shell="powershell" if sys.platform == "win32" else "bash",
+            shell_name="powershell" if sys.platform == "win32" else "bash",
             action_permission=mas_config.action_permission,
             code_review_mode=mas_config.code_review_mode,
             allowed_file_roots=list(mas_config.fs_allowed_paths),
@@ -39,7 +39,7 @@ class ExecutionEnvironment(BaseModel):
             return "The task's original execution device is unavailable. Inspect devices before planning more actions."
         return (
             f"Execution environment: OS={self.os}; cwd={self.working_directory}; Python={self.python}. "
-            f"Default shell={self.shell}. Use this device's syntax. A running process is not a completed check. "
+            f"Default shell={self.shell_name}. Use this device's syntax. A running process is not a completed check. "
             f"Action permission={self.action_permission}; code review={self.code_review_mode}; "
             f"allowed file roots={self.allowed_file_roots}."
         )

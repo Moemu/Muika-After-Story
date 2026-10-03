@@ -313,73 +313,24 @@ class StateServer:
         await self.journal.observe(RuntimeEvent(type=event_type, timestamp=datetime.now(), report=report))
 
     async def dispatch(self, node: NodeCredential, request: NodeRequest) -> NodeResponse:
-        """按连接身份授权，避免客户端在参数中冒充其他节点。"""
+        """按连接身份授权，再交给对应角色的业务入口。"""
         response = NodeResponse(request_id=request.request_id)
         if not any(item == node for item in self.credentials):
             raise ValueError("Node credential has been revoked. Pair this device again.")
         self.last_seen[node.id] = time.monotonic()
         if isinstance(request, Status):
-            response.lease = await self.journal.current_lease()
-            response.nodes = [
-                NodeStatus(
-                    id=credential.id,
-                    role=credential.role,
-                    connected=credential.id in self.connections,
-                    compatible=self.compatible(credential.id),
-                    tools=(
-                        [tool.name for tool in self.registrations[credential.id].tools]
-                        if credential.id in self.registrations
-                        else []
-                    ),
-                    capabilities=self.registrations[credential.id].tools if credential.id in self.registrations else [],
-                    environment=(
-                        self.registrations[credential.id].environment
-                        if node.role == "core" and credential.id in self.registrations
-                        else None
-                    ),
-                )
-                for credential in self.credentials
-            ]
-            return response
-        if isinstance(request, LoadBundle):
+            await self.read_status(node, response)
+        elif isinstance(request, LoadBundle):
             if node.role != "core" or not self.compatible(node.id):
                 raise ValueError("Only compatible Core candidates can read cognitive configuration.")
             async with get_session() as db:
                 row = await db.get(RuntimeStateORM, 2)
                 response.bundle = CognitiveBundle.model_validate_json(row.payload) if row else None
-            return response
-        if isinstance(request, RegisterNode):
-            if node.role == "executor" and any(tool.scope != "device" for tool in request.tools):
-                raise ValueError("Executor nodes can register only device tools.")
-            if len({tool.name for tool in request.tools}) != len(request.tools):
-                raise ValueError("Tool capability names must be unique.")
-            self.registrations[node.id] = request
-            if node.role == "bot" or request.environment is not None or node.id in self.announced:
-                previous = self.announced.get(node.id)
-                if previous is None or previous.model_dump(exclude={"request_id"}) != request.model_dump(
-                    exclude={"request_id"}
-                ):
-                    self.announced[node.id] = request
-                    await self.device_observation(
-                        node, request, "device_online" if previous is None else "device_capability_changed"
-                    )
-            return response
-        if isinstance(request, (PollExecutions, StartExecution, ValidateExecution, ReportExecution)):
-            if node.role not in {"core", "executor"} or self.execution_service is None:
-                raise ValueError("This operation requires an execution role.")
-            if not self.compatible(node.id):
-                raise ValueError("Runtime or data version is incompatible; execution is disabled.")
-            if isinstance(request, PollExecutions):
-                tools = {tool.name for tool in self.registrations[node.id].tools if tool.scope == "device"}
-                response.executions = await self.execution_service.poll(node.id, tools)
-            elif isinstance(request, (StartExecution, ValidateExecution)):
-                response.execution = await self.execution_service.start(
-                    node.id, request.id, request.epoch, validate_only=isinstance(request, ValidateExecution)
-                )
-            else:
-                await self.execution_service.report(node.id, request.record)
-            return response
-        if isinstance(
+        elif isinstance(request, RegisterNode):
+            await self.register_node(node, request)
+        elif isinstance(request, (PollExecutions, StartExecution, ValidateExecution, ReportExecution)):
+            await self.dispatch_executor(node, request, response)
+        elif isinstance(
             request,
             (
                 Acquire,
@@ -406,133 +357,227 @@ class StateServer:
                 raise ValueError("This operation requires the core role.")
             if not self.compatible(node.id):
                 raise ValueError("Runtime or data version is incompatible; Core takeover and writes are disabled.")
-            if isinstance(request, Acquire):
-                candidates = [
-                    item.id
-                    for item in sorted(self.credentials, key=lambda item: (item.priority, item.id))
-                    if item.role == "core"
-                    and item.id in self.connections
-                    and not self.connections[item.id].closed
-                    and self.compatible(item.id)
-                    and time.monotonic() - self.last_seen.get(item.id, 0) < CANDIDATE_TIMEOUT_SECONDS
-                ]
-                response.lease = await self.journal.acquire(node.id, request.duration, candidates)
-            elif isinstance(request, Renew):
-                response.lease = await self.journal.renew(node.id, request.epoch, request.duration)
-            elif isinstance(request, Release):
-                await self.journal.release(node.id, request.epoch)
-            elif isinstance(request, Handoff):
-                if (
-                    request.target == node.id
-                    or not any(item.id == request.target and item.role == "core" for item in self.credentials)
-                    or request.target not in self.connections
-                    or not self.compatible(request.target)
-                ):
-                    response.handoff_accepted = await self.journal.handoff(
-                        node.id, request.epoch, request.target, "The target is unavailable or incompatible."
-                    )
-                else:
-                    response.handoff_accepted = await self.journal.handoff(node.id, request.epoch, request.target)
-            elif isinstance(request, CoreReady):
-                await self.journal.ready(node.id, request.epoch)
-            elif isinstance(request, Claim):
-                response.claim = await self.journal.claim(node.id, request.epoch)
-            elif isinstance(request, Commit):
-                await self.journal.commit(node.id, request.epoch, request.claim, request.replies)
-            elif isinstance(request, MemoryRequest):
-                if self.memory is None:
-                    raise RuntimeError("Memory service is not ready.")
-                async with self.journal.transaction(node.id, request.epoch):
-                    response.memory = await self.memory.execute(request.body)
-            elif isinstance(request, TaskRequest):
-                if self.task_service is None:
-                    raise RuntimeError("Task service is not ready.")
-                async with self.journal.transaction(node.id, request.epoch):
-                    response.task = await self.task_service.execute(request.body)
-            elif isinstance(request, TurnRequest):
-                if self.turn_service is None or self.memory is None:
-                    raise RuntimeError("Turn service is not ready.")
-                if isinstance(request.body, CompleteTurn):
-                    bots = {credential.id for credential in self.credentials if credential.role == "bot"}
-                    if any(reply.client_id not in bots for reply in request.body.replies):
-                        raise ValueError("Reply target is not a paired Bot client.")
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    response.turn = await self.turn_service.execute(db, node.id, request.epoch, request.body)
-                    if isinstance(request.body, CompleteTurn):
-                        response.memory = MemoryResult(view=self.memory.view())
-            elif isinstance(request, LoadRuntime):
-                if self.turn_service is None:
-                    raise RuntimeError("Turn service is not ready.")
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    response.runtime = await self.turn_service.runtime(db)
-            elif isinstance(request, SaveRuntime):
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    await db.merge(RuntimeStateORM(id=1, payload=request.runtime.model_dump_json()))
-            elif isinstance(request, PublishEvent):
-                response.sequence = await self.journal.publish(node.id, request.epoch, request.message)
-            elif isinstance(request, Emit):
-                if not any(item.id == request.message.client_id and item.role == "bot" for item in self.credentials):
-                    raise ValueError("Message target is not a paired Bot.")
-                if self.memory is None:
-                    raise RuntimeError("Memory service is not ready.")
-                for reference in request.message.resources:
-                    self.memory.vault.materialize(reference)
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    await self.journal.emit(db, request.message)
-            elif isinstance(request, ExecutionRequest):
-                if self.execution_service is None:
-                    raise RuntimeError("Execution service is not ready.")
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    if isinstance(request.body, SubmitExecution):
-                        spec = request.body.spec
-                        registration = self.registrations.get(spec.node_id)
-                        capability = (
-                            next((tool for tool in registration.tools if tool.name == spec.call.name), None)
-                            if registration
-                            else None
-                        )
-                        if (
-                            capability is None
-                            or spec.node_id not in self.connections
-                            or not self.compatible(spec.node_id)
-                        ):
-                            raise ValueError("Selected device capability is unavailable or incompatible.")
-                        if capability.scope == "core" and spec.node_id != node.id:
-                            raise ValueError("Core tools must execute in the active Core.")
-                        response.execution = await self.execution_service.submit(db, request.epoch, spec, capability)
-                    elif isinstance(request.body, InspectExecution):
-                        response.execution = await self.execution_service.inspect(request.body.id)
-            elif isinstance(request, ScheduleRequest):
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    response.schedules = await self.scheduler.execute(db, request.body)
-            elif isinstance(request, ActivityRequest):
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    response.activity = await execute_activity(db, request.body)
-            elif isinstance(request, SaveBundle):
-                request.bundle.validate_configuration()
-                async with self.journal.transaction(node.id, request.epoch) as db:
-                    row = await db.get(RuntimeStateORM, 2)
-                    if (
-                        row is None
-                        or CognitiveBundle.model_validate_json(row.payload).digest != request.expected_digest
-                    ):
-                        raise ValueError("Cognitive configuration changed; reload it before applying this update.")
-                    row.payload = request.bundle.model_dump_json()
-                    response.bundle = request.bundle
+            if isinstance(request, (Acquire, Renew, Release, Handoff, CoreReady, Claim, Commit)):
+                await self.dispatch_control(node, request, response)
+            else:
+                await self.dispatch_core_business(node, request, response)
         else:
-            if node.role != "bot":
-                raise ValueError("This operation requires the bot role.")
-            if isinstance(request, Receive):
-                if request.message.client_id != node.id:
-                    raise ValueError("Input identity differs from the authenticated client.")
-                if request.message.kind == "runtime_event" or request.message.event is not None:
-                    raise ValueError("Bot clients cannot publish internal runtime events.")
-                response.sequence = await self.journal.receive(request.message)
-            elif isinstance(request, Pending):
-                response.replies = await self.journal.pending(node.id, request.limit)
-            elif isinstance(request, Acknowledge):
-                await self.journal.acknowledge(node.id, request.message_id)
+            await self.dispatch_bot(node, request, response)
         return response
+
+    async def read_status(self, node: NodeCredential, response: NodeResponse) -> None:
+        """返回设备状态，只向对话角色提供本机行动环境。"""
+        response.lease = await self.journal.current_lease()
+        response.nodes = [
+            NodeStatus(
+                id=credential.id,
+                role=credential.role,
+                connected=credential.id in self.connections,
+                compatible=self.compatible(credential.id),
+                tools=(
+                    [tool.name for tool in self.registrations[credential.id].tools]
+                    if credential.id in self.registrations
+                    else []
+                ),
+                capabilities=self.registrations[credential.id].tools if credential.id in self.registrations else [],
+                environment=(
+                    self.registrations[credential.id].environment
+                    if node.role == "core" and credential.id in self.registrations
+                    else None
+                ),
+            )
+            for credential in self.credentials
+        ]
+
+    async def register_node(self, node: NodeCredential, request: RegisterNode) -> None:
+        """校验设备能力，并保存一次上线或能力变化观察。"""
+        if node.role == "executor" and any(tool.scope != "device" for tool in request.tools):
+            raise ValueError("Executor nodes can register only device tools.")
+        if len({tool.name for tool in request.tools}) != len(request.tools):
+            raise ValueError("Tool capability names must be unique.")
+        self.registrations[node.id] = request
+        if node.role == "bot" or request.environment is not None or node.id in self.announced:
+            previous = self.announced.get(node.id)
+            if previous is None or previous.model_dump(exclude={"request_id"}) != request.model_dump(
+                exclude={"request_id"}
+            ):
+                self.announced[node.id] = request
+                await self.device_observation(
+                    node, request, "device_online" if previous is None else "device_capability_changed"
+                )
+
+    async def dispatch_executor(
+        self,
+        node: NodeCredential,
+        request: PollExecutions | StartExecution | ValidateExecution | ReportExecution,
+        response: NodeResponse,
+    ) -> None:
+        """校验执行角色，处理动作认领和原设备结果报告。"""
+        if node.role not in {"core", "executor"} or self.execution_service is None:
+            raise ValueError("This operation requires an execution role.")
+        if not self.compatible(node.id):
+            raise ValueError("Runtime or data version is incompatible; execution is disabled.")
+        if isinstance(request, PollExecutions):
+            tools = {tool.name for tool in self.registrations[node.id].tools if tool.scope == "device"}
+            response.executions = await self.execution_service.poll(node.id, tools)
+        elif isinstance(request, (StartExecution, ValidateExecution)):
+            response.execution = await self.execution_service.start(
+                node.id, request.id, request.epoch, validate_only=isinstance(request, ValidateExecution)
+            )
+        else:
+            await self.execution_service.report(node.id, request.record)
+
+    def core_candidates(self) -> list[str]:
+        """按优先级返回已连接且兼容的活跃候选。"""
+        candidates = [
+            item.id
+            for item in sorted(self.credentials, key=lambda item: (item.priority, item.id))
+            if item.role == "core"
+            and item.id in self.connections
+            and not self.connections[item.id].closed
+            and self.compatible(item.id)
+            and time.monotonic() - self.last_seen.get(item.id, 0) < CANDIDATE_TIMEOUT_SECONDS
+        ]
+        return candidates
+
+    async def dispatch_control(
+        self,
+        node: NodeCredential,
+        request: Acquire | Renew | Release | Handoff | CoreReady | Claim | Commit,
+        response: NodeResponse,
+    ) -> None:
+        """处理控制权和输入认领，沿用服务器任期校验。"""
+        if isinstance(request, Acquire):
+            response.lease = await self.journal.acquire(node.id, request.duration, self.core_candidates())
+        elif isinstance(request, Renew):
+            response.lease = await self.journal.renew(node.id, request.epoch, request.duration)
+        elif isinstance(request, Release):
+            await self.journal.release(node.id, request.epoch)
+        elif isinstance(request, Handoff):
+            if (
+                request.target == node.id
+                or not any(item.id == request.target and item.role == "core" for item in self.credentials)
+                or request.target not in self.connections
+                or not self.compatible(request.target)
+            ):
+                response.handoff_accepted = await self.journal.handoff(
+                    node.id, request.epoch, request.target, "The target is unavailable or incompatible."
+                )
+            else:
+                response.handoff_accepted = await self.journal.handoff(node.id, request.epoch, request.target)
+        elif isinstance(request, CoreReady):
+            await self.journal.ready(node.id, request.epoch)
+        elif isinstance(request, Claim):
+            response.claim = await self.journal.claim(node.id, request.epoch)
+        elif isinstance(request, Commit):
+            await self.journal.commit(node.id, request.epoch, request.claim, request.replies)
+
+    async def dispatch_core_business(self, node: NodeCredential, request: NodeRequest, response: NodeResponse) -> None:
+        """区分认知读写和外部效果，所有写入保持任期校验。"""
+        if isinstance(request, (MemoryRequest, TaskRequest, TurnRequest, LoadRuntime, SaveRuntime)):
+            await self.dispatch_cognition(node, request, response)
+        else:
+            await self.dispatch_effects(node, request, response)
+
+    async def dispatch_cognition(self, node: NodeCredential, request: NodeRequest, response: NodeResponse) -> None:
+        """在原事务中读取或提交人格、任务和回合。"""
+        if isinstance(request, MemoryRequest):
+            if self.memory is None:
+                raise RuntimeError("Memory service is not ready.")
+            async with self.journal.transaction(node.id, request.epoch):
+                response.memory = await self.memory.execute(request.body)
+        elif isinstance(request, TaskRequest):
+            if self.task_service is None:
+                raise RuntimeError("Task service is not ready.")
+            async with self.journal.transaction(node.id, request.epoch):
+                response.task = await self.task_service.execute(request.body)
+        elif isinstance(request, TurnRequest):
+            if self.turn_service is None or self.memory is None:
+                raise RuntimeError("Turn service is not ready.")
+            if isinstance(request.body, CompleteTurn):
+                bots = {credential.id for credential in self.credentials if credential.role == "bot"}
+                if any(reply.client_id not in bots for reply in request.body.replies):
+                    raise ValueError("Reply target is not a paired Bot client.")
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                response.turn = await self.turn_service.execute(db, node.id, request.epoch, request.body)
+                if isinstance(request.body, CompleteTurn):
+                    response.memory = MemoryResult(view=self.memory.view())
+        elif isinstance(request, LoadRuntime):
+            if self.turn_service is None:
+                raise RuntimeError("Turn service is not ready.")
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                response.runtime = await self.turn_service.runtime(db)
+        elif isinstance(request, SaveRuntime):
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                await db.merge(RuntimeStateORM(id=1, payload=request.runtime.model_dump_json()))
+
+    async def dispatch_effects(self, node: NodeCredential, request: NodeRequest, response: NodeResponse) -> None:
+        """保存认知配置和消息、提醒及设备执行效果。"""
+        if isinstance(request, PublishEvent):
+            response.sequence = await self.journal.publish(node.id, request.epoch, request.message)
+        elif isinstance(request, Emit):
+            if not any(item.id == request.message.client_id and item.role == "bot" for item in self.credentials):
+                raise ValueError("Message target is not a paired Bot.")
+            if self.memory is None:
+                raise RuntimeError("Memory service is not ready.")
+            for reference in request.message.resources:
+                self.memory.vault.materialize(reference)
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                await self.journal.emit(db, request.message)
+        elif isinstance(request, ExecutionRequest):
+            await self.dispatch_execution_request(node, request, response)
+        elif isinstance(request, ScheduleRequest):
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                response.schedules = await self.scheduler.execute(db, request.body)
+        elif isinstance(request, ActivityRequest):
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                response.activity = await execute_activity(db, request.body)
+        elif isinstance(request, SaveBundle):
+            request.bundle.validate_configuration()
+            async with self.journal.transaction(node.id, request.epoch) as db:
+                row = await db.get(RuntimeStateORM, 2)
+                if row is None or CognitiveBundle.model_validate_json(row.payload).digest != request.expected_digest:
+                    raise ValueError("Cognitive configuration changed; reload it before applying this update.")
+                row.payload = request.bundle.model_dump_json()
+                response.bundle = request.bundle
+
+    async def dispatch_execution_request(
+        self, node: NodeCredential, request: ExecutionRequest, response: NodeResponse
+    ) -> None:
+        """校验工具与设备归属，再提交或查询已授权动作。"""
+        if self.execution_service is None:
+            raise RuntimeError("Execution service is not ready.")
+        async with self.journal.transaction(node.id, request.epoch) as db:
+            if isinstance(request.body, SubmitExecution):
+                spec = request.body.spec
+                registration = self.registrations.get(spec.node_id)
+                capability = (
+                    next((tool for tool in registration.tools if tool.name == spec.call.name), None)
+                    if registration
+                    else None
+                )
+                if capability is None or spec.node_id not in self.connections or not self.compatible(spec.node_id):
+                    raise ValueError("Selected device capability is unavailable or incompatible.")
+                if capability.scope == "core" and spec.node_id != node.id:
+                    raise ValueError("Core tools must execute in the active Core.")
+                response.execution = await self.execution_service.submit(db, request.epoch, spec, capability)
+            elif isinstance(request.body, InspectExecution):
+                response.execution = await self.execution_service.inspect(request.body.id)
+
+    async def dispatch_bot(self, node: NodeCredential, request: NodeRequest, response: NodeResponse) -> None:
+        """限定聊天客户端的输入身份和收发权限。"""
+        if node.role != "bot":
+            raise ValueError("This operation requires the bot role.")
+        if isinstance(request, Receive):
+            if request.message.client_id != node.id:
+                raise ValueError("Input identity differs from the authenticated client.")
+            if request.message.kind == "runtime_event" or request.message.event is not None:
+                raise ValueError("Bot clients cannot publish internal runtime events.")
+            response.sequence = await self.journal.receive(request.message)
+        elif isinstance(request, Pending):
+            response.replies = await self.journal.pending(node.id, request.limit)
+        elif isinstance(request, Acknowledge):
+            await self.journal.acknowledge(node.id, request.message_id)
 
     def compatible(self, node_id: str) -> bool:
         registration = self.registrations.get(node_id)

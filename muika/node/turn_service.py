@@ -47,16 +47,7 @@ class TurnService:
 
     async def execute(self, db: AsyncSession, owner: str, epoch: int, action: TurnOperation) -> TurnRecord:
         """重用持久结果；重传已完成回合不得产生第二组效果。"""
-        claim = action.claim
-        inbox = None
-        if claim is not None:
-            if action.turn_id != f"input:{claim.sequence}":
-                raise JournalConflict("Turn identity does not match its input.")
-            inbox = await db.get(RuntimeInboxORM, claim.sequence)
-            if inbox is None or inbox.owner != owner or inbox.epoch != epoch:
-                raise JournalConflict("Input is not claimed by this Core.")
-            if claim.owner != owner or claim.epoch != epoch or inbox.payload != claim.message.model_dump_json():
-                raise JournalConflict("Claim does not match the saved input.")
+        inbox = await self.claimed_input(db, owner, epoch, action)
         row = await db.get(RuntimeTurnORM, action.turn_id)
         if row is None:
             row = RuntimeTurnORM(id=action.turn_id, generations="{}", completed=False)
@@ -75,67 +66,97 @@ class TurnService:
             generations[action.stage] = action.generated
             row.generations = json.dumps({key: value.model_dump(mode="json") for key, value in generations.items()})
         elif isinstance(action, CompleteTurn):
-            digest = hashlib.sha256(
-                json.dumps(
-                    action.model_dump(mode="json", exclude={"claim"}), sort_keys=True, ensure_ascii=False
-                ).encode()
-            ).hexdigest()
-            if row.completed:
-                if row.commit_digest != digest:
-                    raise JournalConflict("Turn was already committed with different effects.")
-                return TurnRecord(turn_id=action.turn_id, generations=generations, completed=True)
-            if inbox is not None and inbox.status == "processed":
-                raise JournalConflict("Input has already been processed by another turn.")
-            if len({reply.id for reply in action.replies}) != len(action.replies):
-                raise JournalConflict("Reply IDs must be unique within a turn.")
-            await self.memory.memory.load()
-            for update in action.state_updates:
-                await self.memory.memory.update_state(update)
-            if action.content is not None:
-                await self.memory.memory.add_context(
-                    "muika",
-                    action.content,
-                    source=f"turn:{action.turn_id}:reply",
-                    resources=[self.memory.vault.materialize(reference) for reference in action.resources],
-                )
-            for index, note in enumerate(action.notes):
-                await self.memory.memory.add_material("note", note, source=f"turn:{action.turn_id}:note:{index}")
-            for task in action.tasks:
-                if await db.get(AgentTaskORM, task.id) is not None:
-                    raise JournalConflict("Planned task identity is already in use.")
-                paths = {file.key: self.memory.vault.materialize(file.reference).path for file in action.task_files}
-                relocate_task(task, paths)
-                await self.tasks.store.save(task)
-                if task.intention_id:
-                    intention = next(
-                        (item for item in self.memory.memory.persistent.intentions if item.id == task.intention_id),
-                        None,
-                    )
-                    if intention is None or intention.task_id or intention.status != "open":
-                        raise JournalConflict("Intention is unavailable or already has an action.")
-                    await self.memory.memory.link_intention(task.intention_id, task.id)
-                await self.memory.memory.add_context(
-                    "agent", f"Task {task.id} queued. Intent: {task.instruction}", source=f"task:{task.id}:intent"
-                )
-            for change in action.task_changes:
-                existing_task = await db.get(AgentTaskORM, change.task.id)
-                if existing_task is None or existing_task.revision != change.expected_revision:
-                    raise JournalConflict("Task changed before its control was committed.")
-                controlled = TaskRecord.model_validate_json(existing_task.payload)
-                controlled.apply_control(change.task)
-                await self.tasks.store.save(controlled)
-            for reply in action.replies:
-                for reference in reply.resources:
-                    self.memory.vault.materialize(reference)
-                existing = await db.scalar(select(RuntimeOutboxORM).where(RuntimeOutboxORM.message_id == reply.id))
-                if existing is not None:
-                    raise JournalConflict("Reply identity is already in use.")
-                db.add(
-                    RuntimeOutboxORM(message_id=reply.id, client_id=reply.client_id, payload=reply.model_dump_json())
-                )
-            if action.runtime is not None:
-                await db.merge(RuntimeStateORM(id=1, payload=action.runtime.model_dump_json()))
-            row.completed, row.commit_digest = True, digest
-            if inbox is not None:
-                inbox.status, inbox.commit_digest = "processed", digest
+            await self.complete(db, inbox, row, action)
         return TurnRecord(turn_id=action.turn_id, generations=generations, completed=row.completed)
+
+    async def claimed_input(
+        self, db: AsyncSession, owner: str, epoch: int, action: TurnOperation
+    ) -> RuntimeInboxORM | None:
+        """验证回合输入仍由当前 Core 在本任期认领。"""
+        claim = action.claim
+        inbox = None
+        if claim is not None:
+            if action.turn_id != f"input:{claim.sequence}":
+                raise JournalConflict("Turn identity does not match its input.")
+            inbox = await db.get(RuntimeInboxORM, claim.sequence)
+            if inbox is None or inbox.owner != owner or inbox.epoch != epoch:
+                raise JournalConflict("Input is not claimed by this Core.")
+            if claim.owner != owner or claim.epoch != epoch or inbox.payload != claim.message.model_dump_json():
+                raise JournalConflict("Claim does not match the saved input.")
+        return inbox
+
+    async def complete(
+        self, db: AsyncSession, inbox: RuntimeInboxORM | None, row: RuntimeTurnORM, action: CompleteTurn
+    ) -> None:
+        """验证幂等提交，再共同保存效果与完成标记。"""
+        digest = hashlib.sha256(
+            json.dumps(action.model_dump(mode="json", exclude={"claim"}), sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        if row.completed:
+            if row.commit_digest != digest:
+                raise JournalConflict("Turn was already committed with different effects.")
+            return
+        if inbox is not None and inbox.status == "processed":
+            raise JournalConflict("Input has already been processed by another turn.")
+        if len({reply.id for reply in action.replies}) != len(action.replies):
+            raise JournalConflict("Reply IDs must be unique within a turn.")
+        await self.commit_memory(action)
+        await self.commit_tasks(db, action)
+        await self.commit_replies(db, action)
+        if action.runtime is not None:
+            await db.merge(RuntimeStateORM(id=1, payload=action.runtime.model_dump_json()))
+        row.completed, row.commit_digest = True, digest
+        if inbox is not None:
+            inbox.status, inbox.commit_digest = "processed", digest
+
+    async def commit_memory(self, action: CompleteTurn) -> None:
+        """保存人格变化、对话内容和私有笔记。"""
+        await self.memory.memory.load()
+        for update in action.state_updates:
+            await self.memory.memory.update_state(update)
+        if action.content is not None:
+            await self.memory.memory.add_context(
+                "muika",
+                action.content,
+                source=f"turn:{action.turn_id}:reply",
+                resources=[self.memory.vault.materialize(reference) for reference in action.resources],
+            )
+        for index, note in enumerate(action.notes):
+            await self.memory.memory.add_material("note", note, source=f"turn:{action.turn_id}:note:{index}")
+
+    async def commit_tasks(self, db: AsyncSession, action: CompleteTurn) -> None:
+        """提交行动意图及任务控制，并校验已有控制版本。"""
+        for task in action.tasks:
+            if await db.get(AgentTaskORM, task.id) is not None:
+                raise JournalConflict("Planned task identity is already in use.")
+            paths = {file.key: self.memory.vault.materialize(file.reference).path for file in action.task_files}
+            relocate_task(task, paths)
+            await self.tasks.store.save(task)
+            if task.intention_id:
+                intention = next(
+                    (item for item in self.memory.memory.persistent.intentions if item.id == task.intention_id),
+                    None,
+                )
+                if intention is None or intention.task_id or intention.status != "open":
+                    raise JournalConflict("Intention is unavailable or already has an action.")
+                await self.memory.memory.link_intention(task.intention_id, task.id)
+            await self.memory.memory.add_context(
+                "agent", f"Task {task.id} queued. Intent: {task.instruction}", source=f"task:{task.id}:intent"
+            )
+        for change in action.task_changes:
+            existing_task = await db.get(AgentTaskORM, change.task.id)
+            if existing_task is None or existing_task.revision != change.expected_revision:
+                raise JournalConflict("Task changed before its control was committed.")
+            controlled = TaskRecord.model_validate_json(existing_task.payload)
+            controlled.apply_control(change.task)
+            await self.tasks.store.save(controlled)
+
+    async def commit_replies(self, db: AsyncSession, action: CompleteTurn) -> None:
+        """验证回复副本和唯一身份，再加入持久发件箱。"""
+        for reply in action.replies:
+            for reference in reply.resources:
+                self.memory.vault.materialize(reference)
+            existing = await db.scalar(select(RuntimeOutboxORM).where(RuntimeOutboxORM.message_id == reply.id))
+            if existing is not None:
+                raise JournalConflict("Reply identity is already in use.")
+            db.add(RuntimeOutboxORM(message_id=reply.id, client_id=reply.client_id, payload=reply.model_dump_json()))

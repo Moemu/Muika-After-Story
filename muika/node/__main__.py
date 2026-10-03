@@ -35,6 +35,11 @@ from muika.node.transfer import export_snapshot, import_snapshot
 from muika.plugin.mcp import cleanup_servers, initialize_servers
 from muika.utils.logger import logger
 
+if sys.platform == "win32":
+    SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW
+else:
+    SUBPROCESS_FLAGS = 0
+
 
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description="MAS 常驻入口与设备配对")
@@ -154,7 +159,7 @@ async def supervise_core(path: Path) -> None:
             str(path),
             "--supervised",
             stdin=asyncio.subprocess.PIPE,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            creationflags=SUBPROCESS_FLAGS,
         )
         try:
             code = await process.wait()
@@ -223,6 +228,45 @@ async def run(profile: NodeProfile) -> None:
             await close_db()
 
 
+async def join_device(address_text: str, code: str, directory: Path, ca_file: Path | None) -> None:
+    """用一次性配对码取得身份，并保存本机连接配置。"""
+    directory = directory.resolve()
+    path = directory / "node.json"
+    if path.exists():
+        raise ValueError("设备配置已存在；请先撤销旧凭据，再使用新的目录配对。")
+    # 复用连接地址验证，拒绝向远程明文入口发送配对码。
+    NodeClient(address_text, "pairing", ca_file=ca_file)
+    address = urlsplit(address_text)
+    scheme = "https" if address.scheme in {"https", "wss"} else "http"
+    context = ssl.create_default_context(cafile=str(ca_file)) if ca_file else True
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=context)) as session:
+        async with session.post(f"{scheme}://{address.netloc}/node/pair", data=code) as response:
+            if response.status != 200:
+                raise ValueError(await response.text())
+            identity = await response.json()
+    write_private_json(path, NodeProfile(**identity, address=address_text, directory=directory, ca_file=ca_file))
+    print(f"配对完成: {identity['id']} ({identity['role']})。配置保存在 {path}。")
+
+
+async def publish_configuration(profile_path: Path) -> None:
+    """在服务停用时验证并发布新的认知配置。"""
+    server_profile = ServerProfile.read(profile_path)
+    if not server_profile.database.is_file():
+        raise ValueError("请先初始化状态服务数据库。")
+    bundle = CognitiveBundle.capture(Path.cwd())
+    bundle.validate_configuration()
+    lock = StateServiceLock(server_profile.database)
+    lock.acquire()
+    try:
+        with closing(sqlite3.connect(server_profile.database)) as db, db:
+            changed = db.execute("UPDATE runtime_state SET payload=? WHERE id=2", (bundle.model_dump_json(),))
+            if changed.rowcount != 1:
+                raise ValueError("请先启动状态服务，完成常驻部署初始化。")
+    finally:
+        lock.close()
+    print("已发布认知配置。重新启动状态服务和候选 Core 后生效。")
+
+
 async def main() -> None:
     args = parser().parse_args()
     if args.command == "init-server":
@@ -254,24 +298,7 @@ async def main() -> None:
             store.revoke(args.id)
             print(f"已撤销设备 {args.id}。")
     elif args.command == "join":
-        directory = args.directory.resolve()
-        path = directory / "node.json"
-        if path.exists():
-            raise ValueError("设备配置已存在；请先撤销旧凭据，再使用新的目录配对。")
-        # 复用连接地址验证，拒绝向远程明文入口发送配对码。
-        NodeClient(args.address, "pairing", ca_file=args.ca_file)
-        address = urlsplit(args.address)
-        scheme = "https" if address.scheme in {"https", "wss"} else "http"
-        context = ssl.create_default_context(cafile=str(args.ca_file)) if args.ca_file else True
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=context)) as session:
-            async with session.post(f"{scheme}://{address.netloc}/node/pair", data=args.code) as response:
-                if response.status != 200:
-                    raise ValueError(await response.text())
-                identity = await response.json()
-        write_private_json(
-            path, NodeProfile(**identity, address=args.address, directory=directory, ca_file=args.ca_file)
-        )
-        print(f"配对完成: {identity['id']} ({identity['role']})。配置保存在 {path}。")
+        await join_device(args.address, args.code, args.directory, args.ca_file)
     elif args.command == "export":
         report = await export_snapshot(args.database, args.archive, Path.cwd())
         print(f"已导出 {len(report['tables'])} 张表和资源快照。原库保持原版本。")
@@ -295,21 +322,7 @@ async def main() -> None:
             spool.close()
         print("已保存核对结果。重新启动 Bot 后继续确认或投递。")
     elif args.command == "publish-config":
-        server_profile = ServerProfile.read(args.profile)
-        if not server_profile.database.is_file():
-            raise ValueError("请先初始化状态服务数据库。")
-        bundle = CognitiveBundle.capture(Path.cwd())
-        bundle.validate_configuration()
-        lock = StateServiceLock(server_profile.database)
-        lock.acquire()
-        try:
-            with closing(sqlite3.connect(server_profile.database)) as db, db:
-                changed = db.execute("UPDATE runtime_state SET payload=? WHERE id=2", (bundle.model_dump_json(),))
-                if changed.rowcount != 1:
-                    raise ValueError("请先启动状态服务，完成常驻部署初始化。")
-        finally:
-            lock.close()
-        print("已发布认知配置。重新启动状态服务和候选 Core 后生效。")
+        await publish_configuration(args.profile)
     else:
         node_profile = NodeProfile.read(args.profile)
         if args.command == "run":

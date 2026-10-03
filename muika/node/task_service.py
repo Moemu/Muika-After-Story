@@ -65,46 +65,55 @@ class TaskService:
         if isinstance(action, LoadTasks):
             result.tasks = await self.store.load()
         elif isinstance(action, LoadCalls):
-            result.calls = await self.store.calls(action.task_id)
-            task = next((task for task in await self.store.load() if task.id == action.task_id), None)
-            if task is not None:
-                async with get_session() as db:
-                    for call in result.calls:
-                        execution = await db.get(RuntimeExecutionORM, f"call:{call.id}")
-                        if (
-                            call.status != "pending"
-                            or execution is None
-                            or execution.status != "completed"
-                            or execution.result is None
-                        ):
-                            continue
-                        completed = ExecutionRecord.model_validate_json(execution.result)
-                        if completed.result is None:
-                            continue
-                        output = completed.result.model_copy(deep=True)
-                        paths = {file.key: self.vault.materialize(file.reference).path for file in completed.files}
-                        for reference in output.resources:
-                            reference.path = paths[reference.path]
-                        call.result = self.store.archive_result(call, output)
-                        call.status, call.completed_at = "completed", completed.completed_at
-                        call.execution_node_id = completed.spec.node_id
-                        await self.store.save(task, call)
+            result.calls = await self.load_calls(action.task_id)
         elif isinstance(action, SaveTask):
-            async with get_session() as db:
-                existing = await db.get(AgentTaskORM, action.task.id)
-                if existing is not None and existing.revision > action.task.revision:
-                    raise ValueError("Task checkpoint is older than its committed control.")
-            paths = {file.key: self.vault.materialize(file.reference).path for file in action.files}
-            relocate_task(action.task, paths)
-            if action.call is not None:
-                if action.call.task_id != action.task.id:
-                    raise ValueError("Call does not belong to this task.")
-                relocate_call(action.call, paths)
-            await self.store.save(action.task, action.call)
-            if action.call is not None and action.call.status == "reconciled" and action.call.recovery_evidence:
-                async with get_session() as db:
-                    execution = await db.get(RuntimeExecutionORM, f"call:{action.call.id}")
-                    if execution is not None:
-                        execution.status = "reconciled"
+            await self.save_task(action)
         result.files = self.references(result.tasks, result.calls)
         return result
+
+    async def load_calls(self, task_id: str) -> list[CallRecord]:
+        """读取调用，并从原设备已完成记录恢复尚未归档的结果。"""
+        calls = await self.store.calls(task_id)
+        task = next((task for task in await self.store.load() if task.id == task_id), None)
+        if task is not None:
+            async with get_session() as db:
+                for call in calls:
+                    execution = await db.get(RuntimeExecutionORM, f"call:{call.id}")
+                    if (
+                        call.status != "pending"
+                        or execution is None
+                        or execution.status != "completed"
+                        or execution.result is None
+                    ):
+                        continue
+                    completed = ExecutionRecord.model_validate_json(execution.result)
+                    if completed.result is None:
+                        continue
+                    output = completed.result.model_copy(deep=True)
+                    paths = {file.key: self.vault.materialize(file.reference).path for file in completed.files}
+                    for reference in output.resources:
+                        reference.path = paths[reference.path]
+                    call.result = self.store.archive_result(call, output)
+                    call.status, call.completed_at = "completed", completed.completed_at
+                    call.execution_node_id = completed.spec.node_id
+                    await self.store.save(task, call)
+        return calls
+
+    async def save_task(self, action: SaveTask) -> None:
+        """校验控制版本和附件，再保存任务及核对记录。"""
+        async with get_session() as db:
+            existing = await db.get(AgentTaskORM, action.task.id)
+            if existing is not None and existing.revision > action.task.revision:
+                raise ValueError("Task checkpoint is older than its committed control.")
+        paths = {file.key: self.vault.materialize(file.reference).path for file in action.files}
+        relocate_task(action.task, paths)
+        if action.call is not None:
+            if action.call.task_id != action.task.id:
+                raise ValueError("Call does not belong to this task.")
+            relocate_call(action.call, paths)
+        await self.store.save(action.task, action.call)
+        if action.call is not None and action.call.status == "reconciled" and action.call.recovery_evidence:
+            async with get_session() as db:
+                execution = await db.get(RuntimeExecutionORM, f"call:{action.call.id}")
+                if execution is not None:
+                    execution.status = "reconciled"
