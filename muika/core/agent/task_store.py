@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from muika.config import mas_config
@@ -21,6 +21,20 @@ from muika.models import Resource
 from .report import AgentReport
 
 TaskStatus = Literal["queued", "running", "recovering", "blocked", "completed", "failed", "cancelled"]
+
+
+class TaskControl(BaseModel):
+    """主人格对已知行动任务的内部控制。"""
+
+    model_config = ConfigDict(extra="forbid")
+    task_id: str
+    action: Literal["continue", "cancel", "complete"] = "continue"
+    instruction: str = ""
+
+
+class TaskChange(BaseModel):
+    expected_revision: int
+    task: "TaskRecord"
 
 
 def _now() -> str:
@@ -55,6 +69,20 @@ class TaskRecord(BaseModel):
     progress_summary: str = ""
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
+    execution_node_id: str | None = None
+    reply_client_id: str | None = None
+    reply_conversation_id: str | None = None
+
+    def apply_control(self, changed: "TaskRecord") -> None:
+        """更新控制字段，保留原设备资源和正在保存的调用现场。"""
+        self.revision, self.status, self.report = changed.revision, changed.status, changed.report
+        self.report_error, self.error = changed.report_error, changed.error
+        self.format_retry, self.acknowledgement_retry = changed.format_retry, changed.acknowledgement_retry
+        self.cancel_requested, self.corrections, self.handoff = (
+            changed.cancel_requested,
+            changed.corrections,
+            changed.handoff,
+        )
 
 
 class CallRecord(BaseModel):
@@ -69,6 +97,7 @@ class CallRecord(BaseModel):
     output_path: str | None = None
     recovery_evidence: str | None = None
     completed_at: datetime | None = None
+    execution_node_id: str | None = None
 
 
 class TaskStore:

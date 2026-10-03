@@ -5,6 +5,8 @@ and lifecycle management.  Always communicates with the Core process via IPC.
 """
 
 import asyncio
+import hashlib
+import json
 import os
 import re
 import time
@@ -27,13 +29,17 @@ from nonebot_plugin_alconna import (
     uniseg,
 )
 from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
+from nonebot_plugin_alconna.uniseg import get_target
 
 from muika.config import mas_config
+from muika.ipc.bot_client import DeliveryNotStarted
 from muika.models import Resource
+from muika.node.config import NodeProfile
 from muika.utils.logger import logger
 
 from .first_run import require_user_agreement
 from .ipc_client import IpcClient
+from .node_client import NodeBotIpcClient
 from .session import SessionManager
 from .utils.utils import download_file, get_file_via_adapter
 
@@ -42,7 +48,11 @@ DELAYED_SECOND_PER_PARAGRAPH = 3
 driver = get_driver()
 session_manager = SessionManager()
 
-_ipc_client: IpcClient = IpcClient(core_url=mas_config.core_ws_url, secret=mas_config.ipc_secret)
+_ipc_client: IpcClient = (
+    NodeBotIpcClient(NodeProfile.read(mas_config.node_profile))
+    if mas_config.node_profile is not None
+    else IpcClient(core_url=mas_config.core_ws_url, secret=mas_config.ipc_secret)
+)
 _message_target = Target(id=mas_config.master_id, private=True)
 
 
@@ -59,7 +69,7 @@ async def _is_master(event: Event) -> bool:
 _master_rule = Rule(_is_master)
 
 
-async def _render_resources(resources: list[dict]) -> None:
+async def _render_resources(resources: list[dict], target: Target | None = None) -> None:
     """将多模态资源列表渲染为 UniMessage 发回用户。"""
     for i, res in enumerate(resources):
         res_type = res.get("type", "")
@@ -67,11 +77,11 @@ async def _render_resources(resources: list[dict]) -> None:
         if not path:
             continue
         if res_type == "image":
-            await UniMessage.image(path=path).send(target=_message_target, bot=get_bot())
+            await UniMessage.image(path=path).send(target=target or _message_target, bot=_target_bot(target))
         elif res_type in ("audio", "video"):
-            await UniMessage(path).send(target=_message_target, bot=get_bot())
+            await UniMessage(path).send(target=target or _message_target, bot=_target_bot(target))
         else:
-            await UniMessage.file(path=path).send(target=_message_target, bot=get_bot())
+            await UniMessage.file(path=path).send(target=target or _message_target, bot=_target_bot(target))
         if i < len(resources) - 1:
             await asyncio.sleep(0.3)
 
@@ -127,9 +137,25 @@ async def _extract_multi_resources(message: UniMsg, event: Event) -> list[Resour
     return resources
 
 
-async def _send_message(message: str) -> None:
+def _target_bot(target: Target | None) -> Bot:
+    try:
+        return get_bot(target.self_id if target else None)
+    except (ValueError, KeyError) as exc:
+        raise DeliveryNotStarted("The original platform Bot is not connected.") from exc
+
+
+def _reply_target(data: dict) -> Target:
+    if isinstance(_ipc_client, NodeBotIpcClient):
+        try:
+            return Target.load(json.loads(_ipc_client.durable.spool.route(data["conversation_id"])))
+        except ValueError as exc:
+            raise DeliveryNotStarted("The original conversation route is not ready.") from exc
+    return _message_target
+
+
+async def _send_message(message: str, target: Target | None = None) -> None:
     """发送 Core 提供的消息段或完整命令结果。"""
-    await UniMessage(message).send(target=_message_target, bot=get_bot())
+    await UniMessage(message).send(target=target or _message_target, bot=_target_bot(target))
     await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
 
 
@@ -138,21 +164,23 @@ def _init_ipc_client() -> IpcClient:
 
     @_ipc_client.on_message("send_message")
     async def _handle_send_message(data: dict) -> None:
+        target = _reply_target(data)
         content = data.get("content", "")
         if content:
-            await _send_message(content)
+            await _send_message(content, target)
         resources = data.get("resources", [])
         if resources:
-            await _render_resources(resources)
+            await _render_resources(resources, target)
 
     @_ipc_client.on_message("command_result")
     async def _handle_command_result(data: dict) -> None:
+        target = _reply_target(data)
         content = data.get("content", "")
         if content:
-            await _send_message(content)
+            await _send_message(content, target)
         resources = data.get("resources", [])
         if resources:
-            await _render_resources(resources)
+            await _render_resources(resources, target)
 
     @_ipc_client.on_message("action_response")
     async def _handle_action_response(data: dict) -> None:
@@ -166,7 +194,7 @@ def _init_ipc_client() -> IpcClient:
 
 
 async def _get_ipc_client() -> IpcClient:
-    if not _ipc_client.is_connected:
+    if not _ipc_client.is_connected and not isinstance(_ipc_client, NodeBotIpcClient):
         await UniMessage("IPC 进程未连接").finish()
 
     return _ipc_client
@@ -216,6 +244,17 @@ async def bot_connected() -> None:
     # 检测并设置适配器身份
     client_name = _detect_adapter_type()
     _ipc_client.set_client_info(client_name)
+    if isinstance(_ipc_client, NodeBotIpcClient):
+        bot = get_bot()
+        _ipc_client.durable.spool.save_route(
+            "master",
+            json.dumps(
+                Target(
+                    id=mas_config.master_id, private=True, self_id=bot.self_id, adapter=bot.adapter.get_name()
+                ).dump(),
+                ensure_ascii=False,
+            ),
+        )
 
     if _ipc_client.is_connected:
         logger.debug("[Bootstrap] bot_connected event sent via IPC.")
@@ -223,6 +262,12 @@ async def bot_connected() -> None:
         logger.warning("[Bootstrap] Core not connected -- bootstrap event queued.")
 
     await _ipc_client.send_session_bootstrap()
+
+
+@driver.on_shutdown
+async def shutdown() -> None:
+    """停止接入重连并保留尚未投递的队列。"""
+    await _ipc_client.disconnect()
 
 
 at_event = on_alconna(
@@ -244,9 +289,27 @@ async def handle_supported_adapters(
     ipc_client: IpcClient = Depends(_get_ipc_client),
 ) -> None:
     """Main message handler -- receives user messages and forwards to Core."""
+    conversation_id = "master"
+    message_id = None
+    if isinstance(ipc_client, NodeBotIpcClient):
+        session_id = event.get_session_id()
+        conversation_id = hashlib.sha256((bot.self_id + ":" + session_id).encode()).hexdigest()
+        message_id = hashlib.sha256((conversation_id + ":" + str(get_message_id(event, bot))).encode()).hexdigest()
+        ipc_client.durable.spool.save_route(
+            conversation_id, json.dumps(get_target(event, bot).dump(), ensure_ascii=False)
+        )
     if any((bot_message.startswith("."), bot_message.startswith("/"))):
         raw = event.get_plaintext()
-        await ipc_client.send_command(raw)
+        await ipc_client.send_command(raw, message_id=message_id, conversation_id=conversation_id)
+        if (
+            isinstance(ipc_client, NodeBotIpcClient)
+            and not ipc_client.durable.core_available
+            and not ipc_client.offline_notice_sent
+        ):
+            ipc_client.offline_notice_sent = True
+            await UniMessage("[System] 暂时无法联系 Muika。命令已保存，会在恢复后送达。").send(
+                target=get_target(event, bot), bot=bot
+            )
         return
 
     if message_reply := ext.get_reply(get_message_id(event, bot)):
@@ -256,7 +319,12 @@ async def handle_supported_adapters(
         else:
             bot_message += UniMessage(f"\n被引用的消息: {reply_message}")
 
-    if not (merged_message := await session_manager.put_and_wait(event, bot_message)):
+    merged_message = (
+        bot_message
+        if isinstance(ipc_client, NodeBotIpcClient)
+        else await session_manager.put_and_wait(event, bot_message)
+    )
+    if not merged_message:
         matcher.skip()
         return
 
@@ -271,4 +339,15 @@ async def handle_supported_adapters(
     await ipc_client.send_user_message(
         message_text,
         resources=[r.to_dict() for r in message_resource],
+        message_id=message_id,
+        conversation_id=conversation_id,
     )
+    if (
+        isinstance(ipc_client, NodeBotIpcClient)
+        and not ipc_client.durable.core_available
+        and not ipc_client.offline_notice_sent
+    ):
+        ipc_client.offline_notice_sent = True
+        await UniMessage("[System] 暂时无法联系 Muika。消息已保存，会在恢复后送达。").send(
+            target=get_target(event, bot), bot=bot
+        )

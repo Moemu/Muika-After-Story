@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.state import MuikaState
+from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
@@ -25,6 +26,7 @@ class CheckRSSUpdateParams(BaseModel):
 @on_function_call(
     "Fetch and summarize updates from a configured RSS source.",
     params=CheckRSSUpdateParams,
+    scope="core",
 )
 async def check_rss_update(rss_source: str, state: MuikaState) -> str:
     """读取 RSS 更新，并更新好奇心和注意力。"""
@@ -33,8 +35,12 @@ async def check_rss_update(rss_source: str, state: MuikaState) -> str:
         return f"Unknown RSS source: {rss_source!r}"
 
     logger.debug(f"[CheckRSSUpdate] Fetching: {rss.url}")
-    feed_data = await fetch_rss_content(rss.url)
-    entries = parse_rss_feed(feed_data)
+    try:
+        feed_data = await fetch_rss_content(rss.url)
+        entries = parse_rss_feed(feed_data)
+    except Exception as exc:
+        logger.warning(f"[CheckRSSUpdate] Fetch failed: {exc}")
+        return ToolError(f"RSS fetch failed: {exc}", outcome="not_executed")
 
     lines = [f"# RSS Feed Update from {rss.name}:"]
     for entry in entries:
@@ -57,6 +63,8 @@ class FetchWebContentParams(BaseModel):
 @on_function_call(
     "Extract plain text content from a web page.",
     params=FetchWebContentParams,
+    scope="core",
+    read_only=True,
 )
 async def fetch_web_content(url: str):
     """提取网页正文，拒绝不支持的 URL 协议。"""
@@ -83,6 +91,7 @@ class SearchWikipediaParams(BaseModel):
 @on_function_call(
     "Search Wikipedia and return a summary of the best matching article.",
     params=SearchWikipediaParams,
+    scope="core",
 )
 async def search_wikipedia(query: str, state: MuikaState, language: str = "zh") -> str:
     """检索维基百科摘要，并更新好奇心。"""
@@ -100,7 +109,7 @@ async def search_wikipedia(query: str, state: MuikaState, language: str = "zh") 
                 result = await resp.json(content_type=None)
     except Exception as e:
         logger.error(f"[SearchWikipedia] Search failed: {e}")
-        return f"Wikipedia search failed: {e}"
+        return ToolError(f"Wikipedia search failed: {e}", outcome="not_executed")
 
     titles: list[str] = result[1] if len(result) > 1 else []
     if not titles:
@@ -116,7 +125,7 @@ async def search_wikipedia(query: str, state: MuikaState, language: str = "zh") 
                 data = await resp.json(content_type=None)
     except Exception as e:
         logger.error(f"[SearchWikipedia] Summary fetch failed: {e}")
-        return f"Failed to fetch Wikipedia summary: {e}"
+        return ToolError(f"Failed to fetch Wikipedia summary: {e}", outcome="not_executed")
 
     title = data.get("title", page_title)
     extract = data.get("extract", "")

@@ -71,7 +71,7 @@ async def handle_mcp_tool(tool: str, arguments: Optional[dict[str, Any]] = None)
         except Exception as e:
             error_msg = f"Error executing tool: {str(e)}"
             logger.error(error_msg)
-            return ToolError(error_msg)
+            return ToolError(error_msg, outcome="unknown")
 
     return None  # Not found.
 

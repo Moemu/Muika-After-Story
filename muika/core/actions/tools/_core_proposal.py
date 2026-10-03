@@ -15,7 +15,9 @@ class CoreListParams(BaseModel):
     path: str = Field("muika", description="Core directory or file relative to the running MAS source root.")
 
 
-@on_function_call("List Python files in the approved Core observation scope.", params=CoreListParams, read_only=True)
+@on_function_call(
+    "List Python files in the approved Core observation scope.", params=CoreListParams, read_only=True, scope="core"
+)
 async def core_list(path: str = "muika") -> str:
     """列出 Core 观察范围内的 Python 文件。"""
     manager = get_core_proposal_manager()
@@ -45,7 +47,9 @@ class CoreReadParams(BaseModel):
     line_end: int = Field(200, ge=1, description="Last line, inclusive.")
 
 
-@on_function_call("Read a bounded line range from Core Python code.", params=CoreReadParams, read_only=True)
+@on_function_call(
+    "Read a bounded line range from Core Python code.", params=CoreReadParams, read_only=True, scope="core"
+)
 async def core_read(path: str, line_start: int = 1, line_end: int = 200) -> str:
     """读取 Core 文件的行区间。"""
     manager = get_core_proposal_manager()
@@ -68,7 +72,10 @@ class CoreSearchParams(BaseModel):
 
 
 @on_function_call(
-    "Search exact text in Core Python code and return bounded matches.", params=CoreSearchParams, read_only=True
+    "Search exact text in Core Python code and return bounded matches.",
+    params=CoreSearchParams,
+    read_only=True,
+    scope="core",
 )
 async def core_search(query: str, path: str = "muika") -> str:
     """搜索 Core Python 文件。"""
@@ -116,6 +123,7 @@ class ProposeCoreChangeParams(BaseModel):
     "Create a Core proposal, review it and validate it. A ready proposal keeps active code unchanged. "
     "Choose when to apply it and restart in the context of your conversation.",
     params=ProposeCoreChangeParams,
+    scope="core",
 )
 async def propose_core_change(changes: list[CoreChange], reason: str) -> str:
     """创建 Core 多文件提案。"""
@@ -138,6 +146,7 @@ class PrepareCoreChangeParams(BaseModel):
     "Continue reviewing and validating an existing Core proposal after approval or a resolved review error. "
     "Do not create another proposal just to resume the same change.",
     params=PrepareCoreChangeParams,
+    scope="core",
 )
 async def prepare_core_change(patch_id: str) -> str:
     """继续已有提案，保留其候选和审批关联。"""
@@ -155,6 +164,7 @@ class DiscardCoreChangeParams(PrepareCoreChangeParams):
     "Discard a pending or ready Core proposal. This cancels the draft without changing active code. "
     "It cannot undo an already applied change.",
     params=DiscardCoreChangeParams,
+    scope="core",
 )
 async def discard_core_change(patch_id: str, reason: str) -> str:
     """取消未应用的提案，不改动正式代码。"""

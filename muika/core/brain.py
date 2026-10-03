@@ -16,7 +16,7 @@ from muika.template import (
 from muika.utils.logger import logger
 from muika.utils.utils import format_duration
 
-from .events import Event
+from .events import Event, RuntimeObservationEvent
 from .memory import MemoryManager, RecallResult
 from .state import MuikaState
 from .topic_manager import BaseTopic, EventTopic
@@ -251,7 +251,14 @@ class MuikaBrain:
             )
 
         # Construct the immediate event context if it's the start of the interaction
-        if event.type == "agent_task":
+        if isinstance(event, RuntimeObservationEvent):
+            prompt = (
+                f"[Runtime observation] {event.report}\n"
+                "This is a verified observation, not a new user request. "
+                "You may reflect, act, speak naturally, or stay silent with <do_nothing>. "
+                "A requested handoff is not a completed move."
+            )
+        elif event.type == "agent_task":
             prompt = (
                 f"[Action result] Task {event.task_id}, revision {event.revision}, status {event.status}:\n"
                 f"{event.report}\nContinue from this result in the current conversation. "

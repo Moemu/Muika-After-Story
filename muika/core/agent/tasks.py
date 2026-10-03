@@ -8,7 +8,8 @@ import math
 import shutil
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from time import perf_counter
@@ -16,22 +17,23 @@ from time import perf_counter
 from pydantic import BaseModel, Field, ValidationError
 
 from muika.config import mas_config
+from muika.core.devices import ExecutionEnvironment
 from muika.core.events import AgentTaskEvent, Event
 from muika.core.executor import Executor
-from muika.core.processes import get_process_manager
 from muika.core.state import MuikaState
+from muika.core.task_processes import LocalTaskProcesses, TaskProcesses
 from muika.llm import BaseLLM, ModelConfig, ModelRequest
 from muika.llm._execution import dispatch_call, observation_message, result_message
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
 from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
 from muika.llm.utils.thought_processor import general_processor
-from muika.plugin.func_call import get_function_calls
+from muika.plugin.func_call import is_read_only_tool
 from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
 
 from .agent import Agent
 from .report import parse_report
-from .task_store import CallRecord, TaskRecord, TaskStore
+from .task_store import CallRecord, TaskChange, TaskControl, TaskRecord, TaskStore
 
 
 class RecoveryReport(BaseModel):
@@ -58,12 +60,24 @@ def _call_signature(call: ToolCall) -> str:
 class AgentTasks:
     """拥有单一执行任务、等待队列和恢复检查点。"""
 
-    def __init__(self, agent: Agent, state: MuikaState, executor: Executor, events: asyncio.Queue[Event]) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        state: MuikaState,
+        executor: Executor,
+        events: asyncio.Queue[Event],
+        *,
+        store: TaskStore | None = None,
+        processes: TaskProcesses | None = None,
+        environment: Callable[[TaskRecord], Awaitable[ExecutionEnvironment]] | None = None,
+    ) -> None:
         self.agent = agent
         self.state = state
         self.executor = executor
         self.events = events
-        self.store = TaskStore()
+        self.store = store if store is not None else TaskStore()
+        self.processes = processes if processes is not None else LocalTaskProcesses()
+        self.environment = environment
         self.tasks: dict[str, TaskRecord] = {}
         self.active_id: str | None = None
         self._lock = asyncio.Lock()
@@ -98,6 +112,8 @@ class AgentTasks:
                 for call in calls:
                     await self._remember_call(call)
                 pending = any(call.status == "pending" for call in calls)
+                if task.handoff and self._persona_owner:
+                    continue
                 if task.status in {"running", "recovering"} or task.handoff or pending and task.status != "cancelled":
                     task.status = "recovering"
                     task.handoff = False
@@ -182,6 +198,58 @@ class AgentTasks:
             self._wake.set()
             return task
 
+    async def activate_committed(self, tasks: list[TaskRecord]) -> None:
+        """接收已与回复共同提交的新任务，再唤醒执行循环。"""
+        async with self._lock:
+            for task in tasks:
+                self.tasks.setdefault(task.id, task)
+            self._wake.set()
+
+    @asynccontextmanager
+    async def control_changes(self, controls: list[TaskControl]):
+        """在回复事务中准备控制结果，提交成功后更新现有任务对象。"""
+        async with self._lock:
+            changes: dict[str, TaskChange] = {}
+            errors: list[str] = []
+            for control in controls:
+                original = self.tasks.get(control.task_id)
+                if original is None:
+                    errors.append(f"Task control failed: unknown task {control.task_id}.")
+                    continue
+                candidate = changes[original.id].task if original.id in changes else original.model_copy(deep=True)
+                if control.action == "complete":
+                    report = parse_report(control.instruction)
+                    if not self._persona_owner or not candidate.handoff or report is None:
+                        errors.append("Task control failed: completion needs a handed task and verified report.")
+                        continue
+                    if await self.processes.active_for(original.id):
+                        errors.append("Task control failed: the original device still has running processes.")
+                        continue
+                    candidate.report, candidate.status, candidate.handoff = report, report.status, False
+                else:
+                    candidate.report = None
+                    candidate.report_error = candidate.error = None
+                    candidate.format_retry = candidate.acknowledgement_retry = False
+                    candidate.cancel_requested = control.action == "cancel"
+                    if control.instruction:
+                        candidate.corrections.append(control.instruction)
+                    if self.active_id != candidate.id:
+                        candidate.status = "cancelled" if candidate.cancel_requested else "queued"
+                    if candidate.handoff:
+                        candidate.handoff = False
+                        if candidate.status == "blocked" and not candidate.cancel_requested:
+                            candidate.status = "recovering"
+                candidate.revision += 1
+                changes[candidate.id] = TaskChange(expected_revision=original.revision, task=candidate)
+            yield list(changes.values()), errors
+            for change in changes.values():
+                old, new = self.tasks[change.task.id], change.task
+                old.apply_control(new)
+                self._compaction_failures.pop(old.id, None)
+            if changes and not any(task.handoff for task in self.tasks.values()):
+                self._persona_owner = False
+            self._wake.set()
+
     def describe(self) -> str:
         """提供主人格需要的当前任务状态，不复制工具全文。"""
         active = [t for t in self.tasks.values() if t.status not in {"completed", "cancelled"}]
@@ -252,7 +320,7 @@ class AgentTasks:
             if not isinstance(execution, dict) or execution.get("status") != "running":
                 continue
             try:
-                evidence = get_process_manager().read_record(execution["process_id"], owner=task.id)
+                evidence = await self.processes.read_record(execution["process_id"], task.id)
                 if evidence["status"] == "completed" or evidence["controllable"]:
                     continue
             except (ValueError, KeyError, OSError):
@@ -290,13 +358,19 @@ class AgentTasks:
                     )
                 applied_revision = task.revision
                 await self._save(task)
-            request = self.agent.build_request(
-                f"{task.instruction}\n\nOriginal request:\n{task.original_request}\n\nAcceptance:\n{task.acceptance}",
-                self.state,
+            instruction = (
+                f"{task.instruction}\n\nOriginal request:\n{task.original_request}\n\nAcceptance:\n{task.acceptance}"
             )
+            if self.environment is None:
+                request = self.agent.build_request(instruction, self.state)
+            else:
+                request = self.agent.build_request(instruction, self.state, environment=await self.environment(task))
+            if task.resources:
+                request.prompt += "\n\nTask resource paths on the current Core (use tools to inspect):\n" + "\n".join(
+                    resource.path for resource in task.resources
+                )
             if uncertain:
-                safe = {name for name, caller in get_function_calls().items() if caller.read_only}
-                request.tools = [tool for tool in request.tools or [] if tool["function"]["name"] in safe]
+                request.tools = [tool for tool in request.tools or [] if is_read_only_tool(tool["function"]["name"])]
                 request.prompt += (
                     "\n\nRecovery only: these actions have unknown outcomes. Inspect the actual state with read-only "
                     "tools. Do not execute or replay actions. Return JSON with resolved, evidence, evidence_call_ids. "
@@ -361,8 +435,7 @@ class AgentTasks:
                         await self._save(task)
                         continue
                     allowed = {tool["function"]["name"] for tool in request.tools or []}
-                    current_tool = get_function_calls().get(call.name)
-                    if call.name not in allowed or uncertain and (current_tool is None or not current_tool.read_only):
+                    if call.name not in allowed or uncertain and not is_read_only_tool(call.name):
                         result = ToolResult(
                             text="Tool is unavailable for this step. Re-plan with the current tools.", is_error=True
                         )
@@ -370,6 +443,14 @@ class AgentTasks:
                         await self._save(task)
                         continue
                     result = await self._record_call(task, call, message_index)
+                    if result.outcome == "unknown":
+                        task.status = "blocked"
+                        task.error = (
+                            "Action outcome is unknown. Inspect the saved call on its original device before retrying."
+                        )
+                        await self._save(task)
+                        await self._notify(task)
+                        return
                     if result.is_error:
                         err_key = _call_signature(call)
                         consecutive_errors[err_key] = consecutive_errors.get(err_key, 0) + 1
@@ -532,6 +613,7 @@ class AgentTasks:
                     ensure_ascii=False,
                 ),
                 is_current=lambda: task.revision == revision and not task.cancel_requested and not self._closing,
+                execution_id=record.id,
             ):
                 return await dispatch_call(call)
 
@@ -547,8 +629,8 @@ class AgentTasks:
         async with self._lock:
             task.messages.append(result_message(call, result))
             task.resources.extend(ref for ref in result.resources if ref not in task.resources)
-            record.status = "completed"
-            record.completed_at = datetime.now(timezone.utc)
+            record.status = "pending" if result.outcome == "unknown" else "completed"
+            record.completed_at = None if result.outcome == "unknown" else datetime.now(timezone.utc)
             await self._save(task, record)
         await self._remember_call(record)
         return result
@@ -569,11 +651,11 @@ class AgentTasks:
 
     async def _finish_report(self, task: TaskRecord, text: str) -> bool:
         report = parse_report(text)
-        processes = get_process_manager()
-        active_processes = processes.active_for(task.id)
+        processes = self.processes
+        active_processes = await processes.active_for(task.id)
         if active_processes:
             revision = task.revision
-            while active_processes == processes.active_for(task.id):
+            while active_processes == await processes.active_for(task.id):
                 if task.revision != revision or task.cancel_requested or self._persona_owner or self._closing:
                     return False
                 await processes.wait(active_processes[0], owner=task.id, seconds=1)
@@ -641,7 +723,7 @@ class AgentTasks:
         if self._storage_error:
             raise RuntimeError(self._storage_error)
         if task.cancel_requested:
-            await get_process_manager().stop_owner(task.id)
+            await self.processes.stop_owner(task.id)
             task.status = "cancelled"
         elif self._persona_owner:
             task.handoff = True
@@ -698,7 +780,11 @@ class AgentTasks:
     async def handoff(self) -> str:
         """等到工具边界后把全局执行权交给主人格。"""
         candidate = self.tasks.get(self.active_id or "") or next(
-            (task for task in reversed(list(self.tasks.values())) if task.status in {"blocked", "failed", "queued"}),
+            (
+                task
+                for task in reversed(list(self.tasks.values()))
+                if task.status in {"blocked", "failed", "queued", "recovering"}
+            ),
             None,
         )
         self._persona_owner = True
@@ -711,9 +797,9 @@ class AgentTasks:
             await self._save(candidate)
         for task in self.tasks.values():
             if task.handoff:
-                for process_id in get_process_manager().active_for(task.id):
-                    while process_id in get_process_manager().active_for(task.id):
-                        await get_process_manager().wait(process_id, owner=task.id, seconds=1)
+                for process_id in await self.processes.active_for(task.id):
+                    while process_id in await self.processes.active_for(task.id):
+                        await self.processes.wait(process_id, owner=task.id, seconds=1)
         handed_task = self.persona_task()
         if handed_task is None:
             return self.describe()
@@ -733,6 +819,12 @@ class AgentTasks:
 
     def persona_task(self) -> TaskRecord | None:
         return next((task for task in self.tasks.values() if task.handoff), None)
+
+    def restore_persona_owner(self, owns_actions: bool) -> None:
+        """在任务恢复前恢复主人格的执行归属。"""
+        self._persona_owner = owns_actions
+        if not owns_actions:
+            self._wake.set()
 
     async def execute_persona_call(self, call: ToolCall) -> ToolResult:
         """把主人格接手后的动作写入同一个任务记录。"""
@@ -763,7 +855,7 @@ class AgentTasks:
         report = parse_report(text)
         if report is None:
             raise ValueError("The handoff needs a valid agent_result report with verification evidence")
-        if get_process_manager().active_for(task_id):
+        if await self.processes.active_for(task_id):
             raise ValueError("Wait for the task's running processes before completing it")
         task.report = report
         task.status = report.status
@@ -777,8 +869,13 @@ class AgentTasks:
         """停止排队派发，并清理本次进程拥有的执行工作。"""
         self._closing = True
         self._wake.set()
-        for task in self.tasks.values():
-            await get_process_manager().stop_owner(task.id)
+        await self.processes.close(list(self.tasks))
+
+    async def pause_for_core_handoff(self) -> None:
+        """停止新动作派发，等待当前工具批次到达保存边界。"""
+        self._persona_owner = True
+        self._wake.set()
+        await self._boundary.wait()
 
     async def resume_review(self, task_id: str, review_id: str, instruction: str = "") -> None:
         """让原任务继续处理已批准的具体请求，不改变授权对应的任务版本。"""

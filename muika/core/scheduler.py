@@ -10,6 +10,8 @@ from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
 class Scheduler:
     """管理单次和重复提醒，关闭时取消所有待执行任务。"""
 
+    persistent = False
+
     def __init__(self, event_queue: asyncio.Queue):
         self.event_queue = event_queue
         self._tasks: set[asyncio.Task] = set()

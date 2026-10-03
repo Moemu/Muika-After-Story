@@ -9,7 +9,7 @@
 """
 
 import inspect
-from typing import Any, Optional, Type, get_type_hints
+from typing import Any, Literal, Optional, Type, get_type_hints
 
 from pydantic import BaseModel
 
@@ -29,10 +29,20 @@ class FunctionCallValidationError(ValueError):
 
 
 class Caller:
-    def __init__(self, description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False):
+    def __init__(
+        self,
+        description: str,
+        params: Optional[Type[BaseModel]] = None,
+        *,
+        read_only: bool = False,
+        scope: Literal["core", "device"] = "device",
+        idempotent: bool = False,
+    ):
         self._name: str = ""
         """函数名称"""
         self.read_only = read_only
+        self.scope = scope
+        self.idempotent = idempotent
         """函数是否只读取数据而不修改外部状态"""
         self._description: str = description
         """函数描述"""
@@ -134,7 +144,14 @@ class Caller:
         }
 
 
-def on_function_call(description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False) -> Caller:
+def on_function_call(
+    description: str,
+    params: Optional[Type[BaseModel]] = None,
+    *,
+    read_only: bool = False,
+    scope: Literal["core", "device"] = "device",
+    idempotent: bool = False,
+) -> Caller:
     """
     返回一个Caller类，可用于装饰一个函数，使其注册为一个可被AI调用的function call函数
 
@@ -143,7 +160,7 @@ def on_function_call(description: str, params: Optional[Type[BaseModel]] = None,
 
     :return: Caller对象
     """
-    caller = Caller(description=description, params=params, read_only=read_only)
+    caller = Caller(description=description, params=params, read_only=read_only, scope=scope, idempotent=idempotent)
     return caller
 
 

@@ -10,6 +10,7 @@ from typing import Optional
 
 import yaml
 
+from muika.config import runtime_workspace
 from muika.database.crud import TopicHistoryCRUD
 from muika.database.db import get_session
 from muika.utils.logger import logger
@@ -60,6 +61,12 @@ TOPICS_PATH = Path("configs/topics.yml")
 BUILTIN_TOPICS_PATH = Path(__file__).parent.parent / "topics" / "topics.yml"
 """包内默认话题库路径。"""
 
+
+def topics_path() -> Path:
+    root = runtime_workspace()
+    return root / "configs/topics.yml" if root != Path.cwd() else TOPICS_PATH
+
+
 _RECENT_TYPE_PENALTY: float = 0.25
 _RECENT_TYPE_WINDOW: int = 3
 
@@ -76,7 +83,8 @@ class TopicStore:
         """返回当前生效的用户或包内话题库路径。"""
         if self._path is not None:
             return self._path
-        return TOPICS_PATH if TOPICS_PATH.is_file() else BUILTIN_TOPICS_PATH
+        path = topics_path()
+        return path if path.is_file() else BUILTIN_TOPICS_PATH
 
     def _load_from(self, path: Path) -> dict[str, list[StaticTopic]]:
         new_map: dict[str, list[StaticTopic]] = {}

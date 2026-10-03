@@ -59,6 +59,7 @@ class UserMessageEvent:
     payload: UserMessagePayload
     timestamp: datetime = field(default_factory=datetime.now)
     type: Literal["user_message"] = "user_message"
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class TimeTickEvent:
     payload: TimeTickPayload = field(default_factory=TimeTickPayload)
     timestamp: datetime = field(default_factory=datetime.now)
     type: Literal["time_tick"] = "time_tick"
+    think_mode: Literal["emotional", "topic"] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,27 @@ class AgentHandoffEvent:
     type: Literal["agent_handoff"] = "agent_handoff"
 
 
+ObservationType: TypeAlias = Literal[
+    "device_online", "device_offline", "device_capability_changed", "core_handoff_result"
+]
+OBSERVATION_TYPES: tuple[ObservationType, ...] = (
+    "device_online",
+    "device_offline",
+    "device_capability_changed",
+    "core_handoff_result",
+)
+
+
+@dataclass(frozen=True)
+class RuntimeObservationEvent:
+    """把设备变化和交接结果作为事实交回主人格。"""
+
+    report: str
+    source: str
+    type: ObservationType
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
 Event: TypeAlias = (
     UserMessageEvent
     | TimeTickEvent
@@ -167,4 +190,5 @@ Event: TypeAlias = (
     | TimeoutEvent
     | AgentTaskEvent
     | AgentHandoffEvent
+    | RuntimeObservationEvent
 )

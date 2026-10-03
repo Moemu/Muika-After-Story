@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from muika.config import mas_config
+from muika.config import mas_config, runtime_workspace
 
 PROTECTED_PREFIXES: tuple[str, ...] = (
     "muika/",
@@ -43,7 +43,7 @@ SelfModLayer = Literal["template", "skill", "topic", "plugin", "other"]
 
 def _project_root() -> Path:
     """返回当前工作目录（Core 进程的项目根）。"""
-    return Path.cwd()
+    return runtime_workspace()
 
 
 def _runtime_source_root() -> Path:
@@ -93,7 +93,7 @@ def allowed_roots(include_read_only: bool = False) -> list[Path]:
     paths: list[str] = list(_SANDBOX_PATHS)
     if mas_config.can_self_modify or include_read_only:
         paths.append(mas_config.plugins_dir)
-    roots = [Path(p).resolve() for p in paths if p]
+    roots = [(_project_root() / p).resolve() for p in paths if p]
     if include_read_only:
         roots.extend(_READ_ONLY_ROOTS)
     return roots
@@ -114,7 +114,7 @@ def resolve_self_path(
         raise SelfModError("Self-modification is disabled by configuration.")
 
     try:
-        resolved = Path(raw_path).resolve()
+        resolved = (_project_root() / raw_path).resolve()
     except Exception as e:
         raise SelfModError(f"Invalid path {raw_path!r}: {e}") from e
 
@@ -139,7 +139,7 @@ def resolve_self_path(
 
 def is_self_path(resolved: Path) -> bool:
     """识别人格、技能、话题和插件目录及其父目录。"""
-    roots = [Path(p).resolve() for p in (*_SANDBOX_PATHS, mas_config.plugins_dir, "configs/topics.yml")]
+    roots = [(_project_root() / p).resolve() for p in (*_SANDBOX_PATHS, mas_config.plugins_dir, "configs/topics.yml")]
     return any(resolved == root or root in resolved.parents or resolved in root.parents for root in roots)
 
 

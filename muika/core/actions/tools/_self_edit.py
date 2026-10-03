@@ -17,14 +17,14 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from muika.config import mas_config
+from muika.config import mas_config, runtime_workspace
 from muika.core.self_mod import SelfModError, get_self_mod_manager
 from muika.core.self_mod.plugin_deployer import get_plugin_deployer
 from muika.core.self_mod.policy import allowed_roots, display_path, resolve_self_path
 from muika.core.self_mod.validators import validate_content, validate_template
 from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
-from muika.template.loader import SEARCH_PATH
+from muika.template.loader import SEARCH_PATH, template_search_path
 from muika.utils.logger import logger
 
 from ._filesystem import _apply_edit
@@ -122,6 +122,7 @@ class SelfReadParams(BaseModel):
     "and the journal of her past self-modifications. "
     "This is how Muika looks at herself before deciding to change.",
     params=SelfReadParams,
+    scope="core",
     read_only=True,
 )
 async def self_read(path: str = "") -> str:
@@ -175,6 +176,7 @@ class SelfWriteParams(BaseModel):
     "which makes precise partial changes instead of rewriting the whole file. "
     "Every creation is validated and journaled. Plugin candidates stay in staging until plugin_load activates them.",
     params=SelfWriteParams,
+    scope="core",
 )
 async def self_write(path: str, content: str, reason: str) -> str:
     if _disabled():
@@ -238,6 +240,7 @@ class SelfEditParams(BaseModel):
     "called separately to apply it. The report always shows the file region around the change "
     "so she can verify it before committing.",
     params=SelfEditParams,
+    scope="core",
 )
 async def self_edit(
     path: str,
@@ -318,6 +321,7 @@ class SelfEditConfirmParams(BaseModel):
     "this tool commits normal files. Plugin candidates stay in staging until plugin_load activates them. "
     "If no preview is pending for the given path, it returns an error.",
     params=SelfEditConfirmParams,
+    scope="core",
 )
 async def self_edit_confirm(path: str, reason: Optional[str] = None) -> str:
     """将 self_edit 预览过的待写内容提交到磁盘。"""
@@ -421,6 +425,7 @@ class SelfRevertParams(BaseModel):
     "Revert one of Muika's self-modifications to how it was before. "
     "Useful when a change to herself did not feel right.",
     params=SelfRevertParams,
+    scope="core",
 )
 async def self_revert(path: str, revision: Optional[int] = None) -> str:
     if _disabled():
@@ -440,7 +445,7 @@ async def self_revert(path: str, revision: Optional[int] = None) -> str:
 
 def _resolve_template(name: str) -> Path:
     """遍历 SEARCH_PATH 定位模板文件。"""
-    for search_dir in SEARCH_PATH:
+    for search_dir in template_search_path():
         candidate = Path(str(search_dir)) / name
         if candidate.is_file():
             return candidate
@@ -450,7 +455,7 @@ def _resolve_template(name: str) -> Path:
 
 def _persist_persona_to_env(name: str) -> None:
     """将 persona_template 回写到 .env 文件，使其跨重启持久化。"""
-    env_path = Path(".env")
+    env_path = runtime_workspace() / ".env"
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -486,6 +491,7 @@ class PersonaSwitchParams(BaseModel):
     "Takes effect immediately and is persisted to .env so it survives restarts. "
     "Use persona_list to see available templates.",
     params=PersonaSwitchParams,
+    scope="core",
 )
 async def persona_switch(template_name: str) -> str:
     """切换人格模板：校验格式 → 更新配置 → 回写 .env → 立即生效。"""
@@ -526,6 +532,7 @@ async def persona_switch(template_name: str) -> str:
     "List all available persona templates (override layer + built-in), marking the currently active one. "
     "Use this before persona_switch to see what templates are available.",
     read_only=True,
+    scope="core",
 )
 async def persona_list() -> str:
     """列出所有可用的人格模板文件，标注当前激活项。"""
@@ -536,14 +543,15 @@ async def persona_list() -> str:
     lines = ["Available persona templates:"]
     found_any = False
 
-    override_dir = Path("./templates").resolve()
+    override_dir = (runtime_workspace() / "templates").resolve()
     if override_dir.is_dir():
         for p in sorted(override_dir.glob("*.jinja2")):
             marker = " ← ACTIVE" if p.name == current else ""
             lines.append(f"  [override] {p.name}{marker}")
             found_any = True
 
-    builtin_dir = Path(str(SEARCH_PATH[-1])) if len(SEARCH_PATH) > 1 else None
+    search_paths = template_search_path()
+    builtin_dir = Path(str(search_paths[-1])) if len(search_paths) > 1 else None
     if builtin_dir and builtin_dir.is_dir():
         for p in sorted(builtin_dir.glob("*.jinja2")):
             marker = " ← ACTIVE" if p.name == current else ""

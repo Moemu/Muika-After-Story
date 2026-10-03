@@ -254,12 +254,19 @@ class IpcClient:
             self._ws = None
         logger.info("Disconnected from Muika.")
 
-    async def send_user_message(self, message: str, resources: Optional[list[dict]] = None) -> bool:
+    async def send_user_message(
+        self,
+        message: str,
+        resources: Optional[list[dict]] = None,
+        *,
+        message_id: str | None = None,
+        conversation_id: str = "master",
+    ) -> bool:
         """向 Core 发送用户对话消息。"""
         msg = UserMessageEvent(message=message, resources=resources or [])
         return await self._send_or_queue(msg)
 
-    async def send_command(self, raw: str) -> bool:
+    async def send_command(self, raw: str, *, message_id: str | None = None, conversation_id: str = "master") -> bool:
         """向 Core 发送命令。"""
         msg = CommandEvent(raw=raw)
         return await self._send_or_queue(msg)

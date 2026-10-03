@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import platform
-import sys
-from pathlib import Path
 
 from muika.config import get_model_config, mas_config
 
 # 导入工具模块以完成注册。
 from muika.core.actions import tools as _tools  # noqa: F401
+from muika.core.devices import ExecutionEnvironment
 from muika.core.executor import Executor
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.state import MuikaState
@@ -64,7 +62,9 @@ class Agent:
         self.memory_reasoner.compactor.model = summarize_model
         model.compactor = self.memory_reasoner.compactor
 
-    def build_request(self, command: str, state: MuikaState | None = None) -> ModelRequest:
+    def build_request(
+        self, command: str, state: MuikaState | None = None, *, environment: ExecutionEnvironment | None = None
+    ) -> ModelRequest:
         """组装当前模板、技能、工具和实际运行环境。"""
         self.refresh_models()
         system = generate_prompt_from_template(mas_config.agent_template)
@@ -74,13 +74,7 @@ class Agent:
         skills_section = self._skill_manager.render_prompt_section()
         if skills_section:
             system += f"\n\n{skills_section}"
-        system += (
-            f"\n\nExecution environment: OS={platform.system()}; cwd={Path.cwd()}; "
-            f"Python={sys.executable}. Default shell={'powershell' if sys.platform == 'win32' else 'bash'}. "
-            "Use this environment's syntax. A running process is not a completed check."
-            f" Action permission={mas_config.action_permission}; code review={mas_config.code_review_mode}; "
-            f"allowed file roots={mas_config.fs_allowed_paths}."
-        )
+        system += "\n\n" + (environment or ExecutionEnvironment.local()).describe()
         return ModelRequest(prompt=f"Command: {command}", system=system, tools=get_tool_list())
 
     async def execute_command(
