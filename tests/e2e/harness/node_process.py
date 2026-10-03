@@ -30,7 +30,12 @@ async def main() -> None:
     recorder = TraceRecorder(profile.directory)
     with pytest.MonkeyPatch.context() as monkeypatch:
         turns = [ScriptedTurn(text=text) for text in json.loads(args.turns.read_text(encoding="utf-8"))]
-        CoreApp(monkeypatch, recorder, turns=turns)
+        app = CoreApp(monkeypatch, recorder, turns=turns)
+        app.scripted.add_route(
+            when=lambda request: request.prompt.partition("] ")[2].startswith("[Runtime observation]"),
+            text="<do_nothing>",
+            name="quiet_device_observation",
+        )
         mas_config.data_dir = profile.directory
         await init_db(profile.directory / "device-audit.db")
         node = CoreNode(

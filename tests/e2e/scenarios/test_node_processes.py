@@ -147,6 +147,7 @@ async def test_kill_pc_and_restart_state_with_real_nodes(tmp_path, recorder):
 
     async def deliver(message, resources):
         replies.append(message)
+        recorder.record("delivered", message_id=message.id, text=message.text, conversation=message.conversation_id)
 
     async def status(value):
         statuses.append(value)
@@ -171,6 +172,7 @@ async def test_kill_pc_and_restart_state_with_real_nodes(tmp_path, recorder):
         await until(lambda: any("继续那首诗" in reply.text for reply in replies))
         takeover_seconds = time.monotonic() - started
         assert takeover_seconds < 15
+        before_restart = len(replies)
         state_job.kill()
         await state_job.wait()
         await until(lambda: not bot.connected.is_set())
@@ -178,7 +180,7 @@ async def test_kill_pc_and_restart_state_with_real_nodes(tmp_path, recorder):
             IncomingMessage(id="offline", client_id="chat", conversation_id="private", text="刚才的消息还在吗？")
         )
         await launch("state", "server")
-        await until(lambda: any("没有忘记" in reply.text for reply in replies))
+        await until(lambda: any("没有忘记" in reply.text for reply in replies[before_restart:]))
         await bot.queue_input(original)
         await asyncio.sleep(0.5)
         assert len([reply for reply in replies if "记住了" in reply.text]) == 1
