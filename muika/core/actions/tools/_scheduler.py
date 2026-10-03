@@ -16,8 +16,10 @@ class PlanFutureEventParams(BaseModel):
 
 
 @on_function_call(
-    "Schedule a future event for Muika. Reminders exist only in memory and are lost when Core restarts.",
+    "Schedule a future event for Muika. Node deployments persist reminders; standalone mode keeps them in memory.",
     params=PlanFutureEventParams,
+    scope="core",
+    idempotent=True,
 )
 async def plan_future_event(
     event: str,
@@ -36,4 +38,6 @@ async def plan_future_event(
         )
     except (ValueError, RuntimeError, OverflowError, OSError) as exc:
         return f"Cannot schedule event: {exc}"
+    if executor.scheduler.persistent:
+        return "Future event scheduled and saved. It survives Core handoff and state service restart."
     return "Future event scheduled. This reminder will be lost if Core restarts."

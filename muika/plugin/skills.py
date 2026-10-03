@@ -4,6 +4,9 @@ import atexit
 import re
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -134,7 +137,8 @@ class SkillFileHandler(FileSystemEventHandler):
 class SkillManager:
     """技能管理器：启动时扫描技能目录，并通过文件监听实现热重载"""
 
-    def __init__(self) -> None:
+    def __init__(self, roots: list[Path] | None = None) -> None:
+        self.roots = roots
         self._skills: dict[str, AgentSkill] = {}
         """当前技能注册表（name -> AgentSkill），替换时整体原子交换"""
         self._skills_lock = threading.Lock()
@@ -149,6 +153,8 @@ class SkillManager:
 
     def _skill_roots(self) -> list[Path]:
         """按优先级从低到高返回技能根目录（用户目录在后，扫描时覆盖内置同名技能）"""
+        if self.roots is not None:
+            return self.roots
         roots = [BUILTIN_SKILLS_PATH, SKILLS_PATH]
         if mas_config.load_user_skills:
             roots.extend(USER_SKILL_PATHS)
@@ -226,10 +232,24 @@ class SkillManager:
 
 _skill_manager: Optional[SkillManager] = None
 _skill_manager_lock = threading.Lock()
+_runtime_skills: ContextVar[SkillManager | None] = ContextVar("runtime_skills", default=None)
+
+
+@contextmanager
+def cognitive_skills(directory: Path) -> Iterator[None]:
+    manager = SkillManager([BUILTIN_SKILLS_PATH, directory])
+    token = _runtime_skills.set(manager)
+    try:
+        yield
+    finally:
+        _runtime_skills.reset(token)
+        manager.stop_watcher()
 
 
 def get_skill_manager() -> SkillManager:
     """获取技能管理器单例（首次调用时执行启动扫描并启动监听）"""
+    if current := _runtime_skills.get():
+        return current
     global _skill_manager
     with _skill_manager_lock:
         if _skill_manager is None:

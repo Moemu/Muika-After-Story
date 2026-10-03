@@ -1,0 +1,13 @@
+services:
+  mas:
+    build:
+      context: ..
+      dockerfile: deploy/node.Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ../data/node-server:/data
+      - ../configs:/workspace/configs:ro
+      - ../templates:/workspace/templates:ro
+      - ../.env:/workspace/.env:ro
+    stop_grace_period: 20s

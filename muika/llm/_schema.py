@@ -38,6 +38,7 @@ class ToolResult(BaseModel):
     text: str
     is_error: bool = False
     resources: list[MediaReference] = Field(default_factory=list)
+    outcome: Literal["completed", "not_executed", "unknown"] = "completed"
 
 
 class ModelMessage(BaseModel):

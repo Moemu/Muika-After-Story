@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import AsyncGenerator
 
-if TYPE_CHECKING:
-    from alembic.config import Config as AlembicConfig
-
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from muika.config import mas_config
@@ -19,6 +18,8 @@ from muika.utils.logger import logger
 
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+_database_path: Path | None = None
+_transaction_session: ContextVar[AsyncSession | None] = ContextVar("transaction_session", default=None)
 
 
 async def init_db(db_path: Path | None = None) -> None:
@@ -26,7 +27,7 @@ async def init_db(db_path: Path | None = None) -> None:
 
     :param db_path: path to the SQLite file.  Defaults to ``mas_config.data_dir / "muika.db"``.
     """
-    global _engine, _session_factory
+    global _engine, _session_factory, _database_path
 
     if db_path is None:
         db_path = mas_config.data_dir / "muika.db"
@@ -38,7 +39,24 @@ async def init_db(db_path: Path | None = None) -> None:
 
     url = f"sqlite+aiosqlite:///{db_path}"
     _engine = create_async_engine(url, echo=False)
+
+    @event.listens_for(_engine.sync_engine, "connect")
+    def configure_sqlite(connection, record) -> None:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.close()
+
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+    _database_path = db_path.resolve()
+
+
+def database_path() -> Path:
+    """返回当前数据库的绝对路径，供独占状态服务锁使用。"""
+    if _database_path is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    return _database_path
 
 
 async def _run_migrations(db_path: Path) -> None:
@@ -56,16 +74,17 @@ async def _run_migrations(db_path: Path) -> None:
     alembic_cfg_path = (
         alembic_cfg_path if alembic_cfg_path.exists() else Path(__file__).resolve().parent.parent.parent / "alembic.ini"
     )
-    alembic_cfg = AlembicConfig(alembic_cfg_path)
+    alembic_cfg = AlembicConfig(str(alembic_cfg_path) if alembic_cfg_path.is_file() else None)
+    alembic_cfg.set_main_option("script_location", str(Path(__file__).resolve().parent.parent / "migrations"))
     # 运行时覆盖数据库 URL
     db_url = f"sqlite+aiosqlite:///{db_path}"
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
-    def _sync_run() -> None:
+    def _migrate_unlocked() -> None:
         from alembic.script import ScriptDirectory
 
         if db_path.exists():
-            with sqlite3.connect(db_path) as source:
+            with closing(sqlite3.connect(db_path)) as source:
                 tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 current = (
                     source.execute("SELECT version_num FROM alembic_version").fetchone()
@@ -77,27 +96,30 @@ async def _run_migrations(db_path: Path) -> None:
                     backup_dir = db_path.parent / "backups"
                     backup_dir.mkdir(parents=True, exist_ok=True)
                     backup = backup_dir / f"{db_path.stem}-before-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
-                    with sqlite3.connect(backup) as destination:
+                    with closing(sqlite3.connect(backup)) as destination:
                         source.backup(destination)
                     logger.info(f"Backup saved before update: {backup}")
         # 自动标记旧数据库
-        _ensure_alembic_version_table(db_path, alembic_cfg)
+        _ensure_alembic_version_table(db_path)
         alembic_command.upgrade(alembic_cfg, "head")
+
+    def _sync_run() -> None:
+        with closing(sqlite3.connect(db_path.with_name(db_path.name + ".service-lock"), timeout=0)) as guard:
+            try:
+                guard.execute("BEGIN EXCLUSIVE")
+            except sqlite3.OperationalError as exc:
+                raise RuntimeError("Stop the state service before opening or upgrading this database.") from exc
+            _migrate_unlocked()
 
     await asyncio.to_thread(_sync_run)
 
-    # 迁移完成后清理 alembic 模块，释放内存
-    _cleanup_alembic_modules()
 
-
-def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> None:
+def _ensure_alembic_version_table(db_path: Path) -> None:
     """如果数据库文件存在且包含 ORM 表但缺少 ``alembic_version`` 表，
     通过 sqlite3 标记已有结构对应的版本，再执行后续迁移。
     """
     if not db_path.exists():
         return  # 全新部署，无需标记
-
-    from alembic.script import ScriptDirectory
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -115,8 +137,10 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
 
         if has_user_tables:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if {"memory_runtime", "experience", "diary", "fact", "fact_recall"} <= tables:
-                head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
+            if {"runtime_authority", "runtime_inbox", "runtime_outbox"} <= tables:
+                head = "e262d3967ada"
+            elif {"memory_runtime", "experience", "diary", "fact", "fact_recall"} <= tables:
+                head = "5e446de27cb4"
             elif {"agent_task", "agent_call"} <= tables:
                 head = "3b6a7e5f332e"
             elif "self_modification_log" in tables:
@@ -149,6 +173,10 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
     :raises RuntimeError: if :func:`init_db` has not been called.
     """
+    current = _transaction_session.get()
+    if current is not None:
+        yield current
+        return
     if _session_factory is None:
         raise RuntimeError("Database not initialized -- call init_db() first")
 
@@ -161,22 +189,22 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-def _cleanup_alembic_modules() -> None:
-    """移除 alembic 相关模块以释放内存。"""
-    import gc
-    import sys
-
-    alembic_keys = [k for k in sys.modules if k == "alembic" or k.startswith("alembic.")]
-    for key in alembic_keys:
-        del sys.modules[key]
-    gc.collect()
-    logger.debug(f"[DB] Released {len(alembic_keys)} alembic modules from memory")
+@asynccontextmanager
+async def business_transaction() -> AsyncGenerator[AsyncSession, None]:
+    """让嵌套业务操作共享一个事务，由最外层负责提交。"""
+    async with get_session() as session:
+        token = _transaction_session.set(session)
+        try:
+            yield session
+        finally:
+            _transaction_session.reset(token)
 
 
 async def close_db() -> None:
     """Dispose the engine (call at shutdown)."""
-    global _engine, _session_factory
+    global _engine, _session_factory, _database_path
     if _engine is not None:
         await _engine.dispose()
         _engine = None
         _session_factory = None
+        _database_path = None

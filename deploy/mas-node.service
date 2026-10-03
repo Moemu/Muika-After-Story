@@ -1,0 +1,17 @@
+[Unit]
+Description=Muika After Story persistent state and server Core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=muika
+WorkingDirectory=/opt/Muika-After-Story
+ExecStart=/opt/Muika-After-Story/.venv/bin/python -m muika.node serve /var/lib/muika/server.json
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

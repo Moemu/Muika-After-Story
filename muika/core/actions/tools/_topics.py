@@ -11,12 +11,13 @@ import asyncio
 import json
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 import yaml
 from pydantic import BaseModel, Field
 
-from muika.config import mas_config
+from muika.config import mas_config, runtime_workspace
 from muika.core.self_mod import SelfModError
 from muika.core.self_mod.manager import SelfModAction, get_self_mod_manager
 from muika.core.self_mod.validators import validate_topics
@@ -48,9 +49,15 @@ _TOPICS_LOCK = asyncio.Lock()
 _DISABLED_MSG = "Self-modification is disabled by configuration."
 
 
+def _user_topics_path() -> Path:
+    root = runtime_workspace()
+    return root / "configs/topics.yml" if root != Path.cwd() else TOPICS_PATH
+
+
 def _read_topics_text() -> str:
     """读取话题库原文。"""
-    path = TOPICS_PATH if TOPICS_PATH.is_file() else BUILTIN_TOPICS_PATH
+    user_path = _user_topics_path()
+    path = user_path if user_path.is_file() else BUILTIN_TOPICS_PATH
     return path.read_text(encoding="utf-8")
 
 
@@ -118,17 +125,18 @@ async def _apply_topics_change(new_text: str, reason: str, action: SelfModAction
     topic_manager = get_topic_manager()
     if topic_manager is not None:
         topic_manager.reload_store()
-    await get_self_mod_manager().record_event(str(TOPICS_PATH), action, reason, source="self")
+    await get_self_mod_manager().record_event(str(_user_topics_path()), action, reason, source="self")
     logger.debug(f"[Topics] topics.yml updated: {reason[:80]}")
     return f"Topic library updated. Reason: {reason}"
 
 
 def _atomic_write_topics(content: str) -> None:
     """先写临时文件再原子替换，避免半写状态。"""
-    TOPICS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = TOPICS_PATH.parent / (TOPICS_PATH.name + ".tmp")
+    path = _user_topics_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp")
     tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, TOPICS_PATH)
+    os.replace(tmp, path)
 
 
 def _disabled_or_reason_missing(reason: str) -> Optional[str]:
@@ -153,6 +161,7 @@ class TopicListParams(BaseModel):
     "List topic seeds in Muika's topic library, optionally filtered by category or keyword. "
     "Use this to see what topics she already has before adding or changing one.",
     params=TopicListParams,
+    scope="core",
 )
 async def topic_list(category: str = "", keyword: str = "", limit: int = 30) -> str:
     try:
@@ -197,6 +206,7 @@ class TopicAddParams(BaseModel):
     "is maintained by the system, so nothing else can be damaged. Check existing topics with topic_list "
     "first to avoid duplicates.",
     params=TopicAddParams,
+    scope="core",
 )
 async def topic_add(
     id: str,
@@ -272,6 +282,7 @@ class TopicUpdateParams(BaseModel):
     "Change ONE existing topic seed in Muika's topic library (its concept, category, tags or cooldown). "
     "Only the given fields are replaced; everything else stays untouched.",
     params=TopicUpdateParams,
+    scope="core",
 )
 async def topic_update(
     id: str,
@@ -340,6 +351,7 @@ class TopicDeleteParams(BaseModel):
     "Remove ONE topic seed from Muika's topic library. If she changes her mind later, "
     "she can simply topic_add it again.",
     params=TopicDeleteParams,
+    scope="core",
 )
 async def topic_delete(id: str, reason: str = "") -> str:
     if gate := _disabled_or_reason_missing(reason):

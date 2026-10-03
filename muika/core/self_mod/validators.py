@@ -10,7 +10,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from muika.config import mas_config
 from muika.core.state import MuikaState
-from muika.template.loader import SEARCH_PATH
+from muika.template.loader import template_search_path
 from muika.template.model import PromptTemplatesData
 
 from .policy import SelfModError
@@ -63,7 +63,7 @@ def validate_template(content: str, *, agent: bool = False) -> None:
     :param content: 待校验的模板全文
     :param agent: 是否为 Agent 模板（决定试渲染的数据语义）
     """
-    env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
+    env = Environment(loader=FileSystemLoader(template_search_path()), autoescape=True)
 
     try:
         env.parse(content)

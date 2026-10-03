@@ -55,6 +55,22 @@ def _result(result: ProcessResult) -> ToolResult:
     )
 
 
+@on_function_call("List background processes owned by the current task.", read_only=True)
+async def active_task_processes() -> str:
+    """只列出当前任务在本设备拥有的进程。"""
+    owner = _owner()
+    return json.dumps(get_process_manager().active_for(owner)) if owner else "[]"
+
+
+@on_function_call("Stop all background processes owned by the current task.", idempotent=True)
+async def stop_task_processes() -> str:
+    """停止当前任务拥有的本机进程。"""
+    owner = _owner()
+    if owner:
+        await get_process_manager().stop_owner(owner)
+    return "Task processes stopped."
+
+
 class ExecutionParams(BaseModel):
     timeout: float = Field(
         _DEFAULT_TIMEOUT, gt=0, description="Hard execution deadline in seconds. Default 30 minutes."
@@ -244,7 +260,9 @@ class ReadTaskOutputParams(BaseModel):
     max_chars: int = Field(12000, ge=1, le=100000)
 
 
-@on_function_call("Read another page of this task's saved tool output.", params=ReadTaskOutputParams, read_only=True)
+@on_function_call(
+    "Read another page of this task's saved tool output.", params=ReadTaskOutputParams, read_only=True, scope="core"
+)
 async def read_task_output(path: str, offset: int = 0, max_chars: int = 12000):
     owner = _owner()
     if owner is None:

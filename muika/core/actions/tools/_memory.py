@@ -30,6 +30,7 @@ class MemoryParams(BaseModel):
 @on_function_call(
     "Record a note for your next dream, recall memories by keyword, inspect original sources, or forget a fact.",
     params=MemoryParams,
+    scope="core",
 )
 async def memory(
     type: str,

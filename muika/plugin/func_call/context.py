@@ -27,6 +27,8 @@ class ToolContext:
     execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None
     review_context: str = ""
     is_current: Callable[[], bool] | None = None
+    execution_id: str | None = None
+    input_paths: frozenset[str] = frozenset()
 
 
 _tool_context: ContextVar[ToolContext | None] = ContextVar("tool_context", default=None)
@@ -42,6 +44,8 @@ def tool_context(
     execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None,
     review_context: str = "",
     is_current: Callable[[], bool] | None = None,
+    execution_id: str | None = None,
+    input_paths: frozenset[str] = frozenset(),
 ) -> Iterator[ToolContext]:
     """隔离本次调用的资源，并在退出时恢复外层上下文。"""
     context = ToolContext(
@@ -52,6 +56,8 @@ def tool_context(
         execute_tool=execute_tool,
         review_context=review_context,
         is_current=is_current,
+        execution_id=execution_id,
+        input_paths=input_paths,
     )
     token = _tool_context.set(context)
     try:

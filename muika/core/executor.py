@@ -5,6 +5,7 @@ from typing import Callable, Coroutine, Optional
 
 from muika.models import Resource
 
+from .devices import DeviceControl
 from .scheduler import Scheduler
 
 COMMON_PUNCTUATION = "。！？；…\n"
@@ -33,6 +34,7 @@ class Executor:
     ) -> None:
         self.scheduler = Scheduler(event_queue=event_queue)
         self._send_func = send_func
+        self.devices: DeviceControl | None = None
 
     @staticmethod
     def _split_message(content: str, max_length_per_message: int = 250) -> list[str]:

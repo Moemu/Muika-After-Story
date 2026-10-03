@@ -31,13 +31,18 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
     """
     allowed = [Path(p).resolve() for p in mas_config.fs_allowed_paths]
 
-    if not allowed:
-        raise _FSError("File system tools are disabled by configuration.")
-
     try:
         resolved = Path(raw_path).resolve()
     except Exception as e:
         raise _FSError(f"Invalid path {raw_path!r}: {e}") from e
+
+    context = get_dependencies().get(ToolContext)
+    if isinstance(context, ToolContext) and str(resolved) in context.input_paths:
+        if require_write:
+            raise _FSError("Transferred attachments are immutable. Write a separate result in an allowed directory.")
+        return resolved
+    if not allowed:
+        raise _FSError("File system tools are disabled by configuration.")
 
     if not any(resolved == root or root in resolved.parents for root in allowed):
         raise _FSError(
@@ -233,7 +238,7 @@ async def write_file(path: str, content: str, write_mode: str = "overwrite", enc
         return ToolError(f"Permission denied: {resolved}")
     except Exception as e:
         logger.error(f"[WriteFile] Failed: {e}")
-        return ToolError(f"Error: {e}")
+        return ToolError(f"Error: {e}", outcome="unknown")
 
 
 class EditFileParams(BaseModel):
@@ -318,7 +323,7 @@ async def edit_file(
         return ToolError(f"Permission denied: {resolved}")
     except Exception as e:
         logger.error(f"[EditFile] Failed to write: {e}")
-        return ToolError(f"Error writing file: {e}")
+        return ToolError(f"Error writing file: {e}", outcome="unknown")
 
     logger.debug(f"[EditFile] Applied '{operation}' to {resolved}")
     return f"File edited successfully ({operation}): {resolved}"

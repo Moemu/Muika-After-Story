@@ -1515,8 +1515,11 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyperclip" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
-    { name = "sqlalchemy" },
+    { name = "pyyaml" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "trafilatura" },
+    { name = "tzdata" },
+    { name = "tzlocal" },
     { name = "watchdog" },
 ]
 
@@ -1575,9 +1578,12 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=311" },
-    { name = "sqlalchemy", specifier = ">=2.0.46" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.46" },
     { name = "trafilatura", specifier = ">=2.0.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
+    { name = "tzdata", specifier = ">=2025.1" },
+    { name = "tzlocal", specifier = ">=5.0" },
     { name = "watchdog", specifier = ">=6.0.0" },
 ]
 provides-extras = ["standard", "nonebot", "dev"]
@@ -2924,6 +2930,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a1/d8/41e0bdfc0f930ff236f86fccd12962d8fa03713f17ed57332d38af6a3782/sqlalchemy-2.0.46-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:b2a9f9aee38039cf4755891a1e50e1effcc42ea6ba053743f452c372c3152b1b", size = 3464292, upload-time = "2026-01-21T18:33:08.208Z" },
     { url = "https://files.pythonhosted.org/packages/f0/8b/9dcbec62d95bea85f5ecad9b8d65b78cc30fb0ffceeb3597961f3712549b/sqlalchemy-2.0.46-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:db23b1bf8cfe1f7fda19018e7207b20cdb5168f83c437ff7e95d19e39289c447", size = 3473497, upload-time = "2026-01-21T18:45:10.552Z" },
     { url = "https://files.pythonhosted.org/packages/fc/a1/9c4efa03300926601c19c18582531b45aededfb961ab3c3585f1e24f120b/sqlalchemy-2.0.46-py3-none-any.whl", hash = "sha256:f9c11766e7e7c0a2767dda5acb006a118640c9fc0a4104214b96269bfb78399e", size = 1937882, upload-time = "2026-01-21T18:22:10.456Z" },
+]
+
+[package.optional-dependencies]
+asyncio = [
+    { name = "greenlet" },
 ]
 
 [[package]]

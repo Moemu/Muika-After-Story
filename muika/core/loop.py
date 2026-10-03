@@ -1,6 +1,7 @@
 """驱动 Muika 的事件处理、对话和后台活动。"""
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -9,7 +10,7 @@ from datetime import datetime
 from random import random
 from typing import Coroutine, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import ValidationError
 
 from muika.config import mas_config
 from muika.models import AdapterInfo
@@ -18,6 +19,8 @@ from muika.utils.logger import logger
 from muika.utils.utils import parse_duration
 
 from .agent.agent import Agent
+from .agent.task_store import TaskControl as AgentControl
+from .agent.task_store import TaskStore
 from .agent.tasks import AgentTasks
 from .brain import MuikaBrain
 from .constants import (
@@ -33,6 +36,7 @@ from .events import (
     AgentHandoffEvent,
     AgentTaskEvent,
     Event,
+    RuntimeObservationEvent,
     SessionEndEvent,
     TimeoutEvent,
     TimeTickEvent,
@@ -42,20 +46,13 @@ from .memory import MemoryManager, RecallResult, StateUpdate
 from .processes import get_process_manager
 from .reflection import ReflectionAgent
 from .restart import RestartController
+from .runtime import CognitiveRuntime, RuntimeControls, TaskIntent
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
+from .task_processes import TaskProcesses
 from .topic_manager import TopicManager
 
 TaskResult = TypeVar("TaskResult")
-
-
-class AgentControl(BaseModel):
-    """主人格对已知行动任务的内部控制。"""
-
-    model_config = ConfigDict(extra="forbid")
-    task_id: str
-    action: Literal["continue", "cancel", "complete"] = "continue"
-    instruction: str = ""
 
 
 @dataclass
@@ -84,12 +81,22 @@ class ParsedReply:
 class Muika:
     """管理人格状态、记忆和活动，并通过 Executor 发送消息。"""
 
-    def __init__(self, executor: Executor, event_queue: asyncio.Queue[Event]) -> None:
+    def __init__(
+        self,
+        executor: Executor,
+        event_queue: asyncio.Queue[Event],
+        *,
+        memory: MemoryManager | None = None,
+        task_store: TaskStore | None = None,
+        runtime: CognitiveRuntime | None = None,
+        processes: TaskProcesses | None = None,
+    ) -> None:
         self.restart = RestartController()
         self.is_alive: bool = False
 
         self.state = MuikaState()
-        self.memory = MemoryManager()
+        self.memory = memory if memory is not None else MemoryManager()
+        self.runtime = runtime
         self.state.memory = self.memory
         self.event_queue = event_queue
         self.executor = executor
@@ -97,7 +104,15 @@ class Muika:
 
         self.brain = MuikaBrain()
         self.agent = Agent()
-        self.agent_tasks = AgentTasks(self.agent, self.state, self.executor, self.event_queue)
+        self.agent_tasks = AgentTasks(
+            self.agent,
+            self.state,
+            self.executor,
+            self.event_queue,
+            store=task_store,
+            processes=processes,
+            environment=runtime.execution_environment if runtime is not None else None,
+        )
         self.topic_manager = TopicManager()
         self.digest_agent = DigestAgent(self.topic_manager)
         self.reflection = ReflectionAgent(
@@ -111,6 +126,8 @@ class Muika:
         self._is_collecting_event: bool = False
         self._last_digest_time: float = 0.0
         self._timeout_task: Optional[asyncio.Task] = None
+        self._timeout_set_at: datetime | None = None
+        self._timeout_seconds: float | None = None
         self._reflection_task: Optional[asyncio.Task] = None
         self._god_mode: bool = False
         self._god_mode_pending: bool = False
@@ -128,6 +145,60 @@ class Muika:
     async def create_event(self, event: Event) -> None:
         """将事件放入处理队列。"""
         await self.event_queue.put(event)
+
+    def runtime_controls(self) -> RuntimeControls:
+        """返回接管时需要延续的控制状态。"""
+        return RuntimeControls(
+            self._god_mode,
+            self._god_mode_pending,
+            self._session_end_triggered,
+            self._timeout_set_at,
+            self._timeout_seconds,
+        )
+
+    def restore_controls(self, saved: RuntimeControls) -> None:
+        """延续已提交的行动归属和等待期限，不重复启动已知动作。"""
+        self._god_mode, self._god_mode_pending = saved.god_mode, saved.god_mode_pending
+        self._session_end_triggered = saved.session_end_triggered
+        self.agent_tasks.restore_persona_owner(saved.god_mode or saved.god_mode_pending)
+        self._timeout_set_at, self._timeout_seconds = saved.timeout_set_at, saved.timeout_seconds
+
+    def resume_controls(self) -> None:
+        """任务恢复完成后继续等待和主人格接手流程。"""
+        if (
+            self._timeout_set_at is not None
+            and self._timeout_seconds is not None
+            and (self._timeout_task is None or self._timeout_task.done())
+        ):
+            self._timeout_task = self.start_background_task(
+                self._wait_timeout(self._timeout_seconds, self._timeout_set_at)
+            )
+        if self._god_mode_pending:
+            self.start_background_task(self._finish_agent_handoff())
+
+    def pending_controls(self, *, timeout: float | None, god_mode: bool, release_persona: bool) -> RuntimeControls:
+        """准备候选控制状态，不改变当前运行状态。"""
+        saved = self.runtime_controls()
+        if release_persona:
+            saved.god_mode = False
+        if timeout is not None and timeout > 0:
+            saved.timeout_set_at, saved.timeout_seconds = datetime.now(), timeout
+        if god_mode and not saved.god_mode and not saved.god_mode_pending:
+            saved.god_mode_pending = True
+        return saved
+
+    def commit_controls(self, saved: RuntimeControls) -> None:
+        """应用已提交的控制状态，并启动相应等待或交接。"""
+        timeout_changed = (saved.timeout_set_at, saved.timeout_seconds) != (
+            self._timeout_set_at,
+            self._timeout_seconds,
+        )
+        start_handoff = saved.god_mode_pending and not self._god_mode_pending
+        if timeout_changed:
+            self._cancel_timeout()
+        self.restore_controls(saved)
+        if timeout_changed or start_handoff:
+            self.resume_controls()
 
     def get_think_mode(self, event: Event) -> Optional[Literal["emotional", "topic"]]:
         """
@@ -195,7 +266,10 @@ class Muika:
 
             event = await self.collect_events()
             try:
-                await self._process_event(event, dt)
+                if self.runtime is None:
+                    await self._process_event(event, dt)
+                else:
+                    await self.runtime.process_event(event, dt, self._process_event)
             except Exception as exc:
                 if isinstance(event, AgentTaskEvent):
                     self.agent_tasks.defer_event(event)
@@ -208,6 +282,10 @@ class Muika:
         :param dt: 距上次循环的秒数
         """
         self._log_event(event)
+        if isinstance(event, TimeoutEvent):
+            if self.state.last_interaction > event.set_at:
+                return
+            self._cancel_timeout()
         if is_core_maintenance_active():
             if isinstance(event, AgentTaskEvent):
                 self.agent_tasks.defer_event(event)
@@ -225,12 +303,18 @@ class Muika:
                 timestamp=event.timestamp,
             )
             await self.memory.record_task_result(event.task_id, event.status)
+        elif isinstance(event, RuntimeObservationEvent):
+            await self.memory.add_context("agent", event.report, source=event.source, timestamp=event.timestamp)
         elif isinstance(event, AgentHandoffEvent):
             if not self._god_mode_pending:
                 return
             self._god_mode = True
             self._god_mode_pending = False
-        think_mode = self.get_think_mode(event)
+        think_mode = (
+            event.think_mode
+            if self.runtime is not None and isinstance(event, TimeTickEvent)
+            else self.get_think_mode(event)
+        )
 
         if think_mode is None:
             await self._tick_idle(event, dt)
@@ -243,6 +327,7 @@ class Muika:
                 event.payload.message.message,
                 resources=event.payload.message.resources,
                 timestamp=event.timestamp,
+                source=event.source,
             )
             self._cancel_timeout()
 
@@ -421,18 +506,20 @@ class Muika:
             logger.warning(f"[Timeout] non-positive duration {seconds:.1f}s -- ignored.")
             return
         self._timeout_task = self.start_background_task(self._wait_timeout(seconds))
+        self._timeout_set_at, self._timeout_seconds = datetime.now(), seconds
 
     def _cancel_timeout(self) -> None:
         """取消当前挂起的超时任务（用户已回复或会话结束时调用）。"""
         if self._timeout_task is not None:
             self._timeout_task.cancel()
             self._timeout_task = None
+        self._timeout_set_at = self._timeout_seconds = None
 
-    async def _wait_timeout(self, seconds: float) -> None:
+    async def _wait_timeout(self, seconds: float, origin: datetime | None = None) -> None:
         """等待 *seconds* 秒；期间用户若已回复则跳过，否则投递超时事件。"""
-        set_at = datetime.now()
+        set_at = origin or self._timeout_set_at or datetime.now()
         try:
-            await asyncio.sleep(seconds)
+            await asyncio.sleep(max(0, seconds - (datetime.now() - set_at).total_seconds()))
             # 设限后用户回过消息（last_interaction 已更新），则不再触发
             if self.state.last_interaction <= set_at:
                 await self.create_event(TimeoutEvent(set_at=set_at, duration=seconds))
@@ -441,6 +528,43 @@ class Muika:
 
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
+        if self.runtime is not None:
+
+            async def expand() -> tuple[str, list]:
+                topic = await self.topic_manager.get_next_topic(self.state)
+                if topic is None:
+                    return "", []
+                expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
+                return (
+                    json.dumps(
+                        {"id": topic.id, "content": topic.content, "category": topic.category, "reply": expanded}
+                    ),
+                    [],
+                )
+
+            saved, resources = await self.runtime.generate("topic", expand)
+            if not saved:
+                return
+            topic_result = json.loads(saved)
+            parsed = self._parse_reply_tags(topic_result["reply"])
+            pending_topic = None
+            if not parsed.do_nothing and parsed.clean_reply:
+                pending_topic = ActiveTopicState(
+                    topic_id=topic_result["id"],
+                    topic_seed=topic_result["content"],
+                    topic_type=topic_result["category"],
+                )
+            await self.runtime.commit_reply(
+                None if parsed.do_nothing else parsed.clean_reply,
+                resources,
+                parsed.target,
+                parsed.state_updates,
+                parsed.memory_contents,
+                [],
+                timeout=parsed.timeout if not parsed.do_nothing else None,
+                topic=pending_topic,
+            )
+            return
         topic = await self.topic_manager.get_next_topic(self.state)
         if not topic:
             logger.debug("[Topic] No available seed -- skipping topic pipeline this tick.")
@@ -487,42 +611,71 @@ class Muika:
         if event.type == "time_tick":
             await self.memory.mark_considered()
         persona_task = self.agent_tasks.persona_task() if self._god_mode else None
-        with tool_context(
-            self.state,
-            self.executor,
-            task_id=persona_task.id if persona_task else None,
-            file_versions=persona_task.file_versions if persona_task else None,
-            execute_tool=self.agent_tasks.execute_persona_call if persona_task else None,
-            review_context=(
-                event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
-            ),
-        ) as context:
-            reply = await self.brain.generate_reply(
-                event=event,
-                state=self.state,
-                memory=self.memory,
-                recalled_memories=recalled_memories or None,
-                adapters=self.current_adapters,
-                god_mode=self._god_mode,
-                resources=event.payload.message.resources if event.type == "user_message" else None,
-                task_context=self.agent_tasks.describe() + "\n" + self.restart.describe(),
-            )
-            resources = context.resources
+
+        async def generate() -> tuple[str, list]:
+            with tool_context(
+                self.state,
+                self.executor,
+                task_id=persona_task.id if persona_task else None,
+                file_versions=persona_task.file_versions if persona_task else None,
+                execute_tool=self.agent_tasks.execute_persona_call if persona_task else None,
+                review_context=(
+                    event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
+                ),
+            ) as context:
+                reply = await self.brain.generate_reply(
+                    event=event,
+                    state=self.state,
+                    memory=self.memory,
+                    recalled_memories=recalled_memories or None,
+                    adapters=self.current_adapters,
+                    god_mode=self._god_mode,
+                    resources=event.payload.message.resources if event.type == "user_message" else None,
+                    task_context=self.agent_tasks.describe() + "\n" + self.restart.describe(),
+                )
+                return reply, context.resources
+
+        reply, resources = await (self.runtime.generate("brain", generate) if self.runtime is not None else generate())
         parsed = self._parse_reply_tags(reply)
-        for update in parsed.state_updates:
-            await self.memory.update_state(update)
         silent_turn = parsed.do_nothing
+        if self.runtime is not None:
+            original = event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
+            intents = (
+                [
+                    TaskIntent(
+                        command, original, parsed.intention_ids[index] if index < len(parsed.intention_ids) else None
+                    )
+                    for index, command in enumerate(parsed.agent_commands)
+                ]
+                if not silent_turn
+                else []
+            )
+            tasks = await self.runtime.commit_reply(
+                None if silent_turn else parsed.clean_reply,
+                resources,
+                parsed.target,
+                parsed.state_updates,
+                parsed.memory_contents,
+                intents,
+                controls=parsed.agent_controls if not silent_turn else [],
+                timeout=parsed.timeout if not silent_turn else None,
+                god_mode=parsed.god_mode if not silent_turn else False,
+            )
+            await self.agent_tasks.activate_committed(tasks)
+        else:
+            for update in parsed.state_updates:
+                await self.memory.update_state(update)
+            if not silent_turn:
+                if parsed.clean_reply:
+                    logger.info(f"Muika: {parsed.clean_reply}")
+                    await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
+                await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
+            if parsed.memory_contents:
+                await self._store_memories(parsed.memory_contents)
+        if self.runtime is None and not silent_turn and parsed.timeout is not None:
+            self._arm_timeout(parsed.timeout)
         if not silent_turn:
-            if parsed.clean_reply:
-                logger.info(f"Muika: {parsed.clean_reply}")
-                await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
-            await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
-            if parsed.timeout is not None:
-                self._arm_timeout(parsed.timeout)
-        if parsed.memory_contents:
-            await self._store_memories(parsed.memory_contents)
-        if not silent_turn:
-            for control in parsed.agent_controls:
+            for control in parsed.agent_controls if self.runtime is None else []:
                 try:
                     if control.action == "complete":
                         await self.agent_tasks.complete_handoff(control.task_id, control.instruction)
@@ -543,6 +696,8 @@ class Muika:
                 except (OSError, ValueError) as exc:
                     parsed.agent_errors.append(f"Restart did not start: {exc}")
             for index, command in enumerate(parsed.agent_commands):
+                if self.runtime is not None:
+                    break
                 intention_id = parsed.intention_ids[index] if index < len(parsed.intention_ids) else None
                 intention = next((item for item in self.memory.persistent.intentions if item.id == intention_id), None)
                 if intention_id and (intention is None or intention.task_id or intention.status != "open"):
@@ -629,7 +784,8 @@ class Muika:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
-        await get_process_manager().close()
+        if self.runtime is None:
+            await get_process_manager().close()
         self._timeout_task = None
         self._reflection_task = None
 

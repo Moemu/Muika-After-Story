@@ -2,51 +2,37 @@
 
 通过 NapCatQQ + OneBot v11 协议将 Muika 接入 QQ。
 
-## 架构
+## 电脑关机后继续聊天
 
-```
-宿主机 (Windows)
-├── Muika Core                             ── AI 引擎（LLM / 记忆 / Agent Agent）
-│   python -m muika.ipc.bootstrap
-│   ws://0.0.0.0:8765/ws
-│
-└── Docker  (WSL2 / Other Linux Server)
-    ├── muika-napcat                       ── QQ 协议实现（NapCatQQ）
-    │   镜像: mlikiowa/napcat-docker:latest
-    │   端口: 3000(HTTP) / 3001(WS) / 6099(WebUI)
-    │
-    └── muika-bot                 ── NoneBot
-        镜像: deploy/bot.Dockerfile (构建)
-        nonebot-adapter-onebot  ←→  napcat:3001
-        IPC Client  ←→  host.docker.internal:8765
-```
+如果希望电脑关机后仍能与 Muika 聊天，请参考文档站的[多设备部署指南](https://mas.snowy.moe/guide/multi-device)。
+你需要一台持续运行的服务器，并将聊天机器人也运行在服务器上。
 
-**消息流：**
+以下步骤介绍原有的单机连接方式。
 
-```
-用户 → [QQ] → NapCat → OneBot WS → muika-bot → IPC → Core
-Core → IPC → muika-bot → OneBot API → NapCat → [QQ] → 用户
-Core → (主动消息, 孤独感/话题驱动) → IPC → muika-bot → NapCat → [QQ]
-```
+## 准备什么
 
-## 前置条件
+你需要运行 MAS，以及两个负责 QQ 接入的程序：
 
-- Linux 服务器（带 Docker + Docker Compose v2）
-- Python 3.10+
-- 一个可用的 QQ 号（用于 NapCat 登录）
+| 程序 | 用途 |
+| --- | --- |
+| Muika Core | 保存记忆，生成回复，执行她的行动 |
+| NapCat | 登录用于聊天的 QQ 账号 |
+| muika-bot | 把 QQ 消息交给 Muika，再把回复发回 QQ |
 
----
+以下示例在电脑上运行 Muika Core，在同一台机器的 Docker 中运行 QQ 接入程序。
+需要 Python 3.10～3.13、Docker 和 Docker Compose v2，以及一个用于 Muika 的 QQ 账号。
+电脑关机后，这种部署无法继续回复。需要持续聊天时，请使用上方的多设备部署指南。
 
 ## 部署流程
 
 ### 搭建 Core 环境
 
-Core 是 Muika 的 AI 引擎，**必须先于 Bot 启动**。
+先启动负责保存记忆和生成回复的 Core，再启动聊天机器人。
 
 ```bash
 # 1. 克隆项目并安装依赖
 cd Muika-After-Story
-pip install -e .[standard]
+pip install -e '.[standard]'
 
 # 2. 配置 Core 的运行环境
 #    编辑或创建 .env 文件，至少填入 LLM 模型配置
@@ -63,25 +49,22 @@ grep IPC_SECRET .env
 ```
 
 > Core 已运行时不要关闭终端，另开一个终端执行后续操作。
-> 生产环境建议用 systemd / pm2 管理 Core 进程。
+> 需要长期运行时，请设置开机自动启动，并在程序退出后自动重启。
 
 ---
 
 ### 配置 QQ Bot 环境
 
 ```bash
-# 1. 复制环境变量模板
-cp .env.qq .env.qq.local
-
-# 2. 编辑 .env.qq.local，填写实际值：
+# 编辑项目根目录的 .env.qq，填写实际值：
 #    - MASTER_ID     → 你的 QQ 号
 #    - SUPERUSERS    → 同上
 #    - IPC_SECRET    → 从 Core 的 .env 中复制过来的值
 #    - 其他项保持默认即可
 ```
 
-> `.env.qq.local` 是本地配置，不会被 git 追踪（已在 `.gitignore` 中）。
-> 也可直接用 `.env.qq` 编辑，但注意不要提交密钥到仓库。
+> Compose 默认读取项目根目录的 `.env.qq`。
+> 这个文件是仓库中的配置示例。填写密钥后，请保留在本机，切勿将密钥提交到仓库。
 
 ---
 
@@ -92,13 +75,18 @@ cd deploy
 docker compose up -d
 ```
 
-这会构建 bot 镜像并启动 Napcat。
+这会构建并启动聊天机器人，同时启动 NapCat。
 
-NapCat 容器启动后将暴露 `6099` 作为 NapCat WebUI 管理后台
+NapCat 管理页面只监听部署机器本地的 `6099` 端口。
 
 **首次使用需要登录 QQ：**
 
-在浏览器打开 `http://<服务器IP>:6099/webui`，用手机 QQ 扫码登录。
+在部署机器的浏览器打开 `http://127.0.0.1:6099/webui`，用手机 QQ 扫码登录。
+部署在远程服务器时，可以先通过 SSH 转发管理端口，再在自己的电脑上打开同一地址：
+
+```bash
+ssh -L 6099:127.0.0.1:6099 服务器用户名@服务器地址
+```
 
 > 首次登录后 NapCat 可能自动退出，再次执行 `docker compose restart` 即可。
 > 登录成功后的会话会持久化到 `deploy/napcat/QQ/`，下次启动无需重复扫码。
@@ -133,9 +121,9 @@ deploy/napcat/
 
 | 场景 | 做法 |
 |------|------|
-| **全新部署** | Core 首次启动时自动生成 `IPC_SECRET` 并写入 `.env`。将 `.env` 中的值复制到 `.env.qq.local` 的对应字段 |
+| **全新部署** | Core 首次启动时自动生成 `IPC_SECRET` 并写入 `.env`。将 `.env` 中的值复制到 `.env.qq` 的对应字段 |
 | **已有 Core** | `.env` 中的 `IPC_SECRET` 已经存在，直接复制即可 |
-| **手动指定** | 在启动 Core **之前**，在 `.env` 中填入自定义的 `IPC_SECRET=xxxx`。Core 会使用这个值而不会自动生成。然后在 `.env.qq.local` 中使用同样的值 |
+| **手动指定** | 在启动 Core **之前**，在 `.env` 中填入自定义的 `IPC_SECRET=xxxx`。Core 会使用这个值而不会自动生成。然后在 `.env.qq` 中使用同样的值 |
 
 Core 和 Bot 的 `IPC_SECRET` **必须一致**，否则 Bot 无法连接 Core。
 
@@ -173,7 +161,7 @@ docker compose exec muika-bot curl http://host.docker.internal:8765/health
 ```bash
 # 查看 NapCat 日志
 docker compose logs napcat
-# 打开 WebUI http://<ip>:6099/webui 扫码
+# 打开 WebUI http://127.0.0.1:6099/webui 扫码
 ```
 
 **Bot 日志显示 "Ignored non-master message"：**

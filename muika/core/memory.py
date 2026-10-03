@@ -814,13 +814,17 @@ class MemoryManager:
             if summary is None:
                 return request
             through = old[-1].id if old else self.snapshot.summary_through
-            async with self._lock:
-                if session_id != self.session.session_id:
-                    raise RuntimeError("The session changed during context compression")
-                snapshot = self.snapshot.model_copy(deep=True)
-                snapshot.working_summary, snapshot.summary_through = summary, through
-                async with get_session() as db:
-                    await self._save_snapshot(db, snapshot)
-                self.snapshot = snapshot
-                self.recent_turns = deque(turn for turn in self.recent_turns if turn.id > through)
+            await self.save_working_context(session_id, summary, through)
             return replace(base, system=base_system + "\n[Working context summary]\n" + summary)
+
+    async def save_working_context(self, session_id: str, summary: str, through: int) -> None:
+        """保存当前会话的工作摘要，并保留尚未覆盖的原始回合。"""
+        async with self._lock:
+            if session_id != self.session.session_id:
+                raise RuntimeError("The session changed during context compression")
+            snapshot = self.snapshot.model_copy(deep=True)
+            snapshot.working_summary, snapshot.summary_through = summary, through
+            async with get_session() as db:
+                await self._save_snapshot(db, snapshot)
+            self.snapshot = snapshot
+            self.recent_turns = deque(turn for turn in self.recent_turns if turn.id > through)

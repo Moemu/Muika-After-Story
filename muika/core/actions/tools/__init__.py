@@ -5,6 +5,7 @@ from . import (  # noqa: F401
     _filesystem,
     _info,
     _memory,
+    _nodes,
     _plugin,
     _scheduler,
     _search,

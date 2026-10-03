@@ -4,6 +4,7 @@ from typing import Literal, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .activity import ActivityOperation, ReadingCache, UsageRecord, activity_client
 from .orm_models import (
     ArchiveRecordORM,
     MemoryRecordORM,
@@ -31,6 +32,16 @@ class UsageORM:
         :param date: (可选)日期(``%Y.%m.%d``)，如果为 None 则返回所有日期的用量
         :param type: (可选)用量类型，默认为 None，表示返回所有类型的用量
         """
+        if remote := activity_client():
+            records = (await remote(ActivityOperation(action="usage_list", days=None))).usage
+            return sum(
+                row.input_tokens + row.output_tokens + row.cached_tokens
+                for row in records
+                if (not plugin or row.plugin == plugin)
+                and (not model or row.model == model)
+                and (not date or row.date == date)
+                and (not type or row.type == type)
+            )
         query = select(func.sum(Usage.input_tokens + Usage.output_tokens + Usage.cached_tokens))
         if plugin:
             query = query.where(Usage.plugin == plugin)
@@ -57,6 +68,21 @@ class UsageORM:
         保存用量信息（按 plugin + type + date upsert，各字段累加）
         """
         if input_tokens < 0 or output_tokens < 0 or cached_tokens < 0:
+            return
+        if remote := activity_client():
+            await remote(
+                ActivityOperation(
+                    action="usage_save",
+                    usage=UsageRecord(
+                        plugin=plugin,
+                        model=model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_tokens=cached_tokens,
+                        type=type,
+                    ),
+                )
+            )
             return
 
         date = datetime.now().strftime("%Y.%m.%d")
@@ -93,6 +119,9 @@ class UsageORM:
         :param days: 包含今天在内的天数；None 表示全部历史。
         :raises ValueError: 天数小于 1。
         """
+        if remote := activity_client():
+            result = await remote(ActivityOperation(action="usage_list", days=days))
+            return [Usage(**row.model_dump()) for row in result.usage]
         query = select(Usage)
         if days is not None:
             if days < 1:
@@ -222,6 +251,9 @@ class TopicHistoryCRUD:
         topic_id: str,
     ) -> Optional[TopicHistoryORM]:
         """查找话题历史记录，不存在则返回 None。"""
+        if remote := activity_client():
+            result = await remote(ActivityOperation(action="topic_get", topic_id=topic_id))
+            return TopicHistoryORM(**result.topics[0].model_dump()) if result.topics else None
         result = await session.execute(select(TopicHistoryORM).where(TopicHistoryORM.topic_id == topic_id).limit(1))
         return result.scalar_one_or_none()
 
@@ -236,6 +268,9 @@ class TopicHistoryCRUD:
         每次调用 use_count +1；若用户参与了互动，engaged_count 同时 +1。
         调用方负责 commit。
         """
+        if remote := activity_client():
+            result = await remote(ActivityOperation(action="topic_used", topic_id=topic_id, user_engaged=user_engaged))
+            return TopicHistoryORM(**result.topics[0].model_dump())
         now = datetime.now().isoformat()
         stmt = await session.execute(select(TopicHistoryORM).where(TopicHistoryORM.topic_id == topic_id).limit(1))
         existing = stmt.scalar_one_or_none()
@@ -262,6 +297,9 @@ class TopicHistoryCRUD:
         limit: int = 20,
     ) -> list[TopicHistoryORM]:
         """按 use_count 降序返回最近的话题历史，供自省统计。"""
+        if remote := activity_client():
+            result = await remote(ActivityOperation(action="topics", limit=limit))
+            return [TopicHistoryORM(**row.model_dump()) for row in result.topics]
         result = await session.execute(select(TopicHistoryORM).order_by(TopicHistoryORM.use_count.desc()).limit(limit))
         return list(result.scalars().all())
 
@@ -356,6 +394,9 @@ class RssDigestCacheCRUD:
         :param ttl_days: 缓存有效期（天），超过此天数的条目视为过期
         :return: 有效缓存条目，不存在或已过期返回 ``None``
         """
+        if remote := activity_client():
+            result = await remote(ActivityOperation(action="reading_get", topic_id=topic_id, days=ttl_days))
+            return RssDigestCacheORM(**result.reading.model_dump()) if result.reading else None
         result = await session.execute(select(RssDigestCacheORM).where(RssDigestCacheORM.topic_id == topic_id).limit(1))
         entry = result.scalar_one_or_none()
         if entry is None:
@@ -382,6 +423,27 @@ class RssDigestCacheCRUD:
         summary: str,
     ) -> RssDigestCacheORM:
         """插入或更新缓存条目（upsert by topic_id）。"""
+        if remote := activity_client():
+            result = await remote(
+                ActivityOperation(
+                    action="reading_save",
+                    reading=ReadingCache(
+                        topic_id=topic_id,
+                        source_id=source_id,
+                        title=title,
+                        link=link,
+                        published=published,
+                        score=score,
+                        keep=int(keep),
+                        reason=reason,
+                        primary_theme=primary_theme,
+                        summary=summary,
+                    ),
+                )
+            )
+            if result.reading is None:
+                raise ValueError("State service omitted the reading cache result.")
+            return RssDigestCacheORM(**result.reading.model_dump())
         now = datetime.now().isoformat()
         stmt = await session.execute(select(RssDigestCacheORM).where(RssDigestCacheORM.topic_id == topic_id).limit(1))
         existing = stmt.scalar_one_or_none()
@@ -422,6 +484,8 @@ class RssDigestCacheCRUD:
 
         :return: 删除的行数
         """
+        if remote := activity_client():
+            return (await remote(ActivityOperation(action="reading_prune", days=ttl_days))).deleted
         cutoff = (datetime.now() - timedelta(days=ttl_days)).isoformat()
         result = await session.execute(select(RssDigestCacheORM).where(RssDigestCacheORM.evaluated_at < cutoff))
         expired = result.scalars().all()

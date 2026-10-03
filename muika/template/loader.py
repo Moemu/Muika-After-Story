@@ -5,12 +5,18 @@ from typing import Iterable, Optional
 from jinja2 import Environment, FileSystemLoader
 from jinja2.exceptions import TemplateNotFound
 
+from muika.config import runtime_workspace
 from muika.utils.logger import logger
 
 from .model import PromptTemplatesData
 
 _BUILTIN_TEMPLATES_DIR = Path(__file__).parent.parent / "builtin_templates"
-SEARCH_PATH = ["./templates", _BUILTIN_TEMPLATES_DIR]
+SEARCH_PATH: list[str | Path] = ["./templates", _BUILTIN_TEMPLATES_DIR]
+
+
+def template_search_path() -> list[str | Path]:
+    root = runtime_workspace()
+    return [root / "templates", _BUILTIN_TEMPLATES_DIR] if root != Path.cwd() else SEARCH_PATH
 
 
 def generate_prompt_from_template(
@@ -32,7 +38,7 @@ def generate_prompt_from_template(
     if not template_name.endswith((".j2", ".jinja2")):
         template_name += ".jinja2"
 
-    env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
+    env = Environment(loader=FileSystemLoader(template_search_path()), autoescape=True)
 
     render_data = templates_data.model_dump() if templates_data else {}
 
@@ -54,7 +60,7 @@ def validate_template_configuration(template_names: Iterable[str]) -> None:
     :param template_names: 配置中的模板名称
     :raises RuntimeError: 模板配置无效
     """
-    env = Environment(loader=FileSystemLoader(SEARCH_PATH), autoescape=True)
+    env = Environment(loader=FileSystemLoader(template_search_path()), autoescape=True)
     for configured_name in template_names:
         template_name = configured_name
         if not template_name.endswith((".j2", ".jinja2")):

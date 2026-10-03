@@ -5,6 +5,9 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
@@ -39,6 +42,24 @@ USER_SKILL_PATHS = (Path.home() / ".agents" / "skills", Path.home() / ".claude" 
 
 _model_config_manager: Optional["ModelConfigManager"] = None
 _model_config_lock = threading.Lock()
+_runtime_workspace: ContextVar[Path | None] = ContextVar("runtime_workspace", default=None)
+_runtime_models: ContextVar["ModelConfigManager | None"] = ContextVar("runtime_models", default=None)
+
+
+def runtime_workspace() -> Path:
+    """返回当前人格配置副本所在目录，单机模式使用原工作目录。"""
+    return _runtime_workspace.get() or Path.cwd()
+
+
+@contextmanager
+def cognitive_workspace(directory: Path, manager: "ModelConfigManager") -> Iterator[None]:
+    workspace_token = _runtime_workspace.set(directory)
+    models_token = _runtime_models.set(manager)
+    try:
+        yield
+    finally:
+        _runtime_models.reset(models_token)
+        _runtime_workspace.reset(workspace_token)
 
 
 class MASConfig(BaseSettings):
@@ -59,6 +80,8 @@ class MASConfig(BaseSettings):
 
     core_ws_url: str = "ws://127.0.0.1:8765/ws"
     """Core 进程的 WebSocket 地址。Bot 通过此地址连接 Core。"""
+    node_profile: Path | None = None
+    """多节点 Bot 的配对配置文件；留空使用现有单机 IPC。"""
     ipc_secret: str = ""
     """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
     留空时 Core 启动会自动生成并写入 .env 文件。"""
@@ -304,7 +327,8 @@ class ModelConfigManager:
 
     configs: dict[str, ModelConfig]
 
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or MODELS_CONFIG_PATH
         self.configs: dict[str, ModelConfig] = {}
         """所有模型配置"""
         self.current_config: Optional[ModelConfig] = None
@@ -330,10 +354,10 @@ class ModelConfigManager:
         """
         加载配置文件，并设置默认模型
         """
-        if not os.path.isfile(MODELS_CONFIG_PATH):
+        if not os.path.isfile(self.path):
             raise FileNotFoundError("configs/models.yml 不存在！请先创建")
 
-        with open(MODELS_CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(self.path, "r", encoding="utf-8") as f:
             configs_dict = yaml_.safe_load(f)
 
         if not configs_dict:
@@ -355,8 +379,8 @@ class ModelConfigManager:
             self.observer.stop()
 
         self.observer = Observer()
-        event_handler = ConfigFileHandler(MODELS_CONFIG_PATH, self._on_config_changed)
-        self.observer.schedule(event_handler, str(MODELS_CONFIG_PATH.parent), recursive=False)
+        event_handler = ConfigFileHandler(self.path, self._on_config_changed)
+        self.observer.schedule(event_handler, str(self.path.parent), recursive=False)
         self.observer.start()
 
     def _on_config_changed(self):
@@ -489,6 +513,8 @@ class ModelConfigManager:
 
 
 def get_model_config_manager() -> ModelConfigManager:
+    if current := _runtime_models.get():
+        return current
     global _model_config_manager
     with _model_config_lock:
         if _model_config_manager is None:

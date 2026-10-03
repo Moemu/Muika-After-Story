@@ -21,10 +21,13 @@ dependencies = [
     "psutil>=7.0.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
+    "pyyaml>=6.0",
     "pyperclip>=1.9.0",
     "pywin32>=311; sys_platform == 'win32'",
-    "sqlalchemy>=2.0.46",
+    "sqlalchemy[asyncio]>=2.0.46",
     "trafilatura>=2.0.0",
+    "tzdata>=2025.1",
+    "tzlocal>=5.0",
     "watchdog>=6.0.0",
 ]
 authors = [

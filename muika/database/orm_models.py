@@ -10,6 +10,84 @@ class Base(DeclarativeBase):
     """Shared declarative base for all ORM models."""
 
 
+class RuntimeAuthorityORM(Base):
+    """保存部署身份和递增任期，期限由当前状态服务持有。"""
+
+    __tablename__ = "runtime_authority"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(String)
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    owner: Mapped[str] = mapped_column(String, default="")
+    handoff: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class RuntimeInboxORM(Base):
+    """保存去重后的输入及其处理权。"""
+
+    __tablename__ = "runtime_inbox"
+    __table_args__ = (UniqueConstraint("client_id", "message_id"),)
+    sequence: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    client_id: Mapped[str] = mapped_column(String)
+    message_id: Mapped[str] = mapped_column(String)
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, index=True, default="received")
+    owner: Mapped[str] = mapped_column(String, default="")
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    commit_digest: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class RuntimeTurnORM(Base):
+    """保存已生成的认知结果和回合提交身份。"""
+
+    __tablename__ = "runtime_turn"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    generations: Mapped[str] = mapped_column(Text, default="{}")
+    completed: Mapped[bool] = mapped_column(default=False)
+    commit_digest: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class RuntimeStateORM(Base):
+    """保存最近提交的活动状态和对话路由。"""
+
+    __tablename__ = "runtime_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class RuntimeScheduleORM(Base):
+    """保存提醒和稳定触发序号。"""
+
+    __tablename__ = "runtime_schedule"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)
+    due_at: Mapped[float] = mapped_column(Float, index=True)
+    occurrence: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(default=True)
+
+
+class RuntimeExecutionORM(Base):
+    """保存设备动作的认领事实和执行结果。"""
+
+    __tablename__ = "runtime_execution"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    node_id: Mapped[str] = mapped_column(String, index=True)
+    epoch: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, default="pending")
+    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class RuntimeOutboxORM(Base):
+    """保存回复及客户端确认，连接变化不改变目标。"""
+
+    __tablename__ = "runtime_outbox"
+    sequence: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    message_id: Mapped[str] = mapped_column(String, unique=True)
+    client_id: Mapped[str] = mapped_column(String, index=True)
+    payload: Mapped[str] = mapped_column(Text)
+    acknowledged: Mapped[bool] = mapped_column(default=False)
+
+
 class Usage(Base):
     __tablename__ = "usage"
 

@@ -18,7 +18,9 @@ class LoadSkillParams(BaseModel):
     )
 
 
-@on_function_call("Load the full instructions (SKILL.md) of a named skill.", params=LoadSkillParams, read_only=True)
+@on_function_call(
+    "Load the full instructions (SKILL.md) of a named skill.", params=LoadSkillParams, read_only=True, scope="core"
+)
 async def load_skill(skill_name: str):
     manager = get_skill_manager()
     skill = manager.get(skill_name)

@@ -144,7 +144,7 @@ def _format_results(query: str, results: list[SearchResult]) -> str:
     "Search the web for current information. Returns ranked results with titles, URLs and snippets;"
     " use fetch_web_content to read a full page.",
     params=WebSearchParams,
-    read_only=True,
+    scope="core",
 )
 async def web_search(query: str, state: MuikaState, time_range: str | None = None) -> str:
     """联网搜索并返回结果列表；未配置后端时提示不可用。"""
@@ -170,7 +170,7 @@ async def web_search(query: str, state: MuikaState, time_range: str | None = Non
         results = await SEARCH_BACKENDS[provider](q, time_range)
     except Exception as e:
         logger.error(f"[WebSearch] Search failed: {e}")
-        return ToolError(f"Web search failed: {e}")
+        return ToolError(f"Web search failed: {e}", outcome="not_executed")
 
     if not results:
         return f'No search results for: "{q}"'
