@@ -20,8 +20,8 @@ def _time_tick() -> TimeTickEvent:
 def test_attention_decays_and_floors_at_zero():
     s = MuikaState()
     s.tick_state(_time_tick(), 1.0)
-    assert s.attention == pytest.approx(0.95)
-    for _ in range(30):
+    assert s.attention == pytest.approx(0.99)
+    for _ in range(100):
         s.tick_state(_time_tick(), 1.0)
     assert s.attention == 0.0
 
@@ -103,5 +103,5 @@ def test_non_user_event_does_not_reset():
     last_interaction = s.last_interaction
     s.tick_state(_time_tick(), 0.0)
     assert s.loneliness == pytest.approx(0.7)  # 不归零，仅 +0
-    assert s.attention == pytest.approx(0.25)  # 注意力照常衰减
+    assert s.attention == pytest.approx(0.3)  # 未经过时间时不衰减
     assert s.last_interaction == last_interaction

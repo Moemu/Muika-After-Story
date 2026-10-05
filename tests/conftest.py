@@ -157,7 +157,7 @@ def redirect_get_session(db_session, session_ctx_factory, monkeypatch):
     sessions = async_sessionmaker(db_session.bind, expire_on_commit=False)
 
     @asynccontextmanager
-    async def factory():
+    async def factory(*, record_activity: bool = True):
         async with sessions() as session:
             try:
                 yield session

@@ -18,6 +18,7 @@ import aiohttp
 from aiohttp import WSMsgType
 
 from muika.config import mas_config
+from muika.ipc.attachments import AttachmentTransfer
 from muika.ipc.protocol import (
     BotToCoreMessage,
     CommandEvent,
@@ -25,12 +26,12 @@ from muika.ipc.protocol import (
     SessionEndEvent,
     UserMessageEvent,
 )
+from muika.models import Resource
 from muika.utils.logger import logger
 
 # 重连参数
 _INITIAL_RECONNECT_DELAY = 1.0
 _MAX_RECONNECT_DELAY = 30.0
-_MAX_RECONNECT_ATTEMPTS = 5
 
 # 待发送事件队列上限（Core 不可用时暂存）
 _MAX_PENDING_EVENTS = 100
@@ -51,8 +52,12 @@ class IpcClient:
         core_url: str = mas_config.core_ws_url,
         secret: str = mas_config.ipc_secret,
         client_name: str = "nonebot-qq",
+        fallback_urls: list[str] | None = None,
     ) -> None:
         self._url = core_url
+        self._endpoints = [core_url, *(mas_config.core_fallback_urls if fallback_urls is None else fallback_urls)]
+        self._endpoint_index = 0
+        self._return_primary = False
         self._secret = secret
         self.client_name = client_name
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -81,6 +86,29 @@ class IpcClient:
     def is_connected(self) -> bool:
         return self._connected
 
+    @property
+    def endpoint(self) -> str:
+        """返回当前连接或正在尝试的地址。"""
+        return self._endpoints[self._endpoint_index]
+
+    def attachment_transfer(self) -> AttachmentTransfer:
+        return AttachmentTransfer(self.endpoint, self._secret, mas_config.data_dir / "chat_attachments")
+
+    async def _prefer_primary(self) -> None:
+        """使用备用地址时检查主入口，恢复后重新连接主入口。"""
+        while self._running and self._endpoint_index:
+            await asyncio.sleep(10)
+            assert self._session is not None
+            base = AttachmentTransfer(self._url, self._secret, mas_config.data_dir).base
+            try:
+                async with self._session.get(base + "/health", timeout=aiohttp.ClientTimeout(total=3)) as response:
+                    if response.status == 200 and self._ws is not None:
+                        self._return_primary = True
+                        await self._ws.close()
+                        return
+            except (aiohttp.ClientError, TimeoutError):
+                continue
+
     async def _connect_once(self) -> None:
         """单次连接尝试。"""
         logger.debug(f"[IpcClient] Connecting to Core at {self._url}...")
@@ -89,7 +117,14 @@ class IpcClient:
         }
         if self._secret:
             headers["X-Auth-Token"] = self._secret
-        self._ws = await self._session.ws_connect(self._url, headers=headers)  # type: ignore[union-attr]
+        assert self._session is not None
+        self._ws = await self._session.ws_connect(
+            self.endpoint,
+            headers=headers,
+            heartbeat=20,
+            timeout=aiohttp.ClientWSTimeout(ws_close=5),
+            receive_timeout=None,
+        )
         self._connected = True
         self._reconnect_count = 0
         self._connected_event.set()
@@ -97,6 +132,7 @@ class IpcClient:
 
         # 发送所有暂存的事件
         await self._flush_pending()
+        primary = asyncio.create_task(self._prefer_primary())
 
         # 消息接收循环
         try:
@@ -106,6 +142,8 @@ class IpcClient:
                 elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSED):
                     break
         finally:
+            primary.cancel()
+            await asyncio.gather(primary, return_exceptions=True)
             self._connected = False
             self._connected_event.clear()
             self._ws = None
@@ -136,7 +174,7 @@ class IpcClient:
         msg = message.model_dump(mode="json")
         if self._connected and self._ws and not self._ws.closed:
             try:
-                await self._ws.send_json(msg)
+                await self._send_packet(msg)
                 logger.debug(f"[IpcClient] Sent {msg}")
                 return True
             except Exception as e:
@@ -159,7 +197,7 @@ class IpcClient:
             msg = self._pending_events.popleft()
             try:
                 if self._ws and self.is_connected:
-                    await self._ws.send_json(msg)
+                    await self._send_packet(msg)
                     sent += 1
                 else:
                     self._pending_events.appendleft(msg)
@@ -171,6 +209,18 @@ class IpcClient:
         if sent:
             logger.debug(f"[IpcClient] Flushed {sent} pending event(s)")
         return sent
+
+    async def _send_packet(self, message: dict) -> None:
+        """在当前连接上传附件，保留事件自身的稳定编号。"""
+        assert self._ws is not None
+        if message.get("resources"):
+            message = {
+                **message,
+                "resources": [
+                    await self.attachment_transfer().upload(Resource(**item)) for item in message["resources"]
+                ],
+            }
+        await self._ws.send_json(message)
 
     @overload
     def on_message(self, msg_type: str, handler: None = None) -> Callable[[MessageHandler], MessageHandler]: ...
@@ -218,7 +268,7 @@ class IpcClient:
     async def connect(self) -> None:
         """建立到 Core 的 WebSocket 连接并开始消息循环。"""
         self._running = True
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
         while self._running:
             try:
@@ -233,11 +283,9 @@ class IpcClient:
 
             # 重连
             self._reconnect_count += 1
-            if self._reconnect_count > _MAX_RECONNECT_ATTEMPTS:
-                logger.error(f"[IpcClient] Max reconnect attempts ({_MAX_RECONNECT_ATTEMPTS}) reached — giving up")
-                break
-
-            delay = min(_INITIAL_RECONNECT_DELAY * (2 ** (self._reconnect_count - 1)), _MAX_RECONNECT_DELAY)
+            self._endpoint_index = 0 if self._return_primary else (self._endpoint_index + 1) % len(self._endpoints)
+            self._return_primary = False
+            delay = min(_INITIAL_RECONNECT_DELAY * (2 ** min(self._reconnect_count - 1, 5)), _MAX_RECONNECT_DELAY)
             logger.debug(f"[IpcClient] Reconnecting in {delay:.1f}s (attempt {self._reconnect_count})...")
             await asyncio.sleep(delay)
 

@@ -3,8 +3,25 @@
 import asyncio
 import math
 from datetime import datetime
+from uuid import uuid4
+
+from pydantic import BaseModel
+from sqlalchemy import select
+
+from muika.database.db import get_session
+from muika.database.orm_models import SyncStateORM
 
 from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
+
+
+class Reminder(BaseModel):
+    """保存提醒时间和已触发状态，不保存进程任务。"""
+
+    id: str
+    what: str
+    when: float
+    repeat: float | None = None
+    pending: bool = True
 
 
 class Scheduler:
@@ -14,6 +31,33 @@ class Scheduler:
         self.event_queue = event_queue
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
+        self.persistent = False
+        self.active = True
+
+    async def activate(self, active: bool) -> None:
+        """暂停备用设备的提醒，接管时从本地历史恢复待触发提醒。"""
+        self.active = active
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.persistent and active:
+            async with get_session(record_activity=False) as db:
+                reminders = [
+                    Reminder.model_validate_json(row.payload)
+                    for row in await db.scalars(select(SyncStateORM).where(SyncStateORM.key.like("reminder:%")))
+                ]
+            for reminder in reminders:
+                if reminder.pending:
+                    self._arm(reminder)
+
+    def _arm(self, reminder: Reminder) -> None:
+        payload = ScheduledTriggerPayload(datetime.fromtimestamp(reminder.when).isoformat(), reminder.what, reminder.id)
+        task = asyncio.create_task(
+            self._wait_and_trigger(max(0.0, reminder.when - datetime.now().timestamp()), payload, reminder.repeat)
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def schedule(
         self,
@@ -52,6 +96,18 @@ class Scheduler:
             delay = trigger_in_seconds
             when = f"in {delay:g} seconds"
 
+        if self.persistent:
+            reminder = Reminder(
+                id=uuid4().hex,
+                what=event.strip(),
+                when=datetime.now().timestamp() + delay,
+                repeat=repeat_interval_seconds,
+            )
+            async with get_session() as db:
+                db.add(SyncStateORM(key="reminder:" + reminder.id, payload=reminder.model_dump_json()))
+            if self.active:
+                self._arm(reminder)
+            return
         payload = ScheduledTriggerPayload(when=when, what=event.strip())
         task = asyncio.create_task(self._wait_and_trigger(delay, payload, repeat_interval_seconds))
         self._tasks.add(task)
@@ -71,6 +127,17 @@ class Scheduler:
         """按间隔投递事件，直到单次提醒完成或任务被取消。"""
         while True:
             await asyncio.sleep(delay)
+            if self.persistent and payload.source:
+                async with get_session() as db:
+                    saved = await db.get(SyncStateORM, "reminder:" + payload.source)
+                    if saved is None:
+                        return
+                    reminder = Reminder.model_validate_json(saved.payload)
+                    if not reminder.pending:
+                        return
+                    reminder.pending = repeat_interval is not None
+                    reminder.when = datetime.now().timestamp() + (repeat_interval or 0)
+                    saved.payload = reminder.model_dump_json()
             await self.event_queue.put(ScheduledTriggerEvent(payload=payload))
             if repeat_interval is None:
                 return

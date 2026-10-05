@@ -61,7 +61,7 @@ class Resource:
         """
         from .utils.utils import guess_mimetype
 
-        self.mimetype = guess_mimetype(self)
+        self.mimetype = self.mimetype or guess_mimetype(self)
         if self.mimetype:
             self.extension = guess_extension(self.mimetype)
 
@@ -70,7 +70,7 @@ class Resource:
         落库时存储的数据
         (注意：与模型进行交互的多模态文件必须在本地拥有备份)
         """
-        return {"type": self.type, "path": self.path, "mimetype": self.mimetype}
+        return {"type": self.type, "path": self.path, "mimetype": self.mimetype, "url": self.url}
 
 
 @total_ordering

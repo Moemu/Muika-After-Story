@@ -22,8 +22,10 @@ from muika.config import mas_config
 from muika.core.events import (
     AdapterOfflineEvent,
     AdapterOnlineEvent,
+    CoreChangeEvent,
     SessionBootstrapEvent,
     SessionEndEvent,
+    TimeTickEvent,
     UserMessageEvent,
     UserMessagePayload,
 )
@@ -45,6 +47,8 @@ from muika.template.loader import validate_template_configuration
 from muika.utils.logger import init_logger, logger
 from muika.utils.utils import get_version
 
+from .attachments import AttachmentTransfer, attachment_routes
+from .core_link import CoreLink
 from .protocol import ActionResponse, BotToCoreEvent, BotToCoreMessage
 from .protocol import CommandEvent as IpcCommandEvent
 from .protocol import CommandResult, ErrorMessage, SendMessage
@@ -77,8 +81,14 @@ class CoreBootstrap:
     ) -> None:
         self._host = host
         self._port = port
+        self.node: CoreLink | None = None
+        self._last_role = ""
 
         self._ws_server = CoreWsServer(host=host, port=port, secret=ipc_secret)
+        self._ws_server.add_routes(attachment_routes(mas_config.data_dir / "chat_attachments", ipc_secret))
+        self._attachments = AttachmentTransfer(
+            f"ws://{host}:{port}/ws", ipc_secret, mas_config.data_dir / "chat_attachments"
+        )
 
         async def _send_llm_reply(
             content: str, resources: list[Resource] | None = None, target: str | None = None
@@ -86,7 +96,7 @@ class CoreBootstrap:
             """LLM 对话回复通过 SendMessage 发送，可按 *target* 路由到指定适配器。"""
             resources_dict = [r.to_dict() for r in resources] if resources else []
             msg = SendMessage(content=content, resources=resources_dict)
-            ok = await self._ws_server.send_to_bot(msg, target=target)
+            ok = await self._send(msg, target)
             if not ok:
                 logger.warning("[Core] LLM reply dropped, no Bot connected")
 
@@ -95,7 +105,7 @@ class CoreBootstrap:
         ) -> None:
             """命令执行结果通过 CommandResult 发送。"""
             msg = CommandResult(content=content, resources=resources or [])
-            ok = await self._ws_server.send_to_bot(msg, target=target)
+            ok = await self._send(msg, target)
             if not ok:
                 logger.warning("[Core] Command result dropped, no Bot connected")
 
@@ -112,6 +122,46 @@ class CoreBootstrap:
         self.is_bootstraped = False
 
         CommandDispatcher.setup(self._muika, _send_command_result)
+
+    @property
+    def muika(self) -> Muika:
+        """提供当前人格和本地记忆，节点连接不拥有认知实现。"""
+        return self._muika
+
+    async def _send(self, message: SendMessage | CommandResult, target: str | None) -> bool:
+        if self.node is not None and self.node.connected:
+            return await self.node.send(message, target)
+        if self.node is not None:
+            message = message.model_copy(
+                update={"resources": [await self._attachments.upload(Resource(**item)) for item in message.resources]}
+            )
+        return await self._ws_server.send_to_bot(message, target)
+
+    async def _set_role(self, active: bool, reason: str) -> None:
+        if not active:
+            await self._executor.scheduler.activate(False)
+            if self._muika.is_alive:
+                await self._muika.stop()
+            return
+        if not self._muika.is_alive:
+            while not self._muika.event_queue.empty():
+                self._muika.event_queue.get_nowait()
+            await self._muika.memory.load(record_activity=False)
+            if self.node is not None:
+                await self.node.store.capture_snapshot()
+            self._muika.start()
+            await self._executor.scheduler.activate(True)
+        if reason != self._last_role:
+            self._last_role = reason
+            await self._muika.memory.add_material("agent", reason)
+            await self._muika.create_event(CoreChangeEvent(reason))
+
+    def _advance_standby(self, seconds: float) -> None:
+        if not self._muika.is_alive:
+            self._muika.state.tick_state(TimeTickEvent(), seconds)
+
+    async def _from_gateway(self, message: dict, adapter: str) -> None:
+        await self._handle_event(message, AdapterInfo(client_name=adapter))
 
     async def start(self) -> None:
         """加载记忆后启动连接服务和核心循环。"""
@@ -149,7 +199,15 @@ class CoreBootstrap:
                         await asyncio.sleep(0.1)
                 except (OSError, ValueError, KeyError) as exc:
                     logger.error(f"[Restart] Could not load the saved restart outcome: {exc}")
-        self._muika.start()
+        if mas_config.gateway_url:
+            self._executor.scheduler.persistent = True
+            self._executor.scheduler.active = False
+            self.node = CoreLink(self._muika.state, self._set_role, self._from_gateway, self._advance_standby)
+            await self.node.start()
+            self._muika.after_activity = self.node.store.capture_snapshot
+            self._muika.state.nodes = self.node
+        else:
+            self._muika.start()
 
     async def request_restart(self, patch_id: str | None, trigger: str) -> None:
         """暂停行动，按需应用指定提案，再请求父进程重启。"""
@@ -206,6 +264,8 @@ class CoreBootstrap:
             self._restart_task.cancel()
             await asyncio.gather(self._restart_task, return_exceptions=True)
         try:
+            if self.node is not None:
+                await self.node.close()
             await self._ws_server.stop()
         finally:
             stop_plugin_watcher()
@@ -225,12 +285,12 @@ class CoreBootstrap:
 
         async def _on_adapter_connected(adapter: AdapterInfo) -> None:
             logger.debug(f"[Core] Adapter online: {adapter!r}")
-            if self.is_bootstraped:
+            if self.is_bootstraped and self._muika.is_alive:
                 await self._muika.create_event(AdapterOnlineEvent(adapter=adapter))
 
         async def _on_adapter_disconnected(adapter: AdapterInfo) -> None:
             logger.debug(f"[Core] Adapter offline: {adapter!r}")
-            if self.is_bootstraped:
+            if self.is_bootstraped and self._muika.is_alive:
                 await self._muika.create_event(AdapterOfflineEvent(adapter=adapter))
 
         self._ws_server.on_adapter_connected(_on_adapter_connected)
@@ -252,6 +312,13 @@ class CoreBootstrap:
             return ErrorMessage(message="invalid_event", detail=str(e))
 
         logger.debug(f"[Core] Received event: {event.type} from {client_name!r}")
+        if self.node is not None and not self.node.active:
+            return ErrorMessage(message="备用设备正在同步，请连接常驻入口。")
+        source = "ipc:" + json.dumps([client_name, event.id], separators=(",", ":")) if self.node else None
+        if source and await self._muika.memory.contains_source(source):
+            return ActionResponse(action=event.type, status="observed")
+        if source and not isinstance(event, IpcUserMessageEvent):
+            await self._muika.memory.add_material("note", f"Adapter event: {event.type}", source=source)
 
         if is_core_maintenance_active():
             if isinstance(event, IpcCommandEvent) and is_maintenance_command_allowed(event.raw):
@@ -275,8 +342,15 @@ class CoreBootstrap:
 
         if isinstance(event, IpcUserMessageEvent):
             self._ws_server.set_triggering_adapter(client_name)
-            msg = Message(message=event.message)
-            await self._muika.create_event(UserMessageEvent(UserMessagePayload(msg)))
+            resources = []
+            for item in event.resources:
+                resource = Resource(**item)
+                if resource.url and "/attachments/" in resource.url:
+                    transfer = self.node.attachments if self.node and self.node.connected else self._attachments
+                    resource = await transfer.download(resource)
+                resources.append(resource)
+            msg = Message(message=event.message, resources=resources)
+            await self._muika.create_event(UserMessageEvent(UserMessagePayload(msg, source=source)))
             return ActionResponse(action=event.type, status="queued")
 
         if isinstance(event, IpcCommandEvent):

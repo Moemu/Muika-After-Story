@@ -4,21 +4,35 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import TYPE_CHECKING, AsyncGenerator, Awaitable, Callable
 
 if TYPE_CHECKING:
     from alembic.config import Config as AlembicConfig
 
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.unitofwork import UOWTransaction
 
 from muika.config import mas_config
 from muika.utils.logger import logger
 
+from .orm_models import Base
+
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+CommitObserver = Callable[[AsyncSession, list[Base]], Awaitable[Callable[[], None] | None]]
+_commit_observer: CommitObserver | None = None
+_transaction_lock = asyncio.Lock()
+
+
+def observe_commits(observer: CommitObserver | None) -> None:
+    """为当前数据库注册活动记录器；单机模式不注册。"""
+    global _commit_observer
+    _commit_observer = observer
 
 
 async def init_db(db_path: Path | None = None) -> None:
@@ -26,7 +40,8 @@ async def init_db(db_path: Path | None = None) -> None:
 
     :param db_path: path to the SQLite file.  Defaults to ``mas_config.data_dir / "muika.db"``.
     """
-    global _engine, _session_factory
+    global _engine, _session_factory, _transaction_lock
+    _transaction_lock = asyncio.Lock()
 
     if db_path is None:
         db_path = mas_config.data_dir / "muika.db"
@@ -38,6 +53,9 @@ async def init_db(db_path: Path | None = None) -> None:
 
     url = f"sqlite+aiosqlite:///{db_path}"
     _engine = create_async_engine(url, echo=False)
+    if mas_config.gateway_url:
+        async with _engine.connect() as connection:
+            await connection.execute(text("PRAGMA journal_mode=WAL"))
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
 
@@ -116,7 +134,11 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
         if has_user_tables:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if {"memory_runtime", "experience", "diary", "fact", "fact_recall"} <= tables:
-                head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
+                head = (
+                    ScriptDirectory.from_config(alembic_cfg).get_current_head()
+                    if {"sync_event", "sync_reference", "sync_state"} <= tables
+                    else "5e446de27cb4"
+                )
             elif {"agent_task", "agent_call"} <= tables:
                 head = "3b6a7e5f332e"
             elif "self_modification_log" in tables:
@@ -144,7 +166,7 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
 
 
 @asynccontextmanager
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_session(*, record_activity: bool = True) -> AsyncGenerator[AsyncSession, None]:
     """Yield a scoped async session; auto-commits on success, rolls back on error.
 
     :raises RuntimeError: if :func:`init_db` has not been called.
@@ -152,11 +174,30 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     if _session_factory is None:
         raise RuntimeError("Database not initialized -- call init_db() first")
 
-    async with _session_factory() as session:
+    scope = _transaction_lock if _commit_observer is not None else AsyncExitStack()
+    async with scope, _session_factory() as session:
+        changed: set[Base] = set()
+        observer = _commit_observer if record_activity else None
+
+        def collect(sync_session: Session, context: UOWTransaction, instances: list[object] | None) -> None:
+            changed.update(
+                row
+                for row in (*sync_session.new, *sync_session.dirty)
+                if isinstance(row, Base) and (row in sync_session.new or sync_session.is_modified(row))
+            )
+
+        if observer is not None:
+            event.listen(session.sync_session, "before_flush", collect)
         try:
             yield session
+            committed: Callable[[], None] | None = None
+            if observer is not None:
+                await session.flush()
+                committed = await observer(session, list(changed))
             await session.commit()
-        except Exception:
+            if committed is not None:
+                committed()
+        except BaseException:
             await session.rollback()
             raise
 

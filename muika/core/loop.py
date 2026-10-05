@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from random import random
@@ -86,6 +87,7 @@ class Muika:
 
     def __init__(self, executor: Executor, event_queue: asyncio.Queue[Event]) -> None:
         self.restart = RestartController()
+        self.after_activity: Callable[[], Awaitable[None]] | None = None
         self.is_alive: bool = False
 
         self.state = MuikaState()
@@ -117,6 +119,7 @@ class Muika:
 
         self._tasks: set[asyncio.Task[object]] = set()
         self._memory_lock = asyncio.Lock()
+        self._stopped = False
 
     async def collect_events(self) -> Event:
         """等待队列事件，空闲超时则生成时间事件。"""
@@ -185,15 +188,14 @@ class Muika:
         await self.agent_tasks.initialize()
 
         while self.is_alive:
-            current_time = time.time()
-            dt = current_time - last_tick_time
-            last_tick_time = current_time
-
             if not self._is_collecting_event:
                 logger.debug("Collecting events...")
                 self._is_collecting_event = True
 
             event = await self.collect_events()
+            current_time = time.time()
+            dt = current_time - last_tick_time
+            last_tick_time = current_time
             try:
                 await self._process_event(event, dt)
             except Exception as exc:
@@ -238,11 +240,14 @@ class Muika:
 
         self._is_collecting_event = False
         if event.type == "user_message":
+            if event.payload.source and await self.memory.contains_source(event.payload.source):
+                return
             await self.memory.add_context(
                 "user",
                 event.payload.message.message,
                 resources=event.payload.message.resources,
                 timestamp=event.timestamp,
+                source=event.payload.source,
             )
             self._cancel_timeout()
 
@@ -257,6 +262,8 @@ class Muika:
         if event.type == "session_end":
             self._session_end_triggered = False
             await self._handle_session_end()
+            if self.after_activity is not None:
+                await self.after_activity()
             return
 
         if event.type == "adapter_online":
@@ -272,6 +279,8 @@ class Muika:
 
         if think_mode == "topic":
             await self._run_topic_pipeline()
+            if self.after_activity is not None:
+                await self.after_activity()
             return
 
         recalled_memories = await self._fetch_memories(event)
@@ -279,6 +288,8 @@ class Muika:
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
         self._save_last_connection_time()
+        if self.after_activity is not None:
+            await self.after_activity()
 
     @staticmethod
     def _log_event(event: Event) -> None:
@@ -613,6 +624,9 @@ class Muika:
         """启动主循环和定期自省任务。"""
         if self.is_alive:
             return
+        if self._stopped:
+            self.agent_tasks = AgentTasks(self.agent, self.state, self.executor, self.event_queue)
+            self._stopped = False
         logger.info("Muika is waking up...")
         self.is_alive = True
         self.start_background_task(self.agent_tasks.run())
@@ -623,6 +637,7 @@ class Muika:
         """取消并等待所有核心任务结束。"""
         logger.info("Muika is going to sleep.")
         self.is_alive = False
+        self._stopped = True
         await self.agent_tasks.close()
         tasks = list(self._tasks)
         for task in tasks:

@@ -200,6 +200,8 @@ class MemorySnapshot(BaseModel):
     """用于缩短模型输入的工作摘要，不属于日记，也不增加事实权重。"""
     summary_through: int = 0
     """当前会话已被工作摘要覆盖的最大 experience 主键。"""
+    resume_sessions: list[str] = Field(default_factory=list)
+    """重连时保留的另一段会话，新的正常会话开始后清空。"""
 
 
 class FactUpdate(BaseModel):

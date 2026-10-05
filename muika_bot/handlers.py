@@ -64,6 +64,9 @@ async def _render_resources(resources: list[dict]) -> None:
     for i, res in enumerate(resources):
         res_type = res.get("type", "")
         path = res.get("path", "")
+        if res.get("url") and "/attachments/" in res["url"]:
+            resource = await _ipc_client.attachment_transfer().download(Resource(**res))
+            path = resource.path
         if not path:
             continue
         if res_type == "image":
