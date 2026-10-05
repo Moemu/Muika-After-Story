@@ -583,3 +583,18 @@ async def test_nodes_command_and_autonomous_handoff_tool(gateway_process, node_p
     await wait_node(pc, active=False)
     await bot.send_json({"type": "command", "id": "return", "raw": ".nodes handoff pc"})
     await wait_node(pc, active=True)
+
+
+async def test_bot_handoff_to_lower_priority_core_keeps_the_requested_device(gateway_process, node_process):
+    session, base, recorder = gateway_process[:3]
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    server, _ = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    bot = await session.ws_connect(base + "/ws", headers={"X-Client-Name": "handoff"})
+    await bot.send_json({"type": "command", "id": "switch", "raw": ".nodes handoff server"})
+    await wait_node(server, active=True)
+    await asyncio.sleep(4)
+    assert (await pc.command(action="status"))["active"] is False
+    assert (await server.command(action="status"))["active"] is True
+    recorder.record("handoff_kept", target="server")

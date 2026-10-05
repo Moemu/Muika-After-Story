@@ -246,6 +246,8 @@ class CoreLink:
                             await self.receive(packet["message"], packet["adapter"])
                         elif packet["kind"] == "error":
                             logger.error(f"[CoreLink] {packet['detail']}")
+                            if packet.get("operation") == "output":
+                                continue
                             if packet.get("operation") == "handoff":
                                 await self._set_role(self.active, f"Core handoff failed: {packet['detail']}")
                                 continue
