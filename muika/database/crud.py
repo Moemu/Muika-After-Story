@@ -1,17 +1,77 @@
-from datetime import datetime, timedelta
-from typing import Literal, Optional
+import json
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, Literal, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .orm_models import (
     ArchiveRecordORM,
+    DiaryORM,
+    ExperienceORM,
+    FactORM,
     MemoryRecordORM,
     RssDigestCacheORM,
     SelfModificationORM,
     TopicHistoryORM,
     Usage,
 )
+
+if TYPE_CHECKING:
+    from muika.core.memory_models import Diary, Experience, Fact
+
+
+def local_time(value: str) -> datetime:
+    """将 ISO 日期转换为无时区的本地时间。"""
+    stamp = datetime.fromisoformat(value)
+    return stamp.astimezone().replace(tzinfo=None) if stamp.tzinfo else stamp
+
+
+def fact_from_row(row: FactORM) -> "Fact":
+    """将事实行转换为带日期和来源引用的记忆事实。"""
+    # Core 初始化经记忆和 LLM 引用 CRUD，模型需延迟导入以避免循环。
+    from muika.core.memory_models import Fact, MemoryCategory
+
+    return Fact(
+        id=row.id,
+        category=MemoryCategory(row.category),
+        key=row.key,
+        value=row.value,
+        source_refs=json.loads(row.source_refs),
+        weight=row.weight,
+        weight_at=local_time(row.weight_at),
+        observed_at=local_time(row.observed_at),
+        last_recalled_at=local_time(row.last_recalled_at),
+    )
+
+
+def experience_from_row(row: ExperienceORM) -> "Experience":
+    """将经历行转换为保留来源和本地时间的经历。"""
+    from muika.core.memory_models import Experience
+
+    return Experience(
+        id=row.id,
+        session_id=row.session_id,
+        kind=row.kind,
+        content=row.content,
+        occurred_at=local_time(row.occurred_at),
+        source=row.source,
+    )
+
+
+def diary_from_row(row: DiaryORM) -> "Diary":
+    """将日记行转换为保留来源和整理进度的日记。"""
+    from muika.core.memory_models import Diary
+
+    return Diary(
+        id=row.id,
+        day=date.fromisoformat(row.day),
+        content=row.content,
+        source=row.source,
+        source_refs=json.loads(row.source_refs),
+        covered_through=row.covered_through,
+        created_at=local_time(row.created_at),
+    )
 
 
 class UsageORM:

@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from muika.core.agent.task_store import CallRecord, TaskRecord
 from muika.core.events import TimeTickEvent
 from muika.core.memory_models import MemorySnapshot
-from muika.core.memory_rows import diary_from_row, experience_from_row, fact_from_row
 from muika.core.scheduler import Reminder
 from muika.core.state import MuikaState, StateRhythm
+from muika.database.crud import diary_from_row, experience_from_row, fact_from_row
 from muika.database.db import get_session
 from muika.database.orm_models import (
     AgentCallORM,

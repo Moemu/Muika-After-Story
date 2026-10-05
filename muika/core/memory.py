@@ -17,6 +17,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from muika.config import mas_config
+from muika.database.crud import (
+    diary_from_row,
+    experience_from_row,
+    fact_from_row,
+    local_time,
+)
 from muika.database.db import get_session
 from muika.database.orm_models import (
     ArchiveRecordORM,
@@ -54,7 +60,6 @@ from .memory_models import (
     SessionTurn,
     StateUpdate,
 )
-from .memory_rows import diary_from_row, experience_from_row, fact_from_row, local_time
 
 __all__ = [
     "MemoryManager",
