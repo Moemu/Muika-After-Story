@@ -14,6 +14,7 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Coroutine
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
 
@@ -483,20 +484,23 @@ class SelfChangeDispatcher:
         self._muika = muika
         self.ledger = ledger
         self._can_send = can_send
-        self._timer: Optional[asyncio.Task] = None
-        self._background: set[asyncio.Task] = set()
+        self._timer: Optional[asyncio.Task[None]] = None
+        self._background: set[asyncio.Task[None]] = set()
+        self._closed = False
         self._check_lock = asyncio.Lock()
         self.loop = asyncio.get_running_loop()
 
     def wake(self, delay: float = 0.0) -> None:
         """（重）安排一次门控检查；幂等，可由任意唤醒源调用。"""
+        if self._closed:
+            return
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
         if running is self.loop:
             self._cancel_timer()
-            self._timer = asyncio.create_task(self._check_after(max(delay, 0.0)))
+            self._timer = self._spawn(self._check_after(max(delay, 0.0)))
         else:
             self.loop.call_soon_threadsafe(self.wake, delay)
 
@@ -505,11 +509,10 @@ class SelfChangeDispatcher:
         self._cancel_timer()
 
     async def aclose(self) -> None:
-        """完全停机：取消定时器与所有后台任务，确保 close_db 前无在途 DB 操作。"""
+        """取消等待中的定时器，并在关闭数据库前等待在途事务完成。"""
+        self._closed = True
         self.shutdown()
         tasks = [task for task in self._background if not task.done()]
-        for task in tasks:
-            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._background.clear()
 
@@ -523,7 +526,7 @@ class SelfChangeDispatcher:
         try:
             if delay:
                 await asyncio.sleep(delay)
-            await self.check()
+            self._spawn(self.check())
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -533,16 +536,20 @@ class SelfChangeDispatcher:
             if self._timer is task:
                 self._timer = None
 
-    def _spawn(self, coroutine) -> None:
+    def _spawn(self, coroutine: Coroutine[Any, Any, None]) -> Optional[asyncio.Task[None]]:
+        if self._closed:
+            coroutine.close()
+            return None
         task = asyncio.create_task(coroutine)
         self._background.add(task)
 
-        def _finish(done: asyncio.Task) -> None:
+        def _finish(done: asyncio.Task[None]) -> None:
             self._background.discard(done)
             if not done.cancelled() and (error := done.exception()) is not None:
                 logger.error(f"[SelfChange] Background task failed: {error}")
 
         task.add_done_callback(_finish)
+        return task
 
     async def check(self) -> None:
         """门控检查：条件满足时冻结账本并投递一次合并的感知事件。"""
@@ -592,6 +599,8 @@ class SelfChangeDispatcher:
 
     async def _dispatch(self, batch_id: str, snapshot: list[dict], state: dict) -> None:
         """把（新冻结或重试的）批次作为一次感知事件交给她。"""
+        if self._closed or not self._muika.is_alive:
+            return
         report, register, version_from, version_to = _build_report(snapshot)
         payload = SelfChangedPayload(
             batch_id=batch_id,

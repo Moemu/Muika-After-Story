@@ -38,6 +38,75 @@ metadata = PluginMetadata(
 SELF_CHANGED_WHEN = "These changes were not made by you"
 
 
+@pytest.mark.parametrize("trigger", ["shutdown_check", "shutdown_observation", "reschedule_check"])
+async def test_active_self_change_transaction_finishes_before_cleanup(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch, trigger
+):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    app = await core_app_factory(turns=[])
+    await app.start()
+    reset_self_change_state()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    await asyncio.sleep(0.05)
+    dispatcher = get_self_change_dispatcher()
+    assert dispatcher is not None
+    entered, release, finished, cancelled = (asyncio.Event() for _ in range(4))
+    commit = AsyncSession.commit
+
+    async def held_commit(session):
+        if not entered.is_set():
+            entered.set()
+            app.recorder.record("self_change_transaction", phase="commit_started", trigger=trigger)
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            await commit(session)
+            finished.set()
+            app.recorder.record("self_change_transaction", phase="commit_finished", trigger=trigger)
+        else:
+            await commit(session)
+
+    monkeypatch.setattr(AsyncSession, "commit", held_commit)
+    if trigger == "shutdown_observation":
+        _, plugin_file = tmp_plugin
+        with plugin_file.open("a", encoding="utf-8") as handle:
+            handle.write("\n# self edit during shutdown\n")
+        notify_plugin_change("e2e_selfchg_plugin", "self", "reload")
+    else:
+        dispatcher.wake()
+    await asyncio.wait_for(entered.wait(), 5)
+    stopping = None
+    try:
+        if trigger == "reschedule_check":
+            dispatcher.wake()
+        else:
+            stopping = asyncio.create_task(app.stop())
+        await asyncio.sleep(0.05)
+        assert not cancelled.is_set(), "Active ledger transaction was cancelled"
+        if stopping is not None:
+            assert not stopping.done(), "Database closed before ledger transaction finished"
+    finally:
+        release.set()
+        if stopping is not None:
+            await asyncio.wait_for(stopping, 5)
+    await asyncio.wait_for(finished.wait(), 5)
+    await app.stop()
+    assert app.sent == []
+    if trigger == "shutdown_observation":
+        from muika.core.self_mod.fingerprint import compute_plugin_digest
+
+        state = read_self_change_state()
+        assert (
+            state["fingerprints"]["user_plugins"]["e2e_selfchg_plugin"]
+            == compute_plugin_digest({"e2e_selfchg_plugin": tmp_plugin[0]})["e2e_selfchg_plugin"]
+        )
+    app.recorder.record("self_change_cleanup", trigger=trigger, transaction_finished=True, cancelled=False)
+
+
 @pytest.fixture
 def fast_self_change(monkeypatch):
     """压缩感知节奏参数，让门控与重试在秒级内完成。"""
