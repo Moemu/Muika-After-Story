@@ -20,6 +20,12 @@ from muika.utils.logger import logger
 _BUILTIN_PREFIX = "muika.builtin_plugins"
 """builtin 插件的 module 前缀；拒绝通过本管理器卸载。"""
 
+
+def is_builtin_plugin(package_name: str) -> bool:
+    """判断插件是否为 builtin 内置插件。"""
+    return package_name.startswith(_BUILTIN_PREFIX)
+
+
 PluginChangeObserver = Callable[[str, str, str], None]
 """插件变更观察者回调 ``(package_name, origin, action)``。
 
@@ -120,7 +126,7 @@ class PluginManager:
                 "name": plugin.name,
                 "commands": cmd_count,
                 "func_calls": call_count,
-                "is_builtin": package_name.startswith(_BUILTIN_PREFIX),
+                "is_builtin": is_builtin_plugin(package_name),
             }
         return result
 

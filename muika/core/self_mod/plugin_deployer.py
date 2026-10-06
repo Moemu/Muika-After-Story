@@ -353,8 +353,10 @@ class PluginDeployer:
                 except PluginLoadError as exc:
                     recovery = await self._recover_failed_revert(target, module_name, old_content, was_loaded)
                     raise SelfModError(f"Plugin revert reload failed: {exc}\n{recovery}") from exc
+                notify_plugin_change(module_name, "self", "reload")
             elif module_name in get_plugins():
                 unload_plugin(module_name)
+                notify_plugin_change(module_name, "self", "unload")
             return report
 
     def list_quarantine(self) -> str:
@@ -402,8 +404,10 @@ class PluginDeployer:
             await get_self_mod_manager().revert(str(target))
             if target.exists():
                 load_plugin(module_name)
+                notify_plugin_change(module_name, "self", "load")
             elif module_name in get_plugins():
                 unload_plugin(module_name)
+                notify_plugin_change(module_name, "self", "unload")
             return "Recovery succeeded."
         except PluginLoadError as exc:
             return f"Recovery failed: {exc}"
@@ -423,6 +427,7 @@ class PluginDeployer:
                 target.unlink(missing_ok=True)
                 if module_name in get_plugins():
                     unload_plugin(module_name)
+                notify_plugin_change(module_name, "self", "unload")
             else:
                 await get_self_mod_manager().apply(
                     str(target),
@@ -430,6 +435,7 @@ class PluginDeployer:
                     "Recover failed plugin revert",
                     source="recovery",
                 )
+                notify_plugin_change(module_name, "self", "load")
                 try:
                     load_plugin(module_name)
                 except PluginLoadError as exc:

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -29,6 +30,7 @@ from muika.core.self_mod.proposals import is_core_maintenance_active
 from muika.database.db import get_session
 from muika.database.orm_models import SystemStateORM
 from muika.plugin.loader import get_plugins
+from muika.plugin.manager import is_builtin_plugin
 from muika.utils.logger import logger
 from muika.utils.utils import get_version
 
@@ -68,6 +70,11 @@ def _plugin_display_name(package_name: str, meta: Optional[dict]) -> str:
     if meta and meta.get("name"):
         return str(meta["name"])
     return package_name.rsplit(".", 1)[-1]
+
+
+def _user_plugins() -> dict:
+    """返回已加载的用户插件；builtin 插件属于内核，走内核指纹归因。"""
+    return {name: plugin for name, plugin in get_plugins().items() if not is_builtin_plugin(name)}
 
 
 class SelfChangeLedger:
@@ -222,7 +229,7 @@ class SelfChangeLedger:
         """启动对比：磁盘指纹 vs 已观察基线；外部变更入账，基线无条件推进。"""
         now = time.time()
         kernel = compute_kernel_files()
-        plugin_digests = compute_plugin_digest(get_plugins())
+        plugin_digests = compute_plugin_digest(_user_plugins())
         version = get_version()
         async with self._lock:
             state = await self._load_unlocked()
@@ -302,24 +309,69 @@ class SelfChangeLedger:
                 "attempts": 1,
                 # 首次投递结果未知前，竞态检查不得把同一批次当"到期重投"
                 "next_attempt_at": time.time() + SELF_CHANGE_RETRY_BASE_SECONDS,
+                "awaiting_flush": False,
             }
             await self._save_unlocked(state)
         return batch_id, snapshot
 
-    async def discard_stale_batch(self) -> None:
-        """在途批次超时视为投递失败：账目未销，重组后自然重投。"""
+    async def mark_dispatched(self, batch_id: str) -> None:
+        """事件已入队：退出重投资格，等待 on_processed 的确认或改期。
+
+        若处理时间超过批次超时（如 LLM 长生成），宁可等超时重组也不重复入队。
+        """
         async with self._lock:
             state = await self._load_unlocked()
             in_flight = state["delivery"].get("in_flight")
-            if in_flight and time.time() - in_flight["created_at"] > SELF_CHANGE_BATCH_MAX_AGE:
+            if not in_flight or in_flight["batch_id"] != batch_id:
+                return
+            in_flight["next_attempt_at"] = None
+            await self._save_unlocked(state)
+
+    async def park_batch(self, batch_id: str) -> None:
+        """回执为 queued：消息在暂存队列等待连接恢复，停用重投，待适配器上线后确认。
+
+        这样既不在账本侧重试（避免与暂存队列补发重复），也不会在进程退出前丢账。
+        """
+        async with self._lock:
+            state = await self._load_unlocked()
+            in_flight = state["delivery"].get("in_flight")
+            if not in_flight or in_flight["batch_id"] != batch_id:
+                return
+            in_flight["awaiting_flush"] = True
+            in_flight["next_attempt_at"] = None
+            await self._save_unlocked(state)
+
+    async def discard_stale_batch(self) -> None:
+        """在途批次超时视为投递失败：账目未销，重组后自然重投。
+
+        等待暂存补发（awaiting_flush）的批次不受超时约束：重投会造成重复发言。
+        """
+        async with self._lock:
+            state = await self._load_unlocked()
+            in_flight = state["delivery"].get("in_flight")
+            if (
+                in_flight
+                and not in_flight.get("awaiting_flush")
+                and time.time() - in_flight["created_at"] > SELF_CHANGE_BATCH_MAX_AGE
+            ):
                 logger.warning(f"[SelfChange] Batch {in_flight['batch_id'][:8]} timed out in flight; will re-dispatch.")
                 state["delivery"]["in_flight"] = None
                 await self._save_unlocked(state)
 
+    async def get_batch_snapshot(self, batch_id: str) -> Optional[list[dict]]:
+        """返回在途批次的快照；批次不存在或已销账时返回 None。"""
+        async with self._lock:
+            state = await self._load_unlocked()
+            in_flight = state["delivery"].get("in_flight")
+            if not in_flight or in_flight["batch_id"] != batch_id:
+                return None
+            return in_flight["snapshot"]
+
     async def resolve_batch(self, batch_id: str) -> None:
         """销账：只消费快照内的记录修订，快照之后的新变化原地保留。
 
-        同时把本次感知写入长期记忆；批次 ID 作 source，重试不会重复记录。
+        记忆写入由调用方在销账**之前**完成（幂等 source）——账本清账后
+        记忆若缺失将无法补写，顺序不可颠倒。
         """
         async with self._lock:
             state = await self._load_unlocked()
@@ -337,7 +389,6 @@ class SelfChangeLedger:
             state["delivery"]["last_delivered_at"] = time.time()
             state["delivery"]["perceived_batches"] += 1
             await self._save_unlocked(state)
-        await self._remember(batch_id, snapshot)
 
     async def defer_batch(self, batch_id: str) -> None:
         """投递失败：保留在途批次，累积重试次数并安排退避后的重投时刻。"""
@@ -351,10 +402,6 @@ class SelfChangeLedger:
                 SELF_CHANGE_RETRY_MAX_SECONDS, SELF_CHANGE_RETRY_BASE_SECONDS * (2 ** (in_flight["attempts"] - 1))
             )
             await self._save_unlocked(state)
-
-    async def _remember(self, batch_id: str, snapshot: list[dict]) -> None:
-        source = f"self_change:{batch_id}"
-        await self._muika.memory.add_material("agent", describe_entries(snapshot), source=source)
 
 
 def describe_entries(entries: list[dict]) -> str:
@@ -397,9 +444,8 @@ def _build_report(snapshot: list[dict]) -> tuple[str, RegisterKind, Optional[str
     if kernel_files:
         parts.append("Core files changed: " + _fold(kernel_files) + ".")
     for entry in snapshot:
-        if entry["kind"] == "kernel_version":
-            continue
-        parts.append(_plugin_facts(entry))
+        if entry["kind"].startswith("plugin_"):
+            parts.append(_plugin_facts(entry))
     if has_runtime and not version_entry:
         parts.append("The changes happened while you were running.")
     if version_entry:
@@ -495,16 +541,20 @@ class SelfChangeDispatcher:
         if not state["pending"]:
             return
         now = time.time()
-        in_flight = state["delivery"].get("in_flight")
-        if in_flight:
-            # 已有在途批次：到点重投同一快照（同 batch_id），不到点则改期
-            if now >= in_flight.get("next_attempt_at", 0.0):
-                await self._dispatch(in_flight["batch_id"], in_flight["snapshot"], state)
-            else:
-                self.wake(in_flight["next_attempt_at"] - now)
-            return
+        # 硬条件前置：新投递与重投都必须能真的发出去
         if not (self._can_send() and not is_core_maintenance_active()):
             self.wake(SELF_CHANGE_RETRY_BASE_SECONDS)
+            return
+        in_flight = state["delivery"].get("in_flight")
+        if in_flight:
+            # 已有在途批次：仅到点的重投才重发同一快照；等待处理/暂存补发时不动作
+            next_attempt_at = in_flight.get("next_attempt_at")
+            if next_attempt_at is None or in_flight.get("awaiting_flush"):
+                return
+            if now >= next_attempt_at:
+                await self._dispatch(in_flight["batch_id"], in_flight["snapshot"], state)
+            else:
+                self.wake(next_attempt_at - now)
             return
         settle = mas_config.self_change_settle_seconds
         since_append = now - max(entry["last_ts"] for entry in state["pending"])
@@ -538,6 +588,8 @@ class SelfChangeDispatcher:
         logger.info(f"[SelfChange] Dispatching batch {batch_id[:8]}: {len(snapshot)} change(s), register={register}.")
         logger.debug(f"[SelfChange] Batch {batch_id[:8]} report: {report}")
         await self._muika.create_event(SelfChangedEvent(payload=payload))
+        # 事件已入队：退出重投资格，避免处理期间的后续变更把同一批次重复入队
+        await self.ledger.mark_dispatched(batch_id)
 
     @staticmethod
     def _retry_delay(attempts: int) -> float:
@@ -548,11 +600,13 @@ class SelfChangeDispatcher:
         self._spawn(self._finalize(batch_id, silent=silent, reply=reply, receipt=receipt))
 
     async def _finalize(self, batch_id: str, *, silent: bool, reply: str, receipt) -> None:
-        if silent or not reply:
-            await self.ledger.resolve_batch(batch_id)
-            logger.info(f"[SelfChange] Batch {batch_id[:8]} consumed silently.")
+        if receipt == "queued":
+            # 消息已进入暂存队列等连接恢复：停用重投以免与补发重复，
+            # 适配器上线补发完成后再销账
+            await self.ledger.park_batch(batch_id)
+            logger.info(f"[SelfChange] Batch {batch_id[:8]} queued for staging; awaiting adapter flush.")
             return
-        if reply == FALLBACK_REPLY or receipt == "failed":
+        if not (silent or reply) or reply == FALLBACK_REPLY or receipt == "failed":
             await self.ledger.defer_batch(batch_id)
             state = await self.ledger.load_state()
             in_flight = state["delivery"].get("in_flight")
@@ -561,8 +615,33 @@ class SelfChangeDispatcher:
             logger.warning(f"[SelfChange] Batch {batch_id[:8]} not delivered; retrying in {delay:.2f}s.")
             self.wake(delay)
             return
+        await self._confirm(batch_id)
+
+    async def on_adapter_online(self) -> None:
+        """适配器上线：暂存队列即将补发，确认此前因 queued 停靠的批次。"""
+        state = await self.ledger.load_state()
+        in_flight = state["delivery"].get("in_flight")
+        if in_flight and in_flight.get("awaiting_flush"):
+            await self._confirm(in_flight["batch_id"])
+
+    async def _confirm(self, batch_id: str) -> None:
+        """确认感知：先幂等写入长期记忆，成功后才销账——顺序不可颠倒。"""
+        snapshot = await self.ledger.get_batch_snapshot(batch_id)
+        if snapshot is not None:
+            try:
+                await self._muika.memory.add_material(
+                    "agent", describe_entries(snapshot), source=f"self_change:{batch_id}"
+                )
+            except Exception:
+                logger.exception(f"[SelfChange] Memory write failed for batch {batch_id[:8]}; deferring.")
+                await self.ledger.defer_batch(batch_id)
+                state = await self.ledger.load_state()
+                in_flight = state["delivery"].get("in_flight")
+                attempts = in_flight["attempts"] if in_flight else 1
+                self.wake(self._retry_delay(attempts))
+                return
         await self.ledger.resolve_batch(batch_id)
-        logger.info(f"[SelfChange] Batch {batch_id[:8]} delivered (receipt={receipt}).")
+        logger.info(f"[SelfChange] Batch {batch_id[:8]} confirmed.")
 
 
 _ledger: Optional[SelfChangeLedger] = None
@@ -636,12 +715,14 @@ async def _observe(
 
 
 def _proposal_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[set[str], Optional[str]]:
-    """从重启记录关联的提案文件推断本次自改的内核文件集合。
+    """从重启记录关联的提案中确认本次自改实际落地的内核文件集合。
 
+    只有本次重启（status=started）且**当前文件内容与提案预期结果一致**的路径
+    才豁免入账——旧的自改记录、被玩家再次修改的文件，都不能屏蔽外部变更。
     提案读不到时保守返回空集合：宁可让已知的自改走一遍账本，
     也不把并存的外部修改整批吞掉。
     """
-    if not restart_record or not restart_record.get("patch_id"):
+    if not restart_record or not restart_record.get("patch_id") or restart_record.get("status") != "started":
         return set(), None
     restart_id = restart_record.get("id")
     proposal_file = restart_record.get("proposal_file")
@@ -656,9 +737,28 @@ def _proposal_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[s
     paths: set[str] = set()
     for change in proposal.get("changes", []):
         parts = PurePosixPath(str(change.get("path", ""))).parts
-        if parts and parts[0] == package_name:
-            paths.add(PurePosixPath(*parts[1:]).as_posix())
+        if not parts or parts[0] != package_name:
+            continue
+        rel = PurePosixPath(*parts[1:]).as_posix()
+        if not _self_change_landed(kernel_root() / rel, change):
+            continue
+        paths.add(rel)
     return paths, restart_id
+
+
+def _self_change_landed(path: Path, change: Mapping[str, Any]) -> bool:
+    """核对提案变更是否就是磁盘上的现状（摘要语义与提案体系一致：utf-8 文本）。"""
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else None
+    except (OSError, ValueError):
+        return False
+    expected = change.get("sha256_after")
+    if expected is None:
+        # delete 变更：文件确已消失才算落地
+        return text is None
+    if text is None:
+        return False
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() == expected
 
 
 async def run_boot_self_change_check(muika: "Muika", restart_record: Optional[Mapping[str, Any]]) -> None:

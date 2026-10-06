@@ -283,7 +283,7 @@ class Muika:
             self.current_adapters.append(event.adapter)
             logger.debug(f"[Loop] Adapter online: {event.adapter!r} — status updated")
             if self.self_change is not None:
-                self.self_change.wake()
+                await self.self_change.on_adapter_online()
             if len(self.current_adapters) < 2:
                 return
 

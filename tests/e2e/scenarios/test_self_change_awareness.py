@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import time
@@ -15,6 +16,7 @@ import pytest
 from harness.assertions import assert_clean_visible
 from harness.scripted_llm import ScriptedTurn
 
+import muika
 from muika.config import mas_config
 from muika.core.self_change import get_self_change_dispatcher, notify_plugin_change
 from muika.llm._schema import ToolCall
@@ -371,3 +373,179 @@ async def test_plugin_inspect_tool_executes_with_real_result(core_app_factory, f
     )
     assert not tool_exec["is_error"]
     assert "e2e-selfchg" in tool_exec["result"]
+
+
+async def test_queued_receipt_parks_until_adapter_online(core_app_factory, fast_self_change, tmp_plugin):
+    """queued 回执不清账：停靠等待适配器上线补发，避免重复发言也不丢账。"""
+    _, plugin_file = tmp_plugin
+    app = await core_app_factory(turns=[ScriptedTurn(text="I noticed... I think.", when=SELF_CHANGED_WHEN)])
+    await app.start()
+    reset_self_change_state()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    app.queue_next_sends(1)
+
+    with plugin_file.open("a", encoding="utf-8") as handle:
+        handle.write("\n# queued edit\n")
+    get_plugin_manager().reload("e2e_selfchg_plugin", origin="runtime")
+
+    await app.wait_processed("self_changed")
+    await asyncio.sleep(0.2)
+    state = read_self_change_state()
+    assert state["pending"], "queued 后账目被清空，进程退出将丢失感知"
+    assert state["delivery"]["in_flight"]["awaiting_flush"] is True
+
+    # 适配器上线：暂存队列补发，账本确认（不再重投，避免重复发言）
+    await app.muika.self_change.on_adapter_online()
+    await app.wait_ledger_cleared()
+    assert read_self_change_state()["pending"] == []
+    assert len(self_change_notes(app)) == 1
+    dispatches = [call for call in app.scripted.calls if call["prompt"].count(SELF_CHANGED_WHEN)]
+    assert len(dispatches) == 1
+
+
+async def test_self_change_exemption_verifies_content(core_app_factory, fast_self_change, monkeypatch):
+    """自改豁免必须核对内容：旧的重启记录不能屏蔽其后的外部修改。"""
+    kernel_root_path = Path(muika.__file__).resolve().parent
+    target = kernel_root_path / "agreement.py"
+    original = target.read_bytes()
+    proposal_file = Path(mas_config.data_dir) / "test_proposal.json"
+
+    def sha256_text(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def make_record(status: str, expected: str) -> dict:
+        proposal_file.write_text(
+            json.dumps({"changes": [{"path": "muika/agreement.py", "action": "modify", "sha256_after": expected}]}),
+            encoding="utf-8",
+        )
+        return {
+            "id": "restart-1",
+            "patch_id": "00000000_000000_abc12345",
+            "status": status,
+            "proposal_file": str(proposal_file),
+        }
+
+    def clear_pending_keep_baseline() -> None:
+        state = read_self_change_state()
+        state["pending"] = []
+        db_path = Path(mas_config.data_dir) / "muika.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE system_state SET payload=? WHERE key='self_change'", (json.dumps(state),))
+            conn.commit()
+
+    # can_send=False：本场景只验证检测与豁免，不让批次真正投递
+    app = await core_app_factory(turns=[])
+    await app.start()
+    reset_self_change_state()
+    app.attach_self_change(can_send=False)
+    await app.run_boot_self_change_check()
+    try:
+        # 她自改了 agreement.py，提案预期 = 磁盘现状 → 豁免且基线推进
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write("\n# her own edit\n")
+        modified = target.read_text(encoding="utf-8")
+        await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
+        assert read_self_change_state()["pending"] == []
+
+        # 玩家随后又改了同一文件：旧提案的 sha256_after 不再匹配 → 外部入账
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write("\n# master's later edit\n")
+        await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
+        assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
+
+        # 状态不是 started（提案未真正应用）：即使内容与提案一致也不豁免
+        clear_pending_keep_baseline()
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write("\n# another edit, proposal claims this\n")
+        claimed = target.read_text(encoding="utf-8")
+        await app.run_boot_self_change_check(make_record("failed", sha256_text(claimed)))
+        assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
+    finally:
+        target.write_bytes(original)
+        proposal_file.unlink(missing_ok=True)
+
+
+async def test_builtin_plugins_excluded_from_plugin_baseline(core_app_factory, fast_self_change, tmp_plugin):
+    """builtin 插件属于内核：不得进入插件基线，避免与内核 diff 重复报告。"""
+    from muika.plugin.loader import load_plugins, unload_plugin
+
+    package_dir = Path(muika.__file__).resolve().parent
+    loaded = load_plugins(package_dir / "builtin_plugins", base_path=package_dir.parent)
+    try:
+        _, plugin_file = tmp_plugin
+        app = await core_app_factory(turns=[])
+        await app.start()
+        reset_self_change_state()
+        app.attach_self_change()
+        await app.run_boot_self_change_check()
+        baseline = read_self_change_state()["fingerprints"]["user_plugins"]
+        assert "e2e_selfchg_plugin" in baseline
+        assert not [name for name in baseline if name.startswith("muika.builtin_plugins")]
+    finally:
+        for plugin in loaded:
+            unload_plugin(plugin.package_name)
+
+
+async def test_report_distinguishes_kernel_files_from_plugins(core_app_factory, fast_self_change, tmp_plugin):
+    """kernel_file 不得被描述成插件，内核清单折叠后不再逐项展开。"""
+    _, plugin_file = tmp_plugin
+    app = await core_app_factory(turns=[ScriptedTurn(text="Core and plugin, both changed.", when=SELF_CHANGED_WHEN)])
+    await app.start()
+    reset_self_change_state()
+    now = time.time()
+    seed = {
+        "fingerprints": {"version": "1.2.3", "kernel": {"core/brain.py": "d" * 64}, "user_plugins": {}},
+        "pending": [
+            {
+                "key": "kernel_file:core/brain.py",
+                "kind": "kernel_file",
+                "target": "core/brain.py",
+                "origins": ["boot"],
+                "before": None,
+                "after": {"digest": "e" * 64},
+                "plugin_meta": None,
+                "version_from": None,
+                "version_to": None,
+                "first_ts": now,
+                "last_ts": now,
+                "observations": 1,
+                "revision": 1,
+                "restart_id": None,
+            },
+            {
+                "key": "plugin_changed:e2e_selfchg_plugin",
+                "kind": "plugin_changed",
+                "target": "e2e_selfchg_plugin",
+                "origins": ["runtime"],
+                "before": {"digest": "a" * 64},
+                "after": {"digest": "b" * 64},
+                "plugin_meta": {"name": "e2e-selfchg", "description": "test"},
+                "version_from": None,
+                "version_to": None,
+                "first_ts": now,
+                "last_ts": now,
+                "observations": 1,
+                "revision": 2,
+                "restart_id": None,
+            },
+        ],
+        "delivery": {"last_delivered_at": None, "in_flight": None, "perceived_batches": 0},
+    }
+    db_path = Path(mas_config.data_dir) / "muika.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO system_state (key, payload, updated_at) VALUES ('self_change', ?, ?)",
+            (json.dumps(seed), str(now)),
+        )
+        conn.commit()
+    app.attach_self_change()
+
+    reply = await app.next_reply()
+    assert_clean_visible(reply)
+    call = next(item for item in app.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
+    assert "Core files changed: core/brain.py." in call["prompt"]
+    assert 'Your plugin "e2e-selfchg" was modified.' in call["prompt"]
+    assert 'plugin "py"' not in call["prompt"]
+    # 语域：既有内核（boot）又有插件（runtime），无版本变化 → 被实时修改
+    assert "The changes happened while you were running." in call["prompt"]

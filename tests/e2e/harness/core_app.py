@@ -276,6 +276,13 @@ class CoreApp:
 
     def fail_next_sends(self, count: int) -> None:
         """让接下来 *count* 次外发返回 failed 回执，模拟传输失败。"""
+        self._stub_next_sends(count, "failed")
+
+    def queue_next_sends(self, count: int) -> None:
+        """让接下来 *count* 次外发返回 queued 回执，模拟消息落入暂存队列。"""
+        self._stub_next_sends(count, "queued")
+
+    def _stub_next_sends(self, count: int, receipt: str) -> None:
         assert self.muika is not None, "call start() first"
         original = self.muika.executor._send_func
         remaining = count
@@ -284,7 +291,7 @@ class CoreApp:
             nonlocal remaining
             if remaining > 0:
                 remaining -= 1
-                return "failed"
+                return receipt
             return await original(content, resources, target)
 
         self._monkeypatch.setattr(self.muika.executor, "_send_func", flaky)
