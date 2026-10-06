@@ -197,3 +197,30 @@ class MemoryRuntimeORM(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     payload: Mapped[str] = mapped_column(Text)
+
+
+class SyncEventORM(Base):
+    """保存已发生的活动及同步顺序，不追踪消息投递。"""
+
+    __tablename__ = "sync_event"
+    sequence: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, unique=True)
+    origin: Mapped[str] = mapped_column(String)
+    gateway_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class SyncReferenceORM(Base):
+    """将源节点的事实引用映射到本地数据库编号。"""
+
+    __tablename__ = "sync_reference"
+    source: Mapped[str] = mapped_column(String, primary_key=True)
+    local_id: Mapped[int] = mapped_column(Integer)
+
+
+class SyncStateORM(Base):
+    """保存节点同步进度、活动权和本地提醒。"""
+
+    __tablename__ = "sync_state"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)

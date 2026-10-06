@@ -17,6 +17,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from muika.config import mas_config
+from muika.database.crud import (
+    diary_from_row,
+    experience_from_row,
+    fact_from_row,
+    local_time,
+)
 from muika.database.db import get_session
 from muika.database.orm_models import (
     ArchiveRecordORM,
@@ -72,48 +78,6 @@ __all__ = [
 ]
 
 
-def _local(value: str) -> datetime:
-    stamp = datetime.fromisoformat(value)
-    return stamp.astimezone().replace(tzinfo=None) if stamp.tzinfo else stamp
-
-
-def _fact(row: FactORM) -> Fact:
-    return Fact(
-        id=row.id,
-        category=MemoryCategory(row.category),
-        key=row.key,
-        value=row.value,
-        source_refs=json.loads(row.source_refs),
-        weight=row.weight,
-        weight_at=_local(row.weight_at),
-        observed_at=_local(row.observed_at),
-        last_recalled_at=_local(row.last_recalled_at),
-    )
-
-
-def _experience(row: ExperienceORM) -> Experience:
-    return Experience(
-        id=row.id,
-        session_id=row.session_id,
-        kind=row.kind,
-        content=row.content,
-        occurred_at=_local(row.occurred_at),
-        source=row.source,
-    )
-
-
-def _diary(row: DiaryORM) -> Diary:
-    return Diary(
-        id=row.id,
-        day=date.fromisoformat(row.day),
-        content=row.content,
-        source=row.source,
-        source_refs=json.loads(row.source_refs),
-        covered_through=row.covered_through,
-        created_at=_local(row.created_at),
-    )
-
-
 class MemoryManager:
     """协调记忆事务和有预算的工作视图。"""
 
@@ -139,22 +103,23 @@ class MemoryManager:
     async def _save_snapshot(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
         await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
 
-    async def load(self) -> None:
+    async def load(self, *, record_activity: bool = True) -> None:
         """恢复记忆；数据库失败时不替换当前状态。"""
         async with self._lock:
-            async with get_session() as db:
+            async with get_session(record_activity=record_activity) as db:
                 saved = await db.get(MemoryRuntimeORM, 1)
                 snapshot = MemorySnapshot.model_validate_json(saved.payload) if saved else MemorySnapshot()
                 if not snapshot.legacy_imported:
                     await self._import_legacy(db, snapshot)
                 facts = {
-                    row.id: _fact(row) for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
+                    row.id: fact_from_row(row)
+                    for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
                 }
                 rows = list(
                     await db.scalars(
                         select(ExperienceORM)
                         .where(
-                            ExperienceORM.session_id == snapshot.session.session_id,
+                            ExperienceORM.session_id.in_([snapshot.session.session_id, *snapshot.resume_sessions]),
                             ExperienceORM.id > snapshot.summary_through,
                             ExperienceORM.kind.in_(["user", "muika", "agent"]),
                         )
@@ -166,15 +131,20 @@ class MemoryManager:
             self.snapshot, self.facts = snapshot, facts
             self.recent_turns = deque(self._turn(row) for row in rows)
 
+    async def contains_source(self, source: str) -> bool:
+        """检查同一外部事件是否已成为本地经历。"""
+        async with get_session(record_activity=False) as db:
+            return await db.scalar(select(ExperienceORM.id).where(ExperienceORM.source == source)) is not None
+
     async def _import_legacy(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
         now = datetime.now().isoformat()
         for row in await db.scalars(select(MemoryRecordORM).order_by(MemoryRecordORM.updated_at, MemoryRecordORM.id)):
             if row.key in {"first_conversation_time", "self_reflection_last_at"}:
                 try:
                     if row.key == "first_conversation_time":
-                        snapshot.first_interaction_at = _local(row.value)
+                        snapshot.first_interaction_at = local_time(row.value)
                     else:
-                        snapshot.last_dream_at = _local(row.value)
+                        snapshot.last_dream_at = local_time(row.value)
                 except ValueError:
                     pass
                 continue
@@ -182,7 +152,7 @@ class MemoryManager:
                 session_id="legacy",
                 kind="legacy",
                 content=row.value,
-                occurred_at=_local(row.updated_at).isoformat(),
+                occurred_at=local_time(row.updated_at).isoformat(),
                 source=f"legacy_memory:{row.id}",
                 resources="[]",
             )
@@ -207,8 +177,8 @@ class MemoryManager:
                     source_refs=json.dumps([f"experience:{material.id}"]),
                     weight=1.0,
                     weight_at=now,
-                    observed_at=_local(row.updated_at).isoformat(),
-                    last_recalled_at=_local(row.updated_at).isoformat(),
+                    observed_at=local_time(row.updated_at).isoformat(),
+                    last_recalled_at=local_time(row.updated_at).isoformat(),
                     created_at=row.created_at,
                 )
             )
@@ -224,7 +194,7 @@ class MemoryManager:
                 )
             )
             if snapshot.first_interaction_at is None:
-                snapshot.first_interaction_at = _local(row.period_start)
+                snapshot.first_interaction_at = local_time(row.period_start)
         snapshot.legacy_imported = True
 
     @staticmethod
@@ -233,7 +203,11 @@ class MemoryManager:
             "user" if row.kind == "user" else "muika" if row.kind == "muika" else "agent"
         )
         return SessionTurn(
-            role, row.content, _local(row.occurred_at), [Resource(**item) for item in json.loads(row.resources)], row.id
+            role,
+            row.content,
+            local_time(row.occurred_at),
+            [Resource(**item) for item in json.loads(row.resources)],
+            row.id,
         )
 
     def _preserve_resources(self, resources: list[Resource]) -> list[Resource]:
@@ -252,7 +226,7 @@ class MemoryManager:
                 raise ValueError("A memory resource needs local content before recording")
             target = directory / (uuid4().hex + (resource.extension or ".bin"))
             target.write_bytes(content)
-            saved.append(Resource(type=resource.type, path=str(target), mimetype=resource.mimetype))
+            saved.append(Resource(type=resource.type, path=str(target), url=resource.url, mimetype=resource.mimetype))
         return saved
 
     async def add_context(
@@ -277,7 +251,7 @@ class MemoryManager:
         source: str | None = None,
     ) -> int:
         """追加素材；来源标识防止事件重投产生重复记录。"""
-        now = _local((timestamp or datetime.now()).isoformat())
+        now = local_time((timestamp or datetime.now()).isoformat())
         if kind in {"muika", "agent", "note"}:
             content = public_text(content)
         async with self._lock:
@@ -313,6 +287,7 @@ class MemoryManager:
         async with self._lock:
             snapshot = self.snapshot.model_copy(deep=True)
             snapshot.session = SessionState(is_first_session=not self.has_history)
+            snapshot.resume_sessions = []
             snapshot.working_summary, snapshot.summary_through = "", 0
             async with get_session() as db:
                 await self._save_snapshot(db, snapshot)
@@ -458,7 +433,7 @@ class MemoryManager:
                 )
                 .order_by(ExperienceORM.occurred_at, ExperienceORM.id)
             )
-            return [_experience(row) for row in rows]
+            return [experience_from_row(row) for row in rows]
 
     async def recent_diaries(self, before: date, limit: int = 5) -> list[Diary]:
         async with get_session() as db:
@@ -468,7 +443,7 @@ class MemoryManager:
                 .order_by(DiaryORM.day.desc(), DiaryORM.id.desc())
                 .limit(limit)
             )
-            return [_diary(row) for row in rows]
+            return [diary_from_row(row) for row in rows]
 
     async def save_dream(self, day: date, result: DreamResult, through: int, allowed_refs: set[str]) -> bool:
         """在同一事务提交日记、事实强化、状态和素材进度。"""
@@ -509,7 +484,7 @@ class MemoryManager:
                     )
                 )
                 day_refs = {f"experience:{item.id}" for item in evidence}
-                evidence_dates = {f"experience:{item.id}": _local(item.occurred_at) for item in evidence}
+                evidence_dates = {f"experience:{item.id}": local_time(item.occurred_at) for item in evidence}
                 new_refs = {f"experience:{item.id}" for item in evidence if item.id > previous_through}
                 if result.dissonance_delta and not set(result.tension_source_refs) & new_refs:
                     raise ValueError("A tension change needs new evidence from this diary day")
@@ -522,7 +497,7 @@ class MemoryManager:
                         raise ValueError("Fact retraction requires new source evidence")
                     retired = await db.get(FactORM, item.fact_id)
                     observed = max(evidence_dates[ref] for ref in item.source_refs if ref in evidence_dates)
-                    if retired is not None and _local(retired.observed_at) <= observed:
+                    if retired is not None and local_time(retired.observed_at) <= observed:
                         retired.active = False
                 recalled = set(result.recalled_fact_ids)
                 for change in result.facts:
@@ -551,7 +526,11 @@ class MemoryManager:
                     if any(row.forgotten for row in rows):
                         continue
                     current = next((row for row in rows if row.active), None)
-                    if current is not None and current.value != change.value and _local(current.observed_at) > observed:
+                    if (
+                        current is not None
+                        and current.value != change.value
+                        and local_time(current.observed_at) > observed
+                    ):
                         continue
                     if current is None or current.value != change.value:
                         if current is not None:
@@ -575,10 +554,14 @@ class MemoryManager:
                         current.source_refs = json.dumps(
                             sorted(set(json.loads(current.source_refs)) | set(change.source_refs))
                         )
-                        current.observed_at = max(_local(current.observed_at), observed).isoformat()
+                        current.observed_at = max(local_time(current.observed_at), observed).isoformat()
                     for fact_id in change.supersedes:
                         retired = await db.get(FactORM, fact_id)
-                        if retired is not None and retired.id != current.id and _local(retired.observed_at) <= observed:
+                        if (
+                            retired is not None
+                            and retired.id != current.id
+                            and local_time(retired.observed_at) <= observed
+                        ):
                             retired.active = False
                     if new_evidence:
                         recalled.add(current.id)
@@ -593,12 +576,12 @@ class MemoryManager:
                     )
                     if seen is not None:
                         continue
-                    stamp = max(now, _local(fact.weight_at), day_end)
-                    fact.weight = _fact(fact).score(stamp) + 2 ** (
+                    stamp = max(now, local_time(fact.weight_at), day_end)
+                    fact.weight = fact_from_row(fact).score(stamp) + 2 ** (
                         -max(0, (stamp - day_end).total_seconds()) / (86400 * 90)
                     )
                     fact.weight_at = stamp.isoformat()
-                    fact.last_recalled_at = max(day_end, _local(fact.last_recalled_at)).isoformat()
+                    fact.last_recalled_at = max(day_end, local_time(fact.last_recalled_at)).isoformat()
                     db.add(FactRecallORM(fact_id=fact_id, day=day.isoformat()))
                 delta = result.dissonance_delta
                 if result.relief == "action_without_feedback":
@@ -612,7 +595,8 @@ class MemoryManager:
                 await self._save_snapshot(db, snapshot)
                 await db.flush()
                 facts = {
-                    row.id: _fact(row) for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
+                    row.id: fact_from_row(row)
+                    for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
                 }
             self.snapshot, self.facts = snapshot, facts
             return True
@@ -722,7 +706,7 @@ class MemoryManager:
                     )
                 )
                 content = "\n".join(
-                    public_text(_experience(item).describe()) for item in [*reversed(previous), row, *following]
+                    public_text(experience_from_row(item).describe()) for item in [*reversed(previous), row, *following]
                 )
                 content += "\nResources: " + row.resources
                 if row.source:
@@ -737,7 +721,7 @@ class MemoryManager:
                 if fact is None or fact.forgotten:
                     raise ValueError("Fact is missing or forgotten")
                 content = "[Superseded or invalid fact] " if not fact.active else ""
-                content += public_text(_fact(fact).describe()) + "\nSources: " + fact.source_refs
+                content += public_text(fact_from_row(fact).describe()) + "\nSources: " + fact.source_refs
         return self._page(ref, content, offset, limit)
 
     @staticmethod

@@ -262,6 +262,11 @@ class MuikaBrain:
                 "[System] Your acting half has paused at an execution boundary. Direct tools are now available. "
                 "Continue from this task state; do not repeat completed actions:\n" + event.report
             )
+        elif event.type == "core_change":
+            prompt = (
+                "[System] Your activity location or available devices changed. This is the same ongoing relationship. "
+                "You may respond, act, or stay silent. Do not repeat completed actions.\n" + event.report
+            )
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
         elif event.type == "time_tick":

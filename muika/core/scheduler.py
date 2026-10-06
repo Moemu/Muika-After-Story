@@ -1,10 +1,35 @@
 """将内存中的定时提醒投递到主事件队列。"""
 
 import asyncio
+import json
 import math
+from collections.abc import Awaitable, Callable
 from datetime import datetime
+from uuid import uuid4
+
+from pydantic import BaseModel
+from sqlalchemy import select
+
+from muika.database.db import get_session
+from muika.database.orm_models import ExperienceORM, SyncStateORM
 
 from .events import ScheduledTriggerEvent, ScheduledTriggerPayload
+
+
+class Reminder(BaseModel):
+    """保存提醒时间和已触发状态，不保存进程任务。"""
+
+    id: str
+    what: str
+    when: float
+    repeat: float | None = None
+    pending: bool = True
+    last_fired_at: float | None = None
+
+    def trigger(self, when: float) -> ScheduledTriggerPayload:
+        """为每次触发生成稳定来源，重复提醒的不同触发使用不同来源。"""
+        source = "ipc:" + json.dumps(["#reminders", f"{self.id}:{when}"], separators=(",", ":"))
+        return ScheduledTriggerPayload(datetime.fromtimestamp(when).isoformat(), self.what, source)
 
 
 class Scheduler:
@@ -14,6 +39,72 @@ class Scheduler:
         self.event_queue = event_queue
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
+        self.persistent = False
+        self.active = True
+        self.relay_trigger: Callable[[ScheduledTriggerPayload], Awaitable[bool]] | None = None
+
+    async def activate(self, active: bool) -> None:
+        """暂停备用设备的提醒，接管时从本地历史恢复待触发提醒。"""
+        self.active = active
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.persistent and active:
+            async with get_session(record_activity=False) as db:
+                reminders = [
+                    Reminder.model_validate_json(row.payload)
+                    for row in await db.scalars(select(SyncStateORM).where(SyncStateORM.key.like("reminder:%")))
+                ]
+                unobserved = []
+                for reminder in reminders:
+                    if reminder.last_fired_at is not None:
+                        payload = reminder.trigger(reminder.last_fired_at)
+                        if not await db.scalar(select(ExperienceORM.id).where(ExperienceORM.source == payload.source)):
+                            unobserved.append(payload)
+            for payload in unobserved:
+                await self._emit(payload)
+            for reminder in reminders:
+                if reminder.pending:
+                    self._arm(reminder)
+
+    def _arm(self, reminder: Reminder) -> None:
+        task = asyncio.create_task(self._run_reminder(reminder.id))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _emit(self, payload: ScheduledTriggerPayload) -> None:
+        if self.relay_trigger is None or not await self.relay_trigger(payload):
+            await self.event_queue.put(ScheduledTriggerEvent(payload=payload))
+
+    async def _run_reminder(self, identifier: str) -> None:
+        """保存实际触发，再交给当前设备处理；交接后可恢复尚未观察的触发。"""
+        while self.active:
+            async with get_session(record_activity=False) as db:
+                saved = await db.get(SyncStateORM, "reminder:" + identifier)
+                if saved is None:
+                    return
+                reminder = Reminder.model_validate_json(saved.payload)
+            if not reminder.pending:
+                return
+            await asyncio.sleep(max(0.0, reminder.when - datetime.now().timestamp()))
+            async with get_session() as db:
+                saved = await db.get(SyncStateORM, "reminder:" + identifier)
+                if saved is None:
+                    return
+                current = Reminder.model_validate_json(saved.payload)
+                if not current.pending:
+                    return
+                if current.when != reminder.when:
+                    continue
+                payload = current.trigger(current.when)
+                current.last_fired_at = current.when
+                current.pending = current.repeat is not None
+                if current.repeat is not None:
+                    intervals = max(1, math.floor((datetime.now().timestamp() - current.when) / current.repeat) + 1)
+                    current.when += current.repeat * intervals
+                saved.payload = current.model_dump_json()
+            await self._emit(payload)
 
     async def schedule(
         self,
@@ -52,6 +143,18 @@ class Scheduler:
             delay = trigger_in_seconds
             when = f"in {delay:g} seconds"
 
+        if self.persistent:
+            reminder = Reminder(
+                id=uuid4().hex,
+                what=event.strip(),
+                when=datetime.now().timestamp() + delay,
+                repeat=repeat_interval_seconds,
+            )
+            async with get_session() as db:
+                db.add(SyncStateORM(key="reminder:" + reminder.id, payload=reminder.model_dump_json()))
+            if self.active:
+                self._arm(reminder)
+            return
         payload = ScheduledTriggerPayload(when=when, what=event.strip())
         task = asyncio.create_task(self._wait_and_trigger(delay, payload, repeat_interval_seconds))
         self._tasks.add(task)

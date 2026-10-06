@@ -161,3 +161,4 @@ tests/test_benchmark_dashboard.py
 launcher/
 
 tests/e2e/artifacts/
+.env.multi-device.local

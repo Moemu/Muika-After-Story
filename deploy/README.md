@@ -2,6 +2,9 @@
 
 通过 NapCatQQ + OneBot v11 协议将 Muika 接入 QQ。
 
+电脑关机后仍需继续聊天时，请先阅读[多设备部署指南](https://mas.snowy.moe/guide/multi-device)。
+本页保留 QQ 接入的安装步骤；多设备配置使用指南中的聊天入口地址。
+
 ## 架构
 
 ```

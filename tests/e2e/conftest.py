@@ -1,10 +1,15 @@
 """E2E 场景共享夹具：运行轨迹记录器与 CoreApp 工厂。"""
 
+import asyncio
+import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
 from harness import CoreApp, TraceRecorder
+
+from tests.e2e.harness.process import MemoryProcess
 
 ARTIFACTS_ROOT = Path(__file__).parent / "artifacts"
 
@@ -32,3 +37,32 @@ async def core_app_factory(monkeypatch, recorder):
 
     for app in apps:
         await app.stop()
+
+
+@pytest.fixture
+async def memory_process(tmp_path, recorder):
+    processes = []
+
+    async def start(name):
+        environment = dict(os.environ, LOGURU_LEVEL="ERROR")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-u",
+            "-m",
+            "tests.e2e.harness.sync_process",
+            str(tmp_path / name),
+            name,
+            cwd=Path(__file__).resolve().parents[2],
+            env=environment,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        actor = MemoryProcess(process, recorder, name)
+        processes.append(actor)
+        return actor
+
+    yield start
+    for actor in processes:
+        if actor.process.returncode is None:
+            await actor.close()

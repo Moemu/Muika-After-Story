@@ -59,6 +59,7 @@ class CoreWsServer:
         self._secret = secret
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
+        self._routes: list[web.RouteDef] = []
 
         # 适配器连接注册表: client_name → AdapterConnection
         self._connections: Dict[str, AdapterConnection] = {}
@@ -86,6 +87,10 @@ class CoreWsServer:
         self._handlers[message_type] = handler
         logger.debug(f"[CoreWsServer] Registered handler for type={message_type!r}")
 
+    def add_routes(self, routes: list[web.RouteDef]) -> None:
+        """启动前注册附件或节点连接端点。"""
+        self._routes.extend(routes)
+
     def on_adapter_connected(self, callback: ADAPTER_CALLBACK_FUNC) -> None:
         """注册适配器连接回调。"""
         self._on_adapter_connected = callback
@@ -101,6 +106,7 @@ class CoreWsServer:
 
         # 健康检查端点
         self._app.router.add_get("/health", self._handle_health)
+        self._app.add_routes(self._routes)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()

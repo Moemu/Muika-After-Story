@@ -34,6 +34,7 @@ def _get_last_connection_time() -> Optional[datetime]:
 @dataclass
 class UserMessagePayload:
     message: Message
+    source: str | None = None
 
 
 @dataclass
@@ -52,6 +53,7 @@ class RSSUpdate:
 class ScheduledTriggerPayload:
     when: str
     what: str
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,15 @@ class AgentHandoffEvent:
     type: Literal["agent_handoff"] = "agent_handoff"
 
 
+@dataclass(frozen=True)
+class CoreChangeEvent:
+    """报告设备活动位置或可用设备变化，供她自行决定是否行动。"""
+
+    report: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["core_change"] = "core_change"
+
+
 Event: TypeAlias = (
     UserMessageEvent
     | TimeTickEvent
@@ -167,4 +178,5 @@ Event: TypeAlias = (
     | TimeoutEvent
     | AgentTaskEvent
     | AgentHandoffEvent
+    | CoreChangeEvent
 )

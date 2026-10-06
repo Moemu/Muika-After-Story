@@ -64,6 +64,9 @@ async def _render_resources(resources: list[dict]) -> None:
     for i, res in enumerate(resources):
         res_type = res.get("type", "")
         path = res.get("path", "")
+        if res.get("url") and "/attachments/" in res["url"]:
+            resource = await _ipc_client.attachment_transfer().download(Resource(**res))
+            path = resource.path
         if not path:
             continue
         if res_type == "image":
@@ -160,7 +163,7 @@ def _init_ipc_client() -> IpcClient:
 
     @_ipc_client.on_message("error")
     async def _handle_error(data: dict) -> None:
-        logger.error(f"[IPC] Core error: {data.get('message', 'Unknown')}")
+        logger.error(f"[IPC] Core error: {data.get('message', 'Unknown')}; {data.get('detail') or ''}")
 
     return _ipc_client
 

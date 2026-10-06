@@ -1,0 +1,35 @@
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/multi-device.Dockerfile
+    image: mas-multi-device-local
+    command: ["python", "-m", "muika.ipc.gateway", "--host", "0.0.0.0"]
+    env_file: ../.env.multi-device.local
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - gateway-data:/app/data
+    restart: unless-stopped
+
+  core:
+    image: mas-multi-device-local
+    command: ["python", "-m", "muika.ipc.bootstrap"]
+    env_file: ../.env.multi-device.local
+    environment:
+      GATEWAY_URL: ws://gateway:8765/cores
+      CORE_NODE_NAME: server
+      CORE_PRIORITY: 0
+      LOCAL_FALLBACK: "false"
+    volumes:
+      - core-data:/app/data
+      - ../configs:/app/configs:ro
+      - ../templates:/app/templates:ro
+      - ../plugins:/app/plugins:ro
+    restart: unless-stopped
+    depends_on:
+      - gateway
+
+volumes:
+  gateway-data:
+  core-data:
