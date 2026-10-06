@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from aiohttp import WSMsgType, web
 from pydantic import TypeAdapter
 
 from muika.config import mas_config
+from muika.core.events import ScheduledTriggerPayload
 from muika.models import AdapterInfo
 from muika.utils.logger import logger
 
@@ -49,6 +51,7 @@ class Gateway:
         self.epoch = 0
         self._lock = asyncio.Lock()
         self._clock: asyncio.Task[None] | None = None
+        self._closing_sockets: set[asyncio.Task[bool]] = set()
         self.db: aiosqlite.Connection
 
     async def start(self) -> None:
@@ -66,7 +69,7 @@ class Gateway:
         async with self.db.execute("SELECT value FROM settings WHERE key='epoch'") as cursor:
             saved = await cursor.fetchone()
         self.epoch = int(saved[0]) + 1 if saved else 1
-        await self._save_epoch()
+        await self._save_epoch(self.epoch)
         await self.bots.start()
         self._clock = asyncio.create_task(self._watch())
         logger.success("[Gateway] Chat and Core connections are ready.")
@@ -79,11 +82,25 @@ class Gateway:
         for node in list(self.nodes.values()):
             await node.ws.close()
         await self.bots.stop()
+        await asyncio.gather(*self._closing_sockets, return_exceptions=True)
         await self.db.close()
 
-    async def _save_epoch(self) -> None:
-        await self.db.execute("INSERT OR REPLACE INTO settings VALUES ('epoch', ?)", (self.epoch,))
+    async def _save_epoch(self, epoch: int) -> None:
+        await self.db.execute("INSERT OR REPLACE INTO settings VALUES ('epoch', ?)", (epoch,))
         await self.db.commit()
+
+    async def _send(self, node: CoreConnection, packet: dict) -> bool:
+        """隔离单个连接的发送失败，持久输入留待接管重放。"""
+        try:
+            await node.ws.send_json(packet)
+            return True
+        except (OSError, RuntimeError) as exc:
+            logger.warning(f"[Gateway] Could not send {packet['kind']} to {node.name}: {exc}")
+            node.ready = False
+            closing = asyncio.create_task(node.ws.close())
+            self._closing_sockets.add(closing)
+            closing.add_done_callback(self._closing_sockets.discard)
+            return False
 
     async def _history(self, ws: web.WebSocketResponse, after: int) -> None:
         async with self.db.execute(
@@ -124,46 +141,59 @@ class Gateway:
             )
         )
         if chosen != self.active:
-            self.active, self.epoch = chosen, self.epoch + 1
-            await self._save_epoch()
+            epoch = self.epoch + 1
+            await self._save_epoch(epoch)
+            self.active, self.epoch = chosen, epoch
             logger.info(f"[Gateway] Active Core: {self.active}; epoch: {self.epoch}.")
-        for node in self.nodes.values():
+        for node in list(self.nodes.values()):
             if not node.ws.closed:
-                await node.ws.send_json(
-                    {"kind": "role", "active": self.active, "epoch": self.epoch, "nodes": sorted(names)}
+                await self._send(
+                    node, {"kind": "role", "active": self.active, "epoch": self.epoch, "nodes": sorted(names)}
                 )
         if self.active is not None:
             async with self.db.execute("SELECT adapter,payload FROM incoming WHERE pending=1 ORDER BY rowid") as cursor:
                 for adapter, payload in await cursor.fetchall():
-                    await self.nodes[self.active].ws.send_json(
-                        {"kind": "input", "adapter": adapter, "message": json.loads(payload), "epoch": self.epoch}
-                    )
+                    if not await self._send(
+                        self.nodes[self.active],
+                        {"kind": "input", "adapter": adapter, "message": json.loads(payload), "epoch": self.epoch},
+                    ):
+                        break
 
     async def _watch(self) -> None:
         while True:
             await asyncio.sleep(1)
-            async with self._lock:
-                if self.active and time.monotonic() - self.nodes[self.active].last_seen >= CORE_TIMEOUT:
-                    await self._elect()
+            try:
+                async with self._lock:
+                    active = self.nodes.get(self.active) if self.active else None
+                    if (active and (not active.ready or time.monotonic() - active.last_seen >= CORE_TIMEOUT)) or (
+                        active is None
+                        and any(
+                            node.ready and not node.ws.closed and time.monotonic() - node.last_seen < CORE_TIMEOUT
+                            for node in self.nodes.values()
+                        )
+                    ):
+                        await self._elect()
+            except Exception:
+                logger.exception("[Gateway] Lease check failed; retrying on the next tick.")
 
     async def _input(self, message: dict, adapter: AdapterInfo) -> None:
         event: BotToCoreEvent = TypeAdapter(BotToCoreMessage).validate_python(message)
         async with self._lock:
-            result = await self.db.execute(
-                "INSERT OR IGNORE INTO incoming(adapter,id,payload) VALUES(?,?,?)",
-                (adapter.client_name, event.id, event.model_dump_json()),
+            await self._enqueue(adapter.client_name, event.id, event.model_dump(mode="json"))
+
+    async def _enqueue(self, adapter: str, identifier: str, message: dict) -> None:
+        """保存一次输入，重复来源不重新触发；调用者持有入口锁。"""
+        result = await self.db.execute(
+            "INSERT OR IGNORE INTO incoming(adapter,id,payload) VALUES(?,?,?)",
+            (adapter, identifier, json.dumps(message)),
+        )
+        await self.db.commit()
+        if self.active is not None and result.rowcount:
+            if adapter != "#reminders":
+                self.bots.set_triggering_adapter(adapter)
+            await self._send(
+                self.nodes[self.active], {"kind": "input", "adapter": adapter, "message": message, "epoch": self.epoch}
             )
-            await self.db.commit()
-            if self.active is not None and result.rowcount:
-                self.bots.set_triggering_adapter(adapter.client_name)
-                await self.nodes[self.active].ws.send_json(
-                    {
-                        "kind": "input",
-                        "adapter": adapter.client_name,
-                        "message": event.model_dump(mode="json"),
-                        "epoch": self.epoch,
-                    }
-                )
 
     async def _packet(self, node: CoreConnection, message: dict) -> None:
         kind = message["kind"]
@@ -193,20 +223,34 @@ class Gateway:
                 for experience in activity.experiences:
                     if experience.source and experience.source.startswith("ipc:"):
                         adapter, identifier = json.loads(experience.source[4:])
+                        if adapter == "#reminders":
+                            await self.db.execute(
+                                "INSERT OR IGNORE INTO incoming(adapter,id,payload,pending) VALUES(?,?,'{}',0)",
+                                (adapter, identifier),
+                            )
                         await self.db.execute(
                             "UPDATE incoming SET pending=0 WHERE adapter=? AND id=?", (adapter, identifier)
                         )
             await self.db.commit()
-            for connection in self.nodes.values():
+            for connection in list(self.nodes.values()):
                 if (connection.ready or connection is node) and not connection.ws.closed:
-                    await connection.ws.send_json(
+                    await self._send(
+                        connection,
                         {
                             "kind": "history",
                             "entries": [entry.model_dump(mode="json") for entry in entries],
                             "complete": True,
                             "through": max((entry.gateway_sequence or 0 for entry in entries), default=0),
-                        }
+                        },
                     )
+        elif kind == "reminder":
+            payload = TypeAdapter(ScheduledTriggerPayload).validate_python(message["payload"])
+            if not payload.source or not payload.source.startswith("ipc:"):
+                raise ValueError("A reminder needs a stable occurrence source")
+            adapter, identifier = json.loads(payload.source[4:])
+            if adapter != "#reminders" or not isinstance(identifier, str) or not identifier:
+                raise ValueError("Invalid reminder source")
+            await self._enqueue(adapter, identifier, {"type": "scheduled_trigger", "payload": message["payload"]})
         elif kind in {"output", "handoff"}:
             if node.name != self.active or message["epoch"] != self.epoch:
                 raise ValueError("Inactive Core")
@@ -256,11 +300,22 @@ class Gateway:
 
 async def run(directory: Path, host: str, port: int) -> None:
     gateway = Gateway(directory, host, port, mas_config.ipc_secret)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    signals: list[signal.Signals] = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+            signals.append(sig)
+        except NotImplementedError:
+            pass
     await gateway.start()
     try:
-        await asyncio.Event().wait()
+        await stop.wait()
     finally:
         await gateway.stop()
+        for sig in signals:
+            loop.remove_signal_handler(sig)
 
 
 def main() -> None:

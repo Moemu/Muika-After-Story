@@ -232,6 +232,15 @@ class Muika:
                 return
             self._god_mode = True
             self._god_mode_pending = False
+        if event.type == "scheduled_trigger" and event.payload.source:
+            if await self.memory.contains_source(event.payload.source):
+                return
+            await self.memory.add_material(
+                "agent",
+                f"Scheduled reminder: {event.payload.what}",
+                source=event.payload.source,
+                timestamp=event.timestamp,
+            )
         think_mode = self.get_think_mode(event)
 
         if think_mode is None:

@@ -1,13 +1,16 @@
 """真实 Gateway 进程与独立 WebSocket：活动权、持久历史和 Bot 边界。"""
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
 import sqlite3
 import sys
+import threading
 import time
-from datetime import datetime
+from dataclasses import asdict
+from datetime import date, datetime
 from pathlib import Path
 
 import aiohttp
@@ -16,6 +19,23 @@ import pytest
 from tests.e2e.harness.process import MemoryProcess
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture
+async def live_gateway(tmp_path, recorder):
+    from muika.ipc.gateway import Gateway
+
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    gateway = Gateway(tmp_path / "gateway", "127.0.0.1", port, "test-ipc-secret")
+    await gateway.start()
+    async with aiohttp.ClientSession(headers={"X-Auth-Token": "test-ipc-secret"}) as session:
+        try:
+            yield gateway, session, f"http://127.0.0.1:{port}", recorder
+        finally:
+            await gateway.stop()
+            recorder.record("gateway_stopped", clock_cancelled=gateway._clock.cancelled())
 
 
 @pytest.fixture
@@ -598,3 +618,431 @@ async def test_bot_handoff_to_lower_priority_core_keeps_the_requested_device(gat
     assert (await pc.command(action="status"))["active"] is False
     assert (await server.command(action="status"))["active"] is True
     recorder.record("handoff_kept", target="server")
+
+
+async def test_watch_survives_a_role_send_race_and_another_expired_core(live_gateway, monkeypatch):
+    from aiohttp import web
+
+    import muika.ipc.gateway as gateway_module
+
+    gateway, session, base, recorder = live_gateway
+    monkeypatch.setattr(gateway_module, "CORE_TIMEOUT", 0.2)
+    pc = await connect_core(session, base, "pc")
+    await ready(pc, recorder)
+    server = await connect_core(session, base, "server")
+    await ready(server, recorder)
+    spare = await connect_core(session, base, "spare")
+    await ready(spare, recorder)
+    failed_ws = gateway.nodes["pc"].ws
+    send = web.WebSocketResponse.send_json
+
+    async def racing_send(ws, data, **kwargs):
+        if ws is failed_ws and data["kind"] == "role":
+            raise ConnectionResetError("socket closed after the closed check")
+        await send(ws, data, **kwargs)
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_json", racing_send)
+    gateway.nodes["server"].last_seen = time.monotonic() + 100
+    gateway.nodes["spare"].last_seen = time.monotonic() + 100
+    gateway.nodes["pc"].last_seen = 0
+    await asyncio.sleep(1.2)
+    assert not gateway._clock.done()
+    first = gateway.active
+    assert first in {"server", "spare"}
+    gateway.nodes[first].last_seen = 0
+    await asyncio.sleep(1.2)
+    assert not gateway._clock.done()
+    assert gateway.active in {"server", "spare"} - {first}
+    recorder.record("lease_watch_survived", first=first, second=gateway.active)
+
+
+async def test_watch_retries_after_a_transient_election_failure(live_gateway, monkeypatch):
+    gateway, session, base, recorder = live_gateway
+    pc = await connect_core(session, base, "pc")
+    await ready(pc, recorder)
+    elect = gateway._elect
+    attempts = 0
+
+    async def flaky_elect(preferred=None):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary state write failure")
+        await elect(preferred)
+
+    monkeypatch.setattr(gateway, "_elect", flaky_elect)
+    gateway.nodes["pc"].last_seen = 0
+    await asyncio.sleep(2.2)
+    assert gateway.active is None
+    assert attempts >= 2 and not gateway._clock.done()
+    recorder.record("watch_retry", attempts=attempts)
+
+
+@pytest.mark.parametrize("failure", ["disconnect", "join"])
+async def test_standby_broadcast_race_does_not_disconnect_the_publisher(live_gateway, monkeypatch, failure):
+    from aiohttp import web
+
+    from muika.ipc.sync_models import Activity
+
+    gateway, session, base, recorder = live_gateway
+    pc = await connect_core(session, base, "pc")
+    await ready(pc, recorder)
+    server = await connect_core(session, base, "server")
+    await ready(server, recorder)
+    failed_ws = gateway.nodes["server"].ws
+    send = web.WebSocketResponse.send_json
+
+    async def racing_send(ws, data, **kwargs):
+        if ws is failed_ws and data["kind"] == "history":
+            if failure == "disconnect":
+                raise ConnectionResetError("standby disconnected during broadcast")
+            await connect_core(session, base, "joining")
+            await asyncio.sleep(0)
+        await send(ws, data, **kwargs)
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_json", racing_send)
+    activity = Activity(origin="pc")
+    await pc.send_json({"kind": "publish", "activities": [activity.model_dump(mode="json")]})
+    echoed = await packet(pc, "history", recorder)
+    assert echoed["entries"][0]["activity"]["id"] == activity.id
+    await pc.send_json({"kind": "ready"})
+    assert (await packet(pc, "role", recorder))["active"] == "pc"
+
+
+async def test_failed_input_send_remains_pending_for_the_next_core(live_gateway, monkeypatch):
+    from aiohttp import web
+
+    gateway, session, base, recorder = live_gateway
+    pc = await connect_core(session, base, "pc")
+    await ready(pc, recorder)
+    server = await connect_core(session, base, "server")
+    await ready(server, recorder)
+    failed_ws = gateway.nodes["pc"].ws
+    send = web.WebSocketResponse.send_json
+
+    async def racing_send(ws, data, **kwargs):
+        if ws is failed_ws and data["kind"] == "input":
+            raise ConnectionResetError("active Core lost while forwarding input")
+        await send(ws, data, **kwargs)
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_json", racing_send)
+    bot = await session.ws_connect(base + "/ws", headers={"X-Client-Name": "test"})
+    await bot.send_json({"type": "user_message", "id": "pending", "message": "稍后接着聊。"})
+    forwarded = await packet(server, "input", recorder)
+    assert forwarded["message"]["id"] == "pending"
+    assert not gateway._clock.done()
+
+
+async def test_failed_attachment_replace_removes_its_temporary_file(live_gateway, monkeypatch):
+    gateway, session, base, recorder = live_gateway
+    replace = Path.replace
+
+    def fail_replace(path, target):
+        if path.suffix == ".upload":
+            raise OSError("disk replace failed")
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    content = b"temporary upload"
+    key = hashlib.sha256(content).hexdigest()
+    async with session.put(base + "/attachments/" + key, data=content) as response:
+        assert response.status == 500
+    remaining = list((gateway.directory / "attachments").glob("*.upload"))
+    recorder.record("failed_attachment", remaining=[str(path) for path in remaining])
+    assert not remaining
+
+
+async def test_cancelled_http_upload_finishes_without_a_temporary_file(tmp_path, recorder, monkeypatch):
+    from aiohttp import web
+
+    from muika.ipc.attachments import attachment_routes
+
+    directory = tmp_path / "attachments"
+    started, release = threading.Event(), threading.Event()
+    write = Path.write_bytes
+
+    def held_write(path, content):
+        result = write(path, content)
+        if path.suffix == ".upload":
+            started.set()
+            release.wait(5)
+        return result
+
+    monkeypatch.setattr(Path, "write_bytes", held_write)
+    app = web.Application()
+    app.add_routes(attachment_routes(directory, "test-ipc-secret"))
+    runner = web.AppRunner(app, handler_cancellation=True)
+    await runner.setup()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    content = b"complete content before the caller disconnected"
+    key = hashlib.sha256(content).hexdigest()
+    try:
+        async with aiohttp.ClientSession(headers={"X-Auth-Token": "test-ipc-secret"}) as session:
+
+            async def upload():
+                async with session.put(f"http://127.0.0.1:{port}/attachments/{key}", data=content) as response:
+                    return response.status
+
+            request = asyncio.create_task(upload())
+            assert await asyncio.to_thread(started.wait, 5)
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+            await asyncio.sleep(0.1)
+            release.set()
+            for _ in range(100):
+                if (directory / key).is_file():
+                    break
+                await asyncio.sleep(0.01)
+            assert (directory / key).read_bytes() == content
+            assert not list(directory.glob("*.upload"))
+            recorder.record("cancelled_upload_cleaned", hash=key, complete=True)
+    finally:
+        release.set()
+        await runner.cleanup()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no asyncio SIGTERM handler")
+async def test_gateway_sigterm_closes_cleanly_and_keeps_history(gateway_process):
+    from muika.ipc.sync_models import Activity
+
+    session, base, recorder, process, restart = gateway_process
+    pc = await connect_core(session, base, "pc")
+    await ready(pc, recorder)
+    activity = Activity(origin="pc")
+    await pc.send_json({"kind": "publish", "activities": [activity.model_dump(mode="json")]})
+    await packet(pc, "history", recorder)
+    process.terminate()
+    assert await asyncio.wait_for(process.wait(), 10) == 0
+    recorder.record("graceful_sigterm", exitcode=process.returncode)
+    await restart()
+    pc = await connect_core(session, base, "pc")
+    await pc.send_json({"kind": "history", "after": 0})
+    assert (await packet(pc, "history", recorder))["entries"][0]["activity"]["id"] == activity.id
+
+
+async def test_invalid_history_backs_off_without_repeated_stack_traces(live_gateway, node_process, monkeypatch):
+    from muika.core.memory_models import Diary
+    from muika.ipc.sync_models import Activity
+
+    gateway, session, base, recorder = live_gateway
+    seed = await connect_core(session, base, "seed")
+    await ready(seed, recorder)
+    activity = Activity(
+        origin="seed",
+        diaries=[
+            Diary(
+                id=1,
+                day=date.today(),
+                content="invalid reference",
+                source="dream:test",
+                source_refs=["experience:999"],
+                created_at=datetime.now(),
+            )
+        ],
+    )
+    await seed.send_json({"kind": "publish", "activities": [activity.model_dump(mode="json")]})
+    await packet(seed, "history", recorder)
+    await seed.close()
+    attempts = []
+    history = gateway._history
+
+    async def counted_history(ws, after):
+        attempts.append(time.monotonic())
+        await history(ws, after)
+
+    monkeypatch.setattr(gateway, "_history", counted_history)
+    pc, _ = await node_process("pc", base, fallback=True)
+    await asyncio.sleep(7)
+    status = await pc.command(action="status")
+    assert not status["active"]
+    assert status["sync_error"]
+    assert 2 <= len(attempts) <= 3
+    await gateway.db.execute("DELETE FROM activity WHERE id=?", (activity.id,))
+    await gateway.db.commit()
+    recovered = await wait_node(pc, active=True, connected=True)
+    assert recovered["sync_error"] is None
+    await pc.close()
+    stderr = next(entry["stderr"] for entry in reversed(recorder.entries) if entry["kind"] == "process_exit")
+    assert stderr.count("Traceback (most recent call last)") == 1
+    recorder.record("invalid_history_wait", status=status, recovered=recovered, attempts=attempts, traceback_count=1)
+
+
+async def test_standby_returns_an_error_code_and_readable_detail(gateway_process, node_process):
+    session, base, recorder = gateway_process[:3]
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    server, local = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    bot = await session.ws_connect(f"http://127.0.0.1:{local}/ws", headers={"X-Client-Name": "direct"})
+    await bot.send_json({"type": "command", "id": "list", "raw": ".nodes list"})
+    result = await asyncio.wait_for(bot.receive_json(), 5)
+    recorder.record("standby_rejected", message=result)
+    assert result["message"] == "inactive_core"
+    assert result["detail"] == "备用设备正在同步，请连接常驻入口。"
+
+
+async def test_same_reminder_occurrence_is_not_replayed_after_handoff(live_gateway):
+    from muika.core.events import ScheduledTriggerPayload
+    from muika.ipc.sync_models import Activity, RecordedExperience
+
+    gateway, session, base, recorder = live_gateway
+    pc = await connect_core(session, base, "pc")
+    role = await ready(pc, recorder)
+    source = 'ipc:["#reminders","same:123"]'
+    payload = asdict(ScheduledTriggerPayload("2026-01-01T00:00:00", "想起我们的约定", source))
+    await pc.send_json({"kind": "reminder", "epoch": role["epoch"], "payload": payload})
+    assert (await packet(pc, "input", recorder))["message"]["payload"] == payload
+    observed = Activity(
+        origin="pc",
+        experiences=[
+            RecordedExperience(
+                id=1, session_id="test", kind="agent", content="remembered", occurred_at=datetime.now(), source=source
+            )
+        ],
+    )
+    await pc.send_json({"kind": "publish", "activities": [observed.model_dump(mode="json")]})
+    await packet(pc, "history", recorder)
+    server = await connect_core(session, base, "server")
+    await ready(server, recorder)
+    await pc.send_json({"kind": "handoff", "epoch": role["epoch"], "target": "server"})
+    new_role = await packet(server, "role", recorder)
+    await server.send_json({"kind": "reminder", "epoch": new_role["epoch"], "payload": payload})
+    await server.send_json({"kind": "history", "after": 0})
+    while True:
+        result = await asyncio.wait_for(server.receive_json(), 5)
+        recorder.record("after_reminder_handoff", packet=result)
+        assert result["kind"] != "input"
+        assert result["kind"] != "error"
+        if result["kind"] == "history":
+            break
+    async with gateway.db.execute("SELECT count(*) FROM incoming WHERE adapter='#reminders'") as cursor:
+        assert (await cursor.fetchone())[0] == 1
+
+
+async def test_offline_observed_reminder_does_not_replay_when_the_gateway_returns(live_gateway):
+    from muika.core.events import ScheduledTriggerPayload
+    from muika.ipc.sync_models import Activity, RecordedExperience
+
+    gateway, session, base, recorder = live_gateway
+    pc = await connect_core(session, base, "pc")
+    role = await ready(pc, recorder)
+    source = 'ipc:["#reminders","offline:123"]'
+    observed = Activity(
+        origin="pc",
+        experiences=[
+            RecordedExperience(
+                id=1,
+                session_id="test",
+                kind="agent",
+                content="offline reminder",
+                occurred_at=datetime.now(),
+                source=source,
+            )
+        ],
+    )
+    await pc.send_json({"kind": "publish", "activities": [observed.model_dump(mode="json")]})
+    await packet(pc, "history", recorder)
+    await pc.send_json(
+        {
+            "kind": "reminder",
+            "epoch": role["epoch"],
+            "payload": asdict(ScheduledTriggerPayload("now", "offline reminder", source)),
+        }
+    )
+    await pc.send_json({"kind": "history", "after": 0})
+    while True:
+        result = await asyncio.wait_for(pc.receive_json(), 5)
+        recorder.record("offline_reminder_rejoin", packet=result)
+        assert result["kind"] != "input"
+        assert result["kind"] != "error"
+        if result["kind"] == "history":
+            break
+
+
+async def test_repeating_reminder_keeps_distinct_occurrences_across_handoff(gateway_process, node_process):
+    _, base, recorder = gateway_process[:3]
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    server, _ = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    await pc.command(action="remind", delay=0.1, repeat=1.5, text="看看窗外。")
+    await wait_node(pc, reminders=1)
+    await pc.command(action="handoff", target="server")
+    await wait_node(server, active=True, reminders=1)
+    await wait_node(server, reminders=2)
+    assert (await pc.command(action="status"))["reminders"] == 1
+    recorder.record("repeating_reminder_after_handoff", occurrences=3)
+
+
+async def test_reminder_saved_before_a_crash_is_observed_by_the_next_core(live_gateway, node_process):
+    gateway, _, base, recorder = live_gateway
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    server, _ = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    await pc.command(action="hold_reminder")
+    await pc.command(action="remind", delay=0.1, text="保存后仍要记得这件事。")
+    for _ in range(80):
+        async with gateway.db.execute("SELECT payload FROM activity") as cursor:
+            rows = await cursor.fetchall()
+        if any(
+            reminder.get("last_fired_at") is not None for row in rows for reminder in json.loads(row[0])["reminders"]
+        ):
+            break
+        await asyncio.sleep(0.1)
+    else:
+        raise AssertionError("The fired reminder was not saved at the Gateway")
+    pc.process.kill()
+    await pc.process.wait()
+    recorder.record("core_killed_before_reminder_forward", node="pc")
+    await wait_node(server, active=True, reminders=1)
+    await asyncio.sleep(0.5)
+    assert (await server.command(action="status"))["reminders"] == 1
+
+
+async def test_late_reminder_history_does_not_rearm_a_spent_occurrence(memory_process, tmp_path, recorder):
+    from muika.core.scheduler import Reminder
+    from muika.ipc.sync_models import Activity, SyncEntry
+
+    observer = await memory_process("observer")
+    spent = Reminder(id="once", what="已经想起来了", when=123, pending=False, last_fired_at=123)
+    stale = Reminder(id="once", what="已经想起来了", when=123)
+    entries = [
+        SyncEntry(gateway_sequence=index, activity=Activity(origin="pc", reminders=[reminder])).model_dump(mode="json")
+        for index, reminder in enumerate((spent, stale), 1)
+    ]
+    await observer.command(action="apply", entries=entries)
+    with sqlite3.connect(tmp_path / "observer" / "muika.db") as db:
+        payload = json.loads(db.execute("SELECT payload FROM sync_state WHERE key='reminder:once'").fetchone()[0])
+    recorder.record("spent_reminder_after_stale_history", payload=payload)
+    assert payload["pending"] is False
+    assert payload["last_fired_at"] == 123
+
+
+async def test_reminder_created_during_handoff_reaches_the_new_active_core(live_gateway, node_process, monkeypatch):
+    gateway, _, base, recorder = live_gateway
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    server, _ = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    receive = gateway._packet
+    switched = False
+
+    async def handoff_before_reminder(node, message):
+        nonlocal switched
+        if message["kind"] == "reminder" and node.name == "pc" and not switched:
+            switched = True
+            await gateway._elect("server")
+        await receive(node, message)
+
+    monkeypatch.setattr(gateway, "_packet", handoff_before_reminder)
+    await pc.command(action="remind", delay=0.1, text="换设备后还记得。")
+    await wait_node(server, active=True, reminders=1)
+    await asyncio.sleep(3)
+    status = await pc.command(action="status")
+    recorder.record("reminder_forwarded_after_handoff", pc=status, active=gateway.active)
+    assert switched and gateway.active == "server"
+    assert status["sync_error"] is None and status["active"] is False

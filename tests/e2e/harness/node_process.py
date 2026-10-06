@@ -52,8 +52,19 @@ async def main() -> None:
                     StateUpdate(mood=command["value"], reason="An offline observation.")
                 )
             tool_result = None
+            if command["action"] == "hold_reminder":
+                relay = core.muika.executor.scheduler.relay_trigger
+                assert relay is not None
+
+                async def hold(payload):
+                    await asyncio.sleep(30)
+                    return await relay(payload)
+
+                core.muika.executor.scheduler.relay_trigger = hold
             if command["action"] == "remind":
-                await core.muika.executor.scheduler.schedule(command["text"], trigger_in_seconds=command["delay"])
+                await core.muika.executor.scheduler.schedule(
+                    command["text"], trigger_in_seconds=command["delay"], repeat_interval_seconds=command.get("repeat")
+                )
             if command["action"] == "handoff":
                 with tool_context(core.muika.state, core.muika.executor):
                     tool_result = await dispatch_tool(
@@ -68,6 +79,7 @@ async def main() -> None:
                         "active": core.node.active,
                         "tool_result": tool_result.model_dump(mode="json") if tool_result else None,
                         "connected": core.node.connected,
+                        "sync_error": core.node.sync_error,
                         "ready": core.node.name in core.node.nodes,
                         "model_calls": len(app.scripted.calls),
                         "conversations": sum(call["name"] == "conversation" for call in app.scripted.calls),

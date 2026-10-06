@@ -15,6 +15,16 @@ from muika.models import Resource
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
+def _save_attachment(path: Path, content: bytes | bytearray) -> None:
+    """原子替换附件，并在写入失败或请求取消后清理临时文件。"""
+    temporary = path.with_suffix(f".{uuid4().hex}.upload")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def attachment_routes(directory: Path, secret: str) -> list[web.RouteDef]:
     """提供认证后的聊天附件上传和下载，文件名由内容哈希确定。"""
 
@@ -34,9 +44,7 @@ def attachment_routes(directory: Path, secret: str) -> list[web.RouteDef]:
             if hashlib.sha256(content).hexdigest() != key:
                 raise web.HTTPBadRequest(text="Attachment hash does not match")
             directory.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(f".{uuid4().hex}.upload")
-            await asyncio.to_thread(temporary.write_bytes, content)
-            temporary.replace(path)
+            await asyncio.to_thread(_save_attachment, path, content)
             return web.Response(status=201)
         if not path.is_file():
             raise web.HTTPNotFound()

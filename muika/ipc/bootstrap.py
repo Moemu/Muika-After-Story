@@ -23,6 +23,8 @@ from muika.core.events import (
     AdapterOfflineEvent,
     AdapterOnlineEvent,
     CoreChangeEvent,
+    ScheduledTriggerEvent,
+    ScheduledTriggerPayload,
     SessionBootstrapEvent,
     SessionEndEvent,
     TimeTickEvent,
@@ -161,6 +163,10 @@ class CoreBootstrap:
             self._muika.state.tick_state(TimeTickEvent(), seconds)
 
     async def _from_gateway(self, message: dict, adapter: str) -> None:
+        if adapter == "#reminders":
+            payload = TypeAdapter(ScheduledTriggerPayload).validate_python(message["payload"])
+            await self._muika.create_event(ScheduledTriggerEvent(payload))
+            return
         await self._handle_event(message, AdapterInfo(client_name=adapter))
 
     async def start(self) -> None:
@@ -203,6 +209,7 @@ class CoreBootstrap:
             self._executor.scheduler.persistent = True
             self._executor.scheduler.active = False
             self.node = CoreLink(self._muika.state, self._set_role, self._from_gateway, self._advance_standby)
+            self._executor.scheduler.relay_trigger = self.node.relay_reminder
             await self.node.start()
             self._muika.after_activity = self.node.store.capture_snapshot
             self._muika.state.nodes = self.node
@@ -313,7 +320,11 @@ class CoreBootstrap:
 
         logger.debug(f"[Core] Received event: {event.type} from {client_name!r}")
         if self.node is not None and not self.node.active:
-            return ErrorMessage(message="备用设备正在同步，请连接常驻入口。")
+            if self.node.sync_error:
+                return ErrorMessage(
+                    message="history_sync_failed", detail=f"历史同步失败，暂时不能接管：{self.node.sync_error}"
+                )
+            return ErrorMessage(message="inactive_core", detail="备用设备正在同步，请连接常驻入口。")
         source = "ipc:" + json.dumps([client_name, event.id], separators=(",", ":")) if self.node else None
         if source and await self._muika.memory.contains_source(source):
             return ActionResponse(action=event.type, status="observed")

@@ -3,12 +3,14 @@
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from functools import partial
 from uuid import uuid4
 
 import aiohttp
 
 from muika.config import mas_config
+from muika.core.events import ScheduledTriggerPayload
 from muika.core.state import MuikaState
 from muika.database.db import get_session, observe_commits
 from muika.database.orm_models import SyncStateORM
@@ -37,6 +39,7 @@ class CoreLink:
         self.active = self.connected = False
         self.epoch = 0
         self.nodes: list[str] = []
+        self.sync_error: str | None = None
         self.store: SyncStore
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._task: asyncio.Task[None] | None = None
@@ -107,6 +110,18 @@ class CoreLink:
         except (aiohttp.ClientError, OSError, TimeoutError) as exc:
             await self.memory.add_material("agent", f"Core handoff request failed: {exc}")
             raise
+
+    async def relay_reminder(self, payload: ScheduledTriggerPayload) -> bool:
+        """在线时交由入口的持久事件队列转发，离线活动设备保持本地提醒。"""
+        if not self.connected or self.ws is None:
+            return not self.active
+        if self.active:
+            try:
+                await self.ws.send_json({"kind": "reminder", "epoch": self.epoch, "payload": asdict(payload)})
+            except (aiohttp.ClientError, OSError) as exc:
+                logger.warning(f"[CoreLink] Could not forward reminder: {exc}")
+                await self.ws.close()
+        return True
 
     async def _publish(self) -> bool:
         async with self._publish_lock:
@@ -202,6 +217,7 @@ class CoreLink:
             asyncio.create_task(ws.close())
 
     async def _run(self) -> None:
+        retry_delay = 2.0
         while True:
             workers: list[asyncio.Task[None]] = []
             invalid = False
@@ -238,6 +254,8 @@ class CoreLink:
                         elif packet["kind"] == "role":
                             self.epoch, self.nodes = packet["epoch"], packet["nodes"]
                             if not self._joining:
+                                self.sync_error = None
+                                retry_delay = 2.0
                                 await self._set_role(
                                     packet["active"] == self.name,
                                     f"Active device: {packet['active']}; available: {self.nodes}",
@@ -245,30 +263,47 @@ class CoreLink:
                         elif packet["kind"] == "input" and self.active and packet["epoch"] == self.epoch:
                             await self.receive(packet["message"], packet["adapter"])
                         elif packet["kind"] == "error":
-                            logger.error(f"[CoreLink] {packet['detail']}")
                             if packet.get("operation") == "output":
+                                logger.error(f"[CoreLink] {packet['detail']}")
                                 continue
                             if packet.get("operation") == "handoff":
                                 await self._set_role(self.active, f"Core handoff failed: {packet['detail']}")
                                 continue
+                            if self.sync_error != packet["detail"]:
+                                logger.error(f"[CoreLink] {packet['detail']}")
+                            self.sync_error = packet["detail"]
                             invalid = True
                             break
             except (aiohttp.ClientError, OSError, TimeoutError) as exc:
                 logger.warning(f"[CoreLink] Gateway unavailable: {exc}")
             except Exception as exc:
                 invalid = True
-                logger.exception(f"[CoreLink] Could not synchronize local history: {exc}")
+                error = f"{type(exc).__name__}: {exc}"
+                if error != self.sync_error:
+                    logger.exception(f"[CoreLink] Could not synchronize local history: {error}")
+                else:
+                    logger.debug(f"[CoreLink] Local history still needs repair: {error}")
+                self.sync_error = error
             finally:
                 for worker in workers:
                     worker.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
                 self.connected, self.ws = False, None
                 await self._set_role(
-                    mas_config.local_fallback and not invalid and not self._closing,
+                    mas_config.local_fallback and not invalid and self.sync_error is None and not self._closing,
                     (
-                        "Gateway unavailable; local companionship continues"
-                        if mas_config.local_fallback
-                        else "Gateway unavailable; waiting for reconnection"
+                        f"History synchronization failed: {self.sync_error}"
+                        if self.sync_error
+                        else (
+                            "Gateway unavailable; local companionship continues"
+                            if mas_config.local_fallback
+                            else "Gateway unavailable; waiting for reconnection"
+                        )
                     ),
                 )
-            await asyncio.sleep(2)
+            if self.sync_error:
+                logger.debug(f"[CoreLink] Retrying synchronization in {retry_delay:g} seconds.")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(30.0, retry_delay * 2)
+            else:
+                await asyncio.sleep(2)

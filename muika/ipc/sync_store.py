@@ -401,6 +401,16 @@ class SyncStore:
                     AgentCallORM(id=call.id, task_id=call.task_id, status=call.status, payload=call.model_dump_json())
                 )
             for reminder in activity.reminders:
+                saved = await db.get(SyncStateORM, "reminder:" + reminder.id)
+                if saved is not None:
+                    previous_reminder = Reminder.model_validate_json(saved.payload)
+                    if previous_reminder.last_fired_at is not None:
+                        reminder.last_fired_at = max(
+                            previous_reminder.last_fired_at, reminder.last_fired_at or previous_reminder.last_fired_at
+                        )
+                    reminder.when = max(previous_reminder.when, reminder.when)
+                    if reminder.repeat is None:
+                        reminder.pending = previous_reminder.pending and reminder.pending
                 await db.merge(SyncStateORM(key="reminder:" + reminder.id, payload=reminder.model_dump_json()))
             db.add(
                 SyncEventORM(

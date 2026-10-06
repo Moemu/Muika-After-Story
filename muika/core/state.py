@@ -46,6 +46,7 @@ class NodeController(Protocol):
     nodes: list[str]
     active: bool
     connected: bool
+    sync_error: str | None
 
     async def handoff(self, target: str) -> None: ...
 

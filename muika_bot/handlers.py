@@ -163,7 +163,7 @@ def _init_ipc_client() -> IpcClient:
 
     @_ipc_client.on_message("error")
     async def _handle_error(data: dict) -> None:
-        logger.error(f"[IPC] Core error: {data.get('message', 'Unknown')}")
+        logger.error(f"[IPC] Core error: {data.get('message', 'Unknown')}; {data.get('detail') or ''}")
 
     return _ipc_client
 
