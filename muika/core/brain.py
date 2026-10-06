@@ -233,6 +233,7 @@ class MuikaBrain:
             format="string",
             history=[],
             resources=[],
+            purpose="topic_expand",
         )
 
         try:
@@ -379,6 +380,7 @@ class MuikaBrain:
             history=history,
             resources=resources or [],
             tools=tools,
+            purpose="brain_reply",
         )
 
         try:

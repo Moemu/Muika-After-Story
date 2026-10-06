@@ -147,7 +147,9 @@ class ContextCompactor:
             parts = []
             for chunk in split_text(current, capacity):
                 try:
-                    response = await model.ask(ModelRequest(prompt=chunk, system=system), stream=False)
+                    response = await model.ask(
+                        ModelRequest(prompt=chunk, system=system, purpose="compact"), stream=False
+                    )
                     content = response.require_content()
                 except Exception as exc:
                     warnings.warn(
@@ -246,8 +248,11 @@ async def prepare_request(
 ) -> tuple[ModelRequest, list[ModelMessage]]:
     """在所有共享模型执行路径检查预算，按需压缩历史。"""
     budget = input_budget(model.config)
+
     if not force and request_tokens(request, messages) < budget * 0.8:
         return request, list(messages)
+
+    # 尝试压缩上下文
     if model.compactor is not None and request.history:
         history = list(request.history)
         keep = min(4, len(history))

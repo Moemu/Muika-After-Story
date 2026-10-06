@@ -111,7 +111,7 @@ class IpcClient:
 
     async def _connect_once(self) -> None:
         """单次连接尝试。"""
-        logger.debug(f"[IpcClient] Connecting to Core at {self._url}...")
+        logger.debug(f"[IpcClient] Connecting to Core at {self.endpoint}...")
         headers = {
             "X-Client-Name": self.client_name,
         }
@@ -147,7 +147,14 @@ class IpcClient:
             self._connected = False
             self._connected_event.clear()
             self._ws = None
-            logger.warning("[IpcClient] Connection to Core lost")
+            logger.debug("[IpcClient] Connection to Core lost")
+
+    def _log_connect_failure(self, detail: str) -> None:
+        """连续失败时降频输出，避免 Core 未就绪期间刷屏。"""
+        if self._reconnect_count < 3 or self._reconnect_count % 10 == 0:
+            logger.warning(f"[IpcClient] {detail}")
+        else:
+            logger.debug(f"[IpcClient] {detail}")
 
     async def _dispatch(self, raw: str) -> None:
         """分发收到的消息给注册的处理器。"""
@@ -273,10 +280,12 @@ class IpcClient:
         while self._running:
             try:
                 await self._connect_once()
+            except asyncio.TimeoutError:
+                self._log_connect_failure(f"Connection timed out after {self._session.timeout.total}s")
             except aiohttp.ClientError as e:
-                logger.warning(f"[IpcClient] Connection failed: {e}")
+                self._log_connect_failure(f"Connection failed: {e}")
             except Exception as e:
-                logger.error(f"[IpcClient] Unexpected error: {e}")
+                logger.error(f"[IpcClient] Connection failed: {type(e).__name__}: {e}")
 
             if not self._running:
                 break

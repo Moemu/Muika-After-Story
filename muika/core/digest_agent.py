@@ -144,6 +144,7 @@ class DigestAgent:
             json_schema=TopicFitAssessment,
             history=[],
             resources=[],
+            purpose="digest_topic_fit",
         )
 
         try:

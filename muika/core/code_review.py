@@ -315,6 +315,7 @@ class CodeReviewer:
                     ),
                 ]
             ],
+            purpose="code_review",
         )
         messages = [ModelMessage(role="user", content=request.prompt)]
         for _ in range(24):

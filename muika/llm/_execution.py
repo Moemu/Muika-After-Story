@@ -39,8 +39,10 @@ async def _timed_model_step(
     first_chunk: float | None = None
     usage = Usage()
     status = "interrupted"
+    model_name = model.config.model_name or model.config.provider
+    error_reason = ""
     logger.debug(
-        f"[Model] start | request={request_id} model={model.config.model_name or model.config.provider} "
+        f"[Model] request submitted - {request.purpose} | request={request_id} model={model_name}"
         f"messages={len(messages)} estimated_input={request_tokens(request, messages)} stream={stream}"
     )
     try:
@@ -49,16 +51,21 @@ async def _timed_model_step(
                 first_chunk = perf_counter() - started
             usage = chunk.usage
             status = chunk.stop_reason if chunk.succeed else "error"
+            if not chunk.succeed and not error_reason:
+                error_reason = chunk.chunk
             yield chunk
-    except Exception:
+    except Exception as exc:
         status = "error"
+        error_reason = f"{type(exc).__name__}: {exc}"
         raise
     finally:
         first = f"{first_chunk:.3f}" if first_chunk is not None else "none"
+        detail = f" error={error_reason[:120]}" if status == "error" and error_reason else ""
+        secs = perf_counter() - started
         logger.debug(
-            f"[Model] end | request={request_id} seconds={perf_counter() - started:.3f} "
+            f"[Model] request completed - {request.purpose} | request={request_id} seconds={secs:.2f} "
             f"first_chunk_seconds={first} status={status} input_tokens={usage.input_tokens} "
-            f"output_tokens={usage.output_tokens} cached_tokens={usage.cached_tokens}"
+            f"output_tokens={usage.output_tokens} cached_tokens={usage.cached_tokens}{detail}"
         )
 
 

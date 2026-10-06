@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from random import random
 from typing import Coroutine, Literal, Optional, TypeVar
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -201,7 +202,9 @@ class Muika:
             dt = current_time - last_tick_time
             last_tick_time = current_time
             try:
-                await self._process_event(event, dt)
+                # 空闲期间仅 time_tick 到来时不写任何事件日志，保持日志尾部停留在 Collecting events 上
+                with logger.contextualize(turn=f" turn={uuid4().hex[:8]}"):
+                    await self._process_event(event, dt)
             except Exception as exc:
                 if isinstance(event, AgentTaskEvent):
                     self.agent_tasks.defer_event(event)
@@ -309,15 +312,15 @@ class Muika:
     @staticmethod
     def _log_event(event: Event) -> None:
         if event.type == "time_tick":
-            logger.debug("[Event] time_tick")
-        elif event.type == "user_message":
+            return
+        if event.type == "user_message":
             logger.info(f"[Event] user_message | content: {event.payload.message.message!r}")
         elif event.type == "scheduled_trigger":
             logger.info(f"[Event] scheduled_trigger | what: {event.payload.what!r}")
         elif event.type == "agent_task":
             logger.info(f"[Event] agent_task | task: {event.task_id[:8]} | status: {event.status}")
         else:
-            logger.info(f"[Event] {event.type}")
+            logger.info(f"[Event] other event: {event.type} | {event}")
 
     async def _tick_idle(self, event: Event, dt: float) -> None:
         """处理空闲 time_tick：状态衰减、session 空闲超时检测、后台阅读等。"""
@@ -480,7 +483,7 @@ class Muika:
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if parsed.do_nothing:
-            logger.debug("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
+            logger.info("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
             return
         if parsed.target:
             logger.debug(f"[Topic] Routing to target={parsed.target!r}")
@@ -538,6 +541,8 @@ class Muika:
         for update in parsed.state_updates:
             await self.memory.update_state(update)
         silent_turn = parsed.do_nothing
+        if silent_turn:
+            logger.info("[Turn] silent (do_nothing)")
         receipt: Optional[SendReceipt] = None
         if not silent_turn:
             if parsed.clean_reply:
@@ -545,6 +550,8 @@ class Muika:
                 receipt = await self.executor.send_message(
                     parsed.clean_reply, resources=resources, target=parsed.target
                 )
+            else:
+                logger.info("[Turn] empty reply (tags only)")
             await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
             if parsed.timeout is not None:
                 self._arm_timeout(parsed.timeout)

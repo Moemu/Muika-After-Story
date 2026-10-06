@@ -96,6 +96,7 @@ class MemoryReasoner:
                     + "\nJSON schema: "
                     + json.dumps(MemoryQuery.model_json_schema()),
                     format="json",
+                    purpose="memory_query",
                 )
             )
             query = MemoryQuery.model_validate_json(response.require_content())
@@ -126,6 +127,7 @@ class MemoryReasoner:
                         + "\nJSON schema: "
                         + json.dumps(RecallSelection.model_json_schema()),
                         format="json",
+                        purpose="memory_select",
                     )
                 )
                 chosen = set(RecallSelection.model_validate_json(response.require_content()).refs)
@@ -159,6 +161,7 @@ class MemoryReasoner:
             prompt="",
             system=DREAM_PROMPT + "\nJSON schema: " + json.dumps(DreamResult.model_json_schema()),
             format="json",
+            purpose="memory_dream",
         )
         capacity = int(input_budget(model.config) * 0.6) - request_tokens(request) - 128
         state = memory.persistent.describe()

@@ -14,6 +14,10 @@ class ToolError(str):
     """保留字符串接口，同时明确表示工具操作失败。"""
 
 
+_TOOL_PREVIEW_CHARS = 120
+"""工具结果摘要长度，完整正文留在 ToolResult 里进入上下文。"""
+
+
 async def dispatch_tool(call: ToolCall) -> ToolResult:
     """解析原始参数并返回结构化工具结果。"""
     try:
@@ -21,15 +25,22 @@ async def dispatch_tool(call: ToolCall) -> ToolResult:
         if not isinstance(arguments, dict):
             raise ValueError("Tool arguments must be a JSON object")
     except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(f"[Tool] {call.name} failed | invalid arguments: {exc}")
         return ToolResult(text=f"Invalid arguments for {call.name}: {exc}. Correct the JSON and retry.", is_error=True)
     started = perf_counter()
-    try:
-        result = await function_call_handler(call.name, arguments)
-    finally:
-        logger.debug(f"[Tool] end | name={call.name} call={call.id} seconds={perf_counter() - started:.3f}")
+    result = await function_call_handler(call.name, arguments)
     if isinstance(result, ToolResult):
-        return result
-    return ToolResult(text=result if isinstance(result, str) else str(result), is_error=isinstance(result, ToolError))
+        text, is_error = result.text, result.is_error
+    else:
+        text, is_error = str(result), isinstance(result, ToolError)
+    preview = text if len(text) <= _TOOL_PREVIEW_CHARS else f"{text[:_TOOL_PREVIEW_CHARS]}...({len(text)} chars)"
+    status = "failed" if is_error else "ok"
+    logger.log(
+        "WARNING" if is_error else "DEBUG",
+        f"[Tool] {call.name} {status} {perf_counter() - started:.3f}s | args={arguments} -> {preview!r}",
+    )
+    logger.info(f"[Tool] {call.name} {status}")
+    return result if isinstance(result, ToolResult) else ToolResult(text=text, is_error=is_error)
 
 
 async def function_call_handler(func: str, arguments: dict[str, Any] | None = None) -> Any:
@@ -39,19 +50,10 @@ async def function_call_handler(func: str, arguments: dict[str, Any] | None = No
     arguments = arguments if arguments and arguments != {"dummy_param": ""} else {}
 
     if func_caller := get_function_calls().get(func):
-        logger.debug(f"Function call 请求 {func}, 参数: {arguments}")
         try:
-            result = await func_caller.run(**arguments)
+            return await func_caller.run(**arguments)
         except Exception as exc:
-            logger.warning(f"Function call {func} failed: {type(exc).__name__}: {exc}")
             return ToolError(f"Tool error ({func}): {type(exc).__name__}: {exc}. Correct the arguments and retry.")
-        result_text = result if isinstance(result, str) else str(result)
-        log = f"{func} -> {result_text if len(result_text) < 50 else f'Length: {len(result_text)}'}"
-        if isinstance(result, ToolError) or isinstance(result, ToolResult) and result.is_error:
-            logger.warning(log)
-        else:
-            logger.debug(log)
-        return result
 
     global handle_mcp_tool
     try:
@@ -62,14 +64,6 @@ async def function_call_handler(func: str, arguments: dict[str, Any] | None = No
 
         mcp_result = await handle_mcp_tool(func, arguments)
     except Exception as exc:
-        logger.warning(f"MCP tool {func} failed: {type(exc).__name__}: {exc}")
         return ToolError(f"Tool error ({func}): {type(exc).__name__}: {exc}. Correct the arguments and retry.")
 
-    if mcp_result:
-        if isinstance(mcp_result, ToolError) or isinstance(mcp_result, ToolResult) and mcp_result.is_error:
-            logger.warning(f"MCP tool {func} failed: {mcp_result}")
-        else:
-            logger.debug(f"MCP tool {func} completed")
-        return mcp_result
-
-    return ToolError(f"Unknown function: {func}. Refresh the available tools before continuing.")
+    return mcp_result or ToolError(f"Unknown function: {func}. Refresh the available tools before continuing.")

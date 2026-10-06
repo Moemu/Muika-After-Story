@@ -94,6 +94,8 @@ class ModelRequest:
     system: Optional[str] = None
     format: Literal["string", "json"] = "string"
     json_schema: Optional[Union[Type[BaseModel], TypeAdapter]] = None
+    purpose: str = ""
+    """日志用途标注（如 brain_reply / code_review），仅供观测，不影响请求。"""
 
 
 @dataclass

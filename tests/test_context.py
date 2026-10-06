@@ -276,7 +276,7 @@ async def test_model_timing_reports_usage_without_prompt_or_reasoning(monkeypatc
         logger.remove(console_sink)
     assert not console
     assert any("[Context] prepared" in log and "input_after=" in log for log in logs)
-    assert any("[Model] start" in log for log in logs)
+    assert any("[Model] request submitted" in log for log in logs)
     assert any(
         "first_chunk_seconds=" in log and "input_tokens=123 output_tokens=45 cached_tokens=67" in log for log in logs
     )

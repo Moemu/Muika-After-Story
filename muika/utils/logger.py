@@ -44,7 +44,8 @@ def init_logger():
 
     log_file_path = f"{log_dir}/{time.strftime('%Y-%m-%d')}.log"
 
-    # 清除所有已有处理器
+    # 清除所有已有处理器；turn 供回合关联日志使用，无回合上下文时留空
+    logger.configure(extra={"turn": ""})
     logger.remove()
 
     # 添加控制台处理器
@@ -52,7 +53,7 @@ def init_logger():
         sys.stdout,
         level=console_handler_level,
         diagnose=True,
-        format="<lvl>[{level}] {message}</lvl>",
+        format="<lvl>[{level}] {name}: {message}</lvl>",
         filter=_mas_filter,
         colorize=True,
     )
@@ -61,7 +62,7 @@ def init_logger():
     logger.add(
         log_file_path,
         level="DEBUG",
-        format="[{time:YYYY-MM-DD HH:mm:ss}] [{level}] {function}: {message}",
+        format="[{time:YYYY-MM-DD HH:mm:ss}] [{level}] {function}{extra[turn]}: {message}",
         encoding="utf-8",
         rotation="1 day",
         retention="7 days",
