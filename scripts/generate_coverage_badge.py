@@ -34,7 +34,7 @@ def _color(line_rate: float) -> str:
 def _badge_svg(label: str, value: str, color: str) -> str:
     """构造 shields 风格徽标：左段 label（灰），右段 value（彩色）。"""
     label_w = PADDING + len(label) * LABEL_WIDTH_CHAR
-    value_w = PADDING + len(value) * VALUE_WIDTH_CHAR
+    value_w = 2 * PADDING + len(value) * VALUE_WIDTH_CHAR
     total_w = label_w + value_w
     label_cx = label_w // 2
     value_cx = label_w + value_w // 2
@@ -68,7 +68,7 @@ def _badge_svg(label: str, value: str, color: str) -> str:
 
 def main() -> int:
     coverage_xml = Path("coverage.xml")
-    output = Path("badges/coverage.svg")
+    output = Path("assets/coverage.svg")
     if not coverage_xml.exists():
         print(f"coverage.xml not found at {coverage_xml.resolve()}", file=sys.stderr)
         return 1

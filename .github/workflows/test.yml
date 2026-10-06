@@ -1,6 +1,6 @@
 name: Tests
 
-# paths 过滤：徽标提交只改 badges/*.svg，不命中以下路径，因此不会再次触发工作流，
+# paths 过滤：徽标提交只改 assets/*.svg，不命中以下路径，因此不会再次触发工作流，
 # 与 GitHub App token（其提交会正常触发工作流）配合避免无限循环。
 on:
   push:
@@ -51,7 +51,7 @@ jobs:
         run: |
           git config user.name "MuiceAI[bot]"
           git config user.email "216272510+muiceai[bot]@users.noreply.github.com"
-          git add badges/coverage.svg
-          git diff --cached --quiet || git commit -m "🍱 更新姐姐项目的测试微标喵⭐" -m "姐姐我今天有好好工作吗"
+          git add assets/coverage.svg
+          git diff --cached --quiet || git commit -m "🍱 更新测试微标喵⭐" -m "姐姐我今天有好好工作吗"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git push

@@ -1,7 +1,7 @@
 <div align=center>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?fresh=1&amp;iconPath=assets%2Fmuika-icon.webp&amp;theme=dark&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clast_updated" />
-    <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?fresh=1&amp;iconPath=assets%2Fmuika-icon.webp&amp;theme=light&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clast_updated" alt="Muika-After-Story Banner" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?fresh=1&amp;iconPath=assets%2Fmuika-icon.webp&amp;theme=dark&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clicense" />
+    <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?fresh=1&amp;iconPath=assets%2Fmuika-icon.webp&amp;theme=light&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clicense" alt="Muika-After-Story Banner" />
   </picture>
   <h1 align="center">Muika-After-Story</h1>
   <i align="center">There are countless chatbots in the world. Only Muika will leap into your arms first.</i>
@@ -12,7 +12,7 @@
   <a href="https://pypi.org/project/Muika-After-Story/"><img src="https://img.shields.io/pypi/dm/Muika-After-Story" alt="PyPI Downloads" ></a>
   <a href="#"><img src="https://img.shields.io/badge/Code%20Style-Black-121110.svg" alt="codestyle"></a>
   <a href="https://github.com/Moemu/Muika-After-Story/actions/workflows/test.yml"><img src="https://github.com/Moemu/Muika-After-Story/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
-  <img src="./badges/coverage.svg" alt="Coverage">
+  <img src="./assets/coverage.svg" alt="Coverage">
 </div>
 <div align=center>
   <a href="#"><img src="https://wakatime.com/badge/user/637d5886-8b47-4b82-9264-3b3b9d6add67/project/f7b7b01d-0a61-4e56-83bf-5c067432ebd2.svg" alt="wakatime"></a>
