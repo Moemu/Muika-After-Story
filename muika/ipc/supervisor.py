@@ -141,7 +141,9 @@ def supervise(argv: list[str]) -> int:
         directory = Path(temporary)
         env = dict(os.environ, MUIKA_LIFECYCLE_DIR=str(directory), MUIKA_SUPERVISOR_PID=str(os.getpid()))
         creationflags = 0
-        if sys.platform == "win32":
+        if sys.platform == "win32" and not any(
+            stream is not None and stream.isatty() for stream in (sys.stdout, sys.stderr)
+        ):
             creationflags = subprocess.CREATE_NO_WINDOW
         restart: RestartRecord | None = None
         restored = False
@@ -151,6 +153,8 @@ def supervise(argv: list[str]) -> int:
             child = subprocess.Popen(
                 [sys.executable, "-m", "muika.ipc.bootstrap", *argv],
                 env=env,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
                 creationflags=creationflags,
             )
             started = time.monotonic()
