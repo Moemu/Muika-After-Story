@@ -157,7 +157,7 @@ class CoreWsServer:
 
         try:
             await ws.send_str(message.model_dump_json())
-            return "written"
+            return SendReceipt.WRITTEN
         except Exception as e:
             logger.warning(f"[CoreWsServer] Failed to send message: {e}")
             return self._queue_or_drop(message)
@@ -188,10 +188,10 @@ class CoreWsServer:
     def _queue_or_drop(self, message: CoreToBotMessage) -> SendReceipt:
         if len(self._pending) >= _MAX_PENDING_MESSAGES:
             logger.warning(f"[CoreWsServer] Pending queue full ({_MAX_PENDING_MESSAGES}) — dropping message")
-            return "failed"
+            return SendReceipt.FAILED
         self._pending.append(message)
         logger.debug(f"[CoreWsServer] Queued message (pending={len(self._pending)})")
-        return "queued"
+        return SendReceipt.QUEUED
 
     async def flush_pending(self) -> int:
         """将暂存的消息全部发送给最近活跃的 Bot。"""

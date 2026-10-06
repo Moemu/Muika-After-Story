@@ -1,7 +1,8 @@
 """Message executor -- splits and sends text via a pluggable callback."""
 
 import asyncio
-from typing import Callable, Coroutine, Literal, Optional
+from enum import Enum
+from typing import Callable, Coroutine, Optional
 
 from muika.models import Resource
 
@@ -10,18 +11,24 @@ from .scheduler import Scheduler
 COMMON_PUNCTUATION = "。！？；…\n"
 DELAYED_SECOND_PER_PARAGRAPH = 1.5
 
-SendReceipt = Literal["written", "queued", "failed"]
-"""一次外发的传输回执：写入连接 / 进入暂存队列 / 发送失败。
 
-传输层没有平台侧已读回执，``written`` 只代表消息已交给在线连接；
-这是感知账本销账的最高确认线。
-"""
+class SendReceipt(str, Enum):
+    """一次外发的传输回执：写入连接 / 进入暂存队列 / 发送失败。
+
+    传输层没有平台侧已读回执，``WRITTEN`` 只代表消息已交给在线连接；
+    这是感知账本销账的最高确认线。继承 ``str`` 便于跨进程协议序列化。
+    """
+
+    WRITTEN = "written"
+    QUEUED = "queued"
+    FAILED = "failed"
+
 
 SendFunc = Callable[[str, Optional[list[Resource]], Optional[str]], Coroutine[None, None, Optional[SendReceipt]]]
 """Async callback that delivers a text message with optional multimodal resources to the platform.
 
 签名: ``(content, resources, target) -> SendReceipt | None``
-*target* 为可选的路由目标适配器名称；回执缺省（None）按 ``written`` 处理，
+*target* 为可选的路由目标适配器名称；回执缺省（None）按 ``WRITTEN`` 处理，
 兼容无法报告传输结果的回调实现。
 """
 
@@ -101,8 +108,8 @@ class Executor:
             res = resources if i == last_idx else None
             receipts.append(await self._send_func(msg, res, target))
             await asyncio.sleep(DELAYED_SECOND_PER_PARAGRAPH)
-        if any(receipt == "failed" for receipt in receipts):
-            return "failed"
-        if any(receipt == "queued" for receipt in receipts):
-            return "queued"
-        return "written"
+        if any(receipt is SendReceipt.FAILED for receipt in receipts):
+            return SendReceipt.FAILED
+        if any(receipt is SendReceipt.QUEUED for receipt in receipts):
+            return SendReceipt.QUEUED
+        return SendReceipt.WRITTEN

@@ -19,7 +19,7 @@ from muika.core.events import (
     UserMessageEvent,
     UserMessagePayload,
 )
-from muika.core.executor import Executor
+from muika.core.executor import Executor, SendReceipt
 from muika.core.loop import Muika
 from muika.database.db import close_db, init_db
 from muika.ipc.protocol import SendMessage
@@ -276,11 +276,11 @@ class CoreApp:
 
     def fail_next_sends(self, count: int) -> None:
         """让接下来 *count* 次外发返回 failed 回执，模拟传输失败。"""
-        self._stub_next_sends(count, "failed")
+        self._stub_next_sends(count, SendReceipt.FAILED)
 
     def queue_next_sends(self, count: int) -> None:
         """让接下来 *count* 次外发返回 queued 回执，模拟消息落入暂存队列。"""
-        self._stub_next_sends(count, "queued")
+        self._stub_next_sends(count, SendReceipt.QUEUED)
 
     def _stub_next_sends(self, count: int, receipt: str) -> None:
         assert self.muika is not None, "call start() first"

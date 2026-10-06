@@ -133,7 +133,8 @@ async def test_plugin_edit_noticed_once_and_not_after_restart(core_app_factory, 
     # 请求侧事实：系统行给出了插件事实，模板给出了语域段落
     call = next(item for item in app1.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
     assert 'plugin "e2e-selfchg" was modified' in call["prompt"]
-    assert "Noticing Your Own Change" in call["system"]
+    assert "curiosity, not bureaucracy" in call["prompt"]
+    assert "ticklish and intimate" in call["prompt"]  # edited 语域提示随事件注入
     assert read_self_change_state()["pending"] == []
     await app1.stop()
 
@@ -179,8 +180,8 @@ async def test_version_upgrade_register_and_facts(core_app_factory, fast_self_ch
     await app.wait_ledger_cleared()
     call = next(item for item in app.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
     assert "0.9.9" in call["prompt"] and "1.2.3" in call["prompt"]
-    # 升级语域提示被渲染进系统提示
-    assert "Your version was raised" in call["system"]
+    # 升级语域提示随事件注入 prompt
+    assert "Your version was raised: 0.9.9 -> 1.2.3" in call["prompt"]
 
 
 async def test_self_edit_advances_baseline_without_notice(core_app_factory, fast_self_change, tmp_plugin):

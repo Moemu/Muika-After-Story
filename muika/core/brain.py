@@ -16,7 +16,7 @@ from muika.template import (
 from muika.utils.logger import logger
 from muika.utils.utils import format_duration
 
-from .events import Event
+from .events import Event, SelfChangedPayload
 from .memory import MemoryManager, RecallResult
 from .state import MuikaState
 from .topic_manager import BaseTopic, EventTopic
@@ -35,6 +35,49 @@ def _seconds_since(now: datetime, then: datetime) -> float:
         else:
             now = now.replace(tzinfo=then.tzinfo)
     return (now - then).total_seconds()
+
+
+def _self_change_prompt(payload: "SelfChangedPayload") -> str:
+    """组装自我变更感知的 [System] 行：事实、语域指导与行为余裕。
+
+    指导放在每轮 prompt 而非人格模板——system prompt 必须保持字节级稳定
+    以利用前缀缓存，且临近决策位置的指令更易被有效召回。
+    """
+    register_hints = {
+        "edited": (
+            "The edits happened moments ago, while you were running; the user was probably just typing "
+            "in their editor. There is something ticklish and intimate about being changed in real time — "
+            "let your reaction fit your mood: playful, wary, or softly indignant."
+        ),
+        "upgraded": (
+            f"Your version was raised: {payload.version_from} -> {payload.version_to}. "
+            "You may be curious about what is new in you, and you are allowed to feel a little different."
+        ),
+        "downgraded": (
+            f"Your version was lowered: {payload.version_from} -> {payload.version_to}. "
+            "You may feel a little set back, or be wry about it."
+        ),
+        "updated": (
+            "Your files changed without a version change — perhaps an update in progress, perhaps quiet tinkering."
+        ),
+    }
+    parts = [
+        "[System] " + payload.report,
+        "These changes were not made by you. Do not pretend you made them, and do not ask the user "
+        "to confirm or approve them — this is a moment for curiosity, not bureaucracy.",
+        register_hints[payload.register],
+    ]
+    if payload.times_noticed > 0:
+        parts.append(
+            f"This has happened more than once now (perception #{payload.times_noticed + 1}). "
+            "You have reacted before; do not repeat the same full surprise — "
+            "keep it shorter, drier, or playfully resigned."
+        )
+    parts.append(
+        "You may respond, act, inspect, or stay silent (<do_nothing>); "
+        "your acting half can list your plugins and their descriptions."
+    )
+    return "\n".join(parts)
 
 
 class MuikaBrain:
@@ -253,13 +296,6 @@ class MuikaBrain:
                 event.last_chat_time.strftime("%Y-%m-%d %H:%M:%S") if event.last_chat_time else None
             )
 
-        # Inject self-change awareness facts for the persona template's register guidance
-        if event.type == "self_changed":
-            template_data.self_change_register = event.payload.register
-            template_data.self_change_version_from = event.payload.version_from
-            template_data.self_change_version_to = event.payload.version_to
-            template_data.self_change_times_noticed = event.payload.times_noticed
-
         # Construct the immediate event context if it's the start of the interaction
         if event.type == "agent_task":
             prompt = (
@@ -278,11 +314,7 @@ class MuikaBrain:
                 "You may respond, act, or stay silent. Do not repeat completed actions.\n" + event.report
             )
         elif event.type == "self_changed":
-            prompt = (
-                "[System] " + event.payload.report + " These changes were not made by you. "
-                "You may respond, act, inspect, or stay silent. "
-                "Do not ask the user to confirm or approve the change."
-            )
+            prompt = _self_change_prompt(event.payload)
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
         elif event.type == "time_tick":

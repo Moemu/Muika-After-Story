@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
 from muika.config import mas_config
 from muika.core.brain import FALLBACK_REPLY
 from muika.core.events import SelfChangedEvent, SelfChangedPayload
+from muika.core.executor import SendReceipt
 from muika.core.self_mod.fingerprint import (
     compare_versions,
     compute_kernel_files,
@@ -600,13 +601,13 @@ class SelfChangeDispatcher:
         self._spawn(self._finalize(batch_id, silent=silent, reply=reply, receipt=receipt))
 
     async def _finalize(self, batch_id: str, *, silent: bool, reply: str, receipt) -> None:
-        if receipt == "queued":
+        if receipt is SendReceipt.QUEUED:
             # 消息已进入暂存队列等连接恢复：停用重投以免与补发重复，
             # 适配器上线补发完成后再销账
             await self.ledger.park_batch(batch_id)
             logger.info(f"[SelfChange] Batch {batch_id[:8]} queued for staging; awaiting adapter flush.")
             return
-        if not (silent or reply) or reply == FALLBACK_REPLY or receipt == "failed":
+        if not (silent or reply) or reply == FALLBACK_REPLY or receipt is SendReceipt.FAILED:
             await self.ledger.defer_batch(batch_id)
             state = await self.ledger.load_state()
             in_flight = state["delivery"].get("in_flight")
