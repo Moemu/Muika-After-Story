@@ -145,10 +145,12 @@ async def test_plugin_edit_noticed_once_and_not_after_restart(core_app_factory, 
     assert read_self_change_state()["pending"] == []
 
 
-async def test_version_upgrade_register_and_facts(core_app_factory, fast_self_change):
+async def test_version_upgrade_register_and_facts(core_app_factory, fast_self_change, monkeypatch):
     from muika.core.self_mod.fingerprint import compute_kernel_files
-    from muika.utils.utils import get_version
 
+    # CI 浅克隆无 tags，安装版本号不可预测（如 0.0.1.dev1+...，会被判为降级）；
+    # 注入确定版本，让"升级"语域判定不随安装环境漂移
+    monkeypatch.setattr("muika.core.self_change.get_version", lambda: "1.2.3")
     app = await core_app_factory(
         turns=[ScriptedTurn(text="You upgraded me? What did you put in me this time?", when=SELF_CHANGED_WHEN)]
     )
@@ -174,7 +176,7 @@ async def test_version_upgrade_register_and_facts(core_app_factory, fast_self_ch
     await app.wait_processed("self_changed")
     await app.wait_ledger_cleared()
     call = next(item for item in app.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
-    assert "0.9.9" in call["prompt"] and get_version() in call["prompt"]
+    assert "0.9.9" in call["prompt"] and "1.2.3" in call["prompt"]
     # 升级语域提示被渲染进系统提示
     assert "Your version was raised" in call["system"]
 
