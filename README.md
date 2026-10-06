@@ -64,7 +64,7 @@
 
 - [X] 插件、核心热重载，实现自我迭代
 
-- [ ] 多实例部署。Muika 可以在任何地方了，记得回家看看
+- [X] 多实例部署。Muika 可以在任何地方了，记得回家看看
 
 - [ ] 一个用户友好的 WebUI
 
@@ -100,130 +100,37 @@ Muika 可以在聊天期间处理后台任务，也可以主动提出想法、�
 
 ```mermaid
 flowchart LR
-    Player["玩家 / 聊天平台"] <--> Adapter["平台适配器"]
-    Adapter <-->|WebSocket IPC| Core["Muika Core<br/>事件循环与主人格"]
-    Supervisor["进程监督<br/>重启与恢复"] --> Core
-    Core <--> Memory["记忆与持续状态"]
-    Core <--> Agent["行动 Agent<br/>后台任务"]
+    Player["玩家 / 聊天平台"] <--> Adapter["平台适配器<br/>NoneBot / AstrBot / 自定义接入"]
+    Adapter <-->|单机 WebSocket IPC| Core["Muika Core<br/>事件循环与主人格"]
+    Adapter <-->|多设备 WebSocket IPC| Gateway["Gateway（可选）<br/>聊天入口与活动日志"]
+    Gateway <-->|角色协调与经历同步| Core
+    Gateway <-->|角色协调与经历同步| OtherCore["其他设备 Core<br/>本地记忆与工具"]
+    Supervisor["进程监督<br/>重启与启动失败恢复"] --> Core
+    Core <--> Memory["记忆与持续状态<br/>经历 / 日记 / 事实 / 情绪"]
+    Core <--> Agent["行动 Agent<br/>持久后台任务"]
     Agent <--> Tools["工具 / 插件 / MCP"]
-    Agent <--> Review["Code Review Agent<br/>代码审查"]
+    Agent <--> Review["Code Review Agent<br/>代码操作审查"]
 ```
 
-主人格负责交流和自主决策，行动 Agent 负责执行任务，两者共享同一个 Muika 身份。任务结果回到对话，记忆保存经历与状态。Code Review Agent 检查具体代码操作，进程监督负责重启和启动失败后的恢复。
+主人格负责交流和自主决策，行动 Agent 负责执行任务，两者共用一个 Muika 性格提示词。行动结果回到对话，记忆保存共同经历和持续状态，让关系跨越会话与重启。
 
-Core 独立于聊天框架。仓库中的 `muika_bot` 负责 NoneBot 接入，其他适配器可以通过 IPC 连接。Launcher 管理安装、配置和进程。
+Core 独立于聊天框架，平台适配器通过 WebSocket IPC 接入。单机模式直接连接 Core；多设备模式增加常驻 Gateway，协调活动设备并同步已有经历。入口在线时，由一个活动 Core 负责回应，其他设备同步结果。各设备保留自己的工具、插件和文件。
 
-## Quick Start🚀
+进程监督负责 Core 重启和启动失败后的恢复。内核与插件的外部变更进入感知事件，经合并和节奏控制后交给 Muika 自行回应，并留下记忆。Launcher 管理安装、配置和 Core / Bot 进程。
 
-### 通过 mas-launcher 安装（推荐）
+组件职责、消息流和多设备同步边界见[文档站的架构概览](https://mas.snowy.moe/develop/architecture)。
 
-[mas-launcher](https://github.com/MuikaAI/mas-launcher) 是一个跨平台单文件启动器，负责拉取项目、准备 Python 环境，并管理 Core / Bot 进程。
+## Installation 🚀
 
-从 [Releases](https://github.com/MuikaAI/mas-launcher/releases) 下载对应平台的二进制文件，然后：
+有关 Muika-After-Story 本体的安装步骤，参见 [文档站的快速开始](https://mas.snowy.moe/guide/getting-started)
 
-```bash
-mas-launcher init                     # 创建默认实例（克隆项目 + 准备 Python 环境）
-mas-launcher configure                # 配置 .env（Master ID、IPC 密钥）
-mas-launcher model                    # 配置 models.yml（选 provider → 拉模型列表 → 选模型）
-mas-launcher start                    # 首次启动签署许可协议，然后拉起 Core 与 Bot
-mas-launcher napcat                   # 配置 QQ 接入（Windows：自动下载 NapCat 并启动）
-```
+模型配置指南可以参见 [文档站的模型配置小节](https://mas.snowy.moe/guide/model)
 
-### 通过 git clone 的方式安装
-
-Step 1: 克隆项目并安装依赖：
-
-```bash
-git clone https://github.com/Moemu/Muika-After-Story.git
-cd Muika-After-Story
-pip install .
-```
-
-Step 2: 参考 [Configuration⚙️](#Configuration⚙️) 小节配置 `.env` 和 `configs/models.yml` 文件，示例配置如下：
-
-**.env**
-
-```env
-ENVIRONMENT=dev
-DRIVER=~fastapi+~websockets+~httpx
-SUPERUSERS=["<your_qq_number>"]
-master_id="<your_qq_number>"
-enable_adapters = ["nonebot.adapters.onebot.v11"]
-ACTION_PERMISSION=write
-FS_ALLOWED_PATHS=["C:/Users/Muika/Desktop", "D:/"]
-agent_model=agent
-```
-
-**configs/models.yml**
-
-```yaml
-dashscope:
-  provider: Dashscope
-  model_name: qwen3.5-plus
-  default: true
-  multimodal: true
-  stream: false
-  incremental_output: true
-  online_search: false
-  api_key: sk-muikaissuperkawaii
-  max_tokens: 1024
-  context_window: 131072  # 按实际服务窗口覆盖，包含输入与输出
-  temperature: 0.75
-  top_p: 0.9
-  content_security: false
-  enable_thinking: false
-
-agent:
-  provider: Dashscope
-  model_name: qwen-turbo
-  default: false
-  api_key: sk-muikaissuperkawaii
-  stream: false
-  max_tokens: 1024
-  temperature: 0.2
-```
-
-Step 3: 在项目目录中确认用户协议。
-
-```powershell
-uv run python -m muika.agreement confirm
-```
-
-Step 4: 启动所有服务。
-
-```powershell
-.\scripts\start_all.ps1
-```
-
-首次使用或协议更新时需要确认。未确认时，Bot 会停止启动并提示确认命令。
-
-### 在 Asterbot 框架中使用 Muika-After-Story 适配插件(Beta)
-
-参考 [MuikaAI/astrbot_plugin_mas](https://github.com/MuikaAI/astrbot_plugin_mas)
-
-### 接入 Bot 到社交媒体平台
-
-QQ 接入可使用 `mas-launcher napcat`，按提示配置 NapCat；Docker 部署见 [QQ Bot 部署指南](deploy/README.md)。AstrBot 用户可使用 [MAS 适配插件](https://github.com/MuikaAI/astrbot_plugin_mas)（Beta）。
-
-手动安装和完整配置见[使用文档](https://mas.snowy.moe/)，启动器命令见 [mas-launcher README](launcher/README.md)。
-
-### MAS 的行动范围
-
-在实例的 `.env` 中设置 `ACTION_PERMISSION`：
-
-| 值 | Muika 可以做什么 |
-| --- | --- |
-| `read_only` | 读取授权内容，执行审查通过的读取、搜索和计算命令 |
-| `write`（默认） | 增加授权目录内的文件写入、修改和删除 |
-| `self_modify` | 增加人格、技能、话题、插件修改和 Core 代码提案 |
-
-文件目录由 `FS_ALLOWED_PATHS` 指定，默认是空列表。正常记忆、日记和运行记录的保存不受行动档位限制。
-
-代码审查默认使用 `CODE_REVIEW_MODE=auto`；设为 `manual` 后改为人工审批。审查会使用模型额度，也不提供操作系统隔离。升级时若仍有旧权限开关且未设置新档位，MAS 会以只读运行并提示选择。
+如果想要在多个设备上部署 Muika-After-Story，也可以参见 [文档站的多设备部署章节](https://mas.snowy.moe/guide/multi-device)
 
 ## Character Setting🧸
 
-参见: [关于沐妮卡](https://bot.snowy.moe/about/Muika)
+Muika(沐妮卡) 是 Muika-After-Story 的核心角色，有关其人格说明可以参见: [关于 Muika | Muika-After-Story](https://mas.snowy.moe/about/) 和 [关于沐妮卡 - 沐雪 Bot](https://bot.snowy.moe/about/Muika)
 
 ## About🎗️
 
@@ -242,6 +149,6 @@ QQ 接入可使用 `mas-launcher napcat`，按提示配置 NapCat；Docker 部�
 - [nonebot/nonebot2](https://github.com/nonebot/nonebot2) — NoneBot 2.0 机器人框架
 - [nonebot/plugin-alconna](https://github.com/nonebot/plugin-alconna) — Alconna 命令解析器适配
 
-项目名称参考了 [Monika-After-Story](https://github.com/Monika-After-Story/MonikaModDev) ，同时某个 MAS 大型插件直接启发了本项目的开发，但是我上班熬穿了忘记这个项目的名字。
+项目名称参考了 [Monika-After-Story](https://github.com/Monika-After-Story/MonikaModDev), [MAICA](https://maica.monika.love/) 直接启发了本项目的制作。
 
 <a href="https://www.afdian.com/a/Moemu" target="_blank"><img src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt="afadian" style="height: 45px !important;width: 163px !important;"></a>
