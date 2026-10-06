@@ -605,7 +605,7 @@ def test_watcher_unloads_deleted_file_plugin(tmp_path: Path):
 
     handler._on_any_event(types.SimpleNamespace(src_path=str(deleted), event_type="deleted"))
 
-    manager.unload.assert_called_once_with("plugins.gone")
+    manager.unload.assert_called_once_with("plugins.gone", origin="runtime")
 
 
 def test_watcher_debounces_each_plugin_independently(tmp_path: Path):
@@ -698,7 +698,7 @@ def test_watcher_keeps_runtime_code_and_resource_changes(tmp_path, relative):
     handler._handle_path(source.parent, is_delete=False)
     manager.reload.assert_not_called()
     handler._handle_path(source, is_delete=False)
-    manager.reload.assert_called_once_with("plugins.MAS-Plugin-Daily.mas_plugin_daily")
+    manager.reload.assert_called_once_with("plugins.MAS-Plugin-Daily.mas_plugin_daily", origin="runtime")
 
 
 async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monkeypatch, fake_llm_factory):

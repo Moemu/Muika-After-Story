@@ -43,6 +43,12 @@ class PromptTemplatesData(BaseModel):
     adapters_info: Optional[str] = None
     version: str = get_version()
 
+    self_change_register: Optional[str] = None
+    """自我变更语域（edited/updated/upgraded/downgraded），仅 self_changed 事件注入。"""
+    self_change_version_from: Optional[str] = None
+    self_change_version_to: Optional[str] = None
+    self_change_times_noticed: int = 0
+
     # MuikaState keeps a runtime reference to MemoryManager for action tools.
     # It is not prompt data, so Pydantic must treat it as an opaque object.
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True, defer_build=True)

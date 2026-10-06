@@ -224,3 +224,12 @@ class SyncStateORM(Base):
     __tablename__ = "sync_state"
     key: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[str] = mapped_column(Text)
+
+
+class SystemStateORM(Base):
+    """保存系统级键值状态（运行指纹、变更账本等），与人格记忆分离。"""
+
+    __tablename__ = "system_state"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[str] = mapped_column(String)

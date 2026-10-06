@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -89,6 +90,7 @@ class CoreApp:
         self.executor = Executor(self._queue, self._collect)
         self.muika: Optional[Muika] = None
         self._stopped = False
+        self._self_change_attached = False
 
     def _install_plumbing_routes(self) -> None:
         """为记忆检索等内部管线安装默认路由，使其不消耗场景剧本。"""
@@ -189,6 +191,11 @@ class CoreApp:
         if self.muika is not None:
             await self.muika.stop()
             self.muika = None
+        if self._self_change_attached:
+            from muika.core.self_change import teardown_self_change
+
+            teardown_self_change()
+            self._self_change_attached = False
         await close_db()
         self._recorder.record("lifecycle", action="stop")
         self._recorder.record("db_snapshot", tables=self._table_counts())
@@ -251,6 +258,54 @@ class CoreApp:
         """显式投递一次时间流逝事件，替代全局时钟冻结。"""
         assert self.muika is not None, "call start() first"
         await self.muika.create_event(TimeTickEvent())
+
+    def attach_self_change(self, *, can_send: bool = True) -> None:
+        """用与 CoreBootstrap 相同的工厂接线自我变更感知（账本 + 调度器）。"""
+        assert self.muika is not None, "call start() first"
+        from muika.core.self_change import setup_self_change
+
+        setup_self_change(self.muika, can_send=lambda: can_send)
+        self._self_change_attached = True
+
+    async def run_boot_self_change_check(self, restart_record: Optional[dict] = None) -> None:
+        """调用生产共用的启动指纹对比流程。"""
+        assert self.muika is not None, "call start() first"
+        from muika.core.self_change import run_boot_self_change_check
+
+        await run_boot_self_change_check(self.muika, restart_record)
+
+    def fail_next_sends(self, count: int) -> None:
+        """让接下来 *count* 次外发返回 failed 回执，模拟传输失败。"""
+        assert self.muika is not None, "call start() first"
+        original = self.muika.executor._send_func
+        remaining = count
+
+        async def flaky(content, resources=None, target=None):
+            nonlocal remaining
+            if remaining > 0:
+                remaining -= 1
+                return "failed"
+            return await original(content, resources, target)
+
+        self._monkeypatch.setattr(self.muika.executor, "_send_func", flaky)
+
+    async def wait_ledger_cleared(self, timeout: float = 10.0) -> None:
+        """等待感知账本清空（投递确认是发送后的独立任务，需轮询销账结果）。"""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            if loop.time() > deadline:
+                raise TimeoutError("Self-change ledger was not cleared in time")
+            if self._ledger_is_clear():
+                return
+            await asyncio.sleep(0.05)
+
+    def _ledger_is_clear(self) -> bool:
+        rows = self.db_query("SELECT payload FROM system_state WHERE key='self_change'")
+        if not rows:
+            return True
+        state = json.loads(rows[0]["payload"])
+        return not state.get("pending") and not state.get("delivery", {}).get("in_flight")
 
     async def next_reply(self, timeout: float = 15.0) -> str:
         """等待下一条外发消息；超时时报出已发生的 LLM 调用以便排查。"""

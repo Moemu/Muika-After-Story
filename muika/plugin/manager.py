@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from muika.plugin.command import _commands
 from muika.plugin.exceptions import PluginLoadError
@@ -20,6 +20,21 @@ from muika.utils.logger import logger
 _BUILTIN_PREFIX = "muika.builtin_plugins"
 """builtin 插件的 module 前缀；拒绝通过本管理器卸载。"""
 
+PluginChangeObserver = Callable[[str, str, str], None]
+"""插件变更观察者回调 ``(package_name, origin, action)``。
+
+由 Core 启动时经 :func:`set_plugin_change_observer` 注册，避免插件层反向
+依赖核心层；未注册时插件变更不产生任何感知记录。
+"""
+
+_change_observer: Optional[PluginChangeObserver] = None
+
+
+def set_plugin_change_observer(observer: Optional[PluginChangeObserver]) -> None:
+    """注册（或解除）插件变更观察者。"""
+    global _change_observer
+    _change_observer = observer
+
 
 class PluginManager:
     """管理插件生命周期和文件监听抑制。"""
@@ -28,27 +43,37 @@ class PluginManager:
         self._watcher_suppression: dict[str, float] = {}
         self._watcher_lock = threading.Lock()
 
-    def unload(self, package_name: str) -> bool:
+    def unload(self, package_name: str, origin: str = "command") -> bool:
         """卸载指定插件。
 
         builtin 插件拒绝卸载（返回 False）。
+        :param origin: 变更来源（``runtime`` / ``command``），用于感知归因。
         """
         if package_name.startswith(_BUILTIN_PREFIX):
             logger.warning(f"[PluginManager] refusing to unload builtin plugin {package_name!r}")
             return False
-        return unload_plugin(package_name)
+        if unload_plugin(package_name):
+            if _change_observer is not None:
+                _change_observer(package_name, origin, "unload")
+            return True
+        return False
 
-    def reload(self, package_name: str) -> bool:
-        """重载指定插件。"""
+    def reload(self, package_name: str, origin: str = "command") -> bool:
+        """重载指定插件。
+
+        :param origin: 变更来源（``runtime`` / ``command``），用于感知归因。
+        """
         if package_name.startswith(_BUILTIN_PREFIX):
             logger.warning(f"[PluginManager] refusing to reload builtin plugin {package_name!r}")
             return False
         try:
             reload_plugin(package_name)
-            return True
         except PluginLoadError as exc:
             logger.error(str(exc))
             return False
+        if _change_observer is not None:
+            _change_observer(package_name, origin, "reload")
+        return True
 
     def reload_all_user_plugins(self) -> list[str]:
         """重载所有用户插件（非 builtin）。返回成功重载的 package_name 列表。"""

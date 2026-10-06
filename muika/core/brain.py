@@ -23,6 +23,9 @@ from .topic_manager import BaseTopic, EventTopic
 
 T = TypeVar("T", bound=PromptTemplatesData)
 
+FALLBACK_REPLY = "My mind feels foggy... I encountered an error."
+"""模型调用失败时的兜底回复；它不代表她真正处理了触发事件。"""
+
 
 def _seconds_since(now: datetime, then: datetime) -> float:
     """Subtract timestamps while tolerating legacy naive datetimes."""
@@ -250,6 +253,13 @@ class MuikaBrain:
                 event.last_chat_time.strftime("%Y-%m-%d %H:%M:%S") if event.last_chat_time else None
             )
 
+        # Inject self-change awareness facts for the persona template's register guidance
+        if event.type == "self_changed":
+            template_data.self_change_register = event.payload.register
+            template_data.self_change_version_from = event.payload.version_from
+            template_data.self_change_version_to = event.payload.version_to
+            template_data.self_change_times_noticed = event.payload.times_noticed
+
         # Construct the immediate event context if it's the start of the interaction
         if event.type == "agent_task":
             prompt = (
@@ -266,6 +276,12 @@ class MuikaBrain:
             prompt = (
                 "[System] Your activity location or available devices changed. This is the same ongoing relationship. "
                 "You may respond, act, or stay silent. Do not repeat completed actions.\n" + event.report
+            )
+        elif event.type == "self_changed":
+            prompt = (
+                "[System] " + event.payload.report + " These changes were not made by you. "
+                "You may respond, act, inspect, or stay silent. "
+                "Do not ask the user to confirm or approve the change."
             )
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
@@ -348,4 +364,4 @@ class MuikaBrain:
             return result
         except Exception as e:
             logger.error(f"[Brain] generate_reply failed: {e}")
-            return "My mind feels foggy... I encountered an error."
+            return FALLBACK_REPLY

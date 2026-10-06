@@ -167,6 +167,31 @@ class CoreChangeEvent:
     type: Literal["core_change"] = "core_change"
 
 
+@dataclass(frozen=True)
+class SelfChangedPayload:
+    """自我变更感知批次的事实集合。"""
+
+    batch_id: str
+    """投递批次标识；重试沿用同一 ID，记忆写入据此幂等。"""
+    register: Literal["edited", "updated", "upgraded", "downgraded"]
+    """语域：被实时修改 / 无版本变化更新 / 版本提升 / 版本回退。"""
+    report: str
+    """[System] 事实行：改了什么、版本前后值、新插件的名称与描述。"""
+    version_from: Optional[str] = None
+    version_to: Optional[str] = None
+    times_noticed: int = 0
+    """已确认的感知批次数（含沉默感知），供模板收敛重复反应。"""
+
+
+@dataclass(frozen=True)
+class SelfChangedEvent:
+    """她的代码或插件发生了非她所为的变化，由感知账本合并投递。"""
+
+    payload: SelfChangedPayload
+    timestamp: datetime = field(default_factory=datetime.now)
+    type: Literal["self_changed"] = "self_changed"
+
+
 Event: TypeAlias = (
     UserMessageEvent
     | TimeTickEvent
@@ -179,4 +204,5 @@ Event: TypeAlias = (
     | AgentTaskEvent
     | AgentHandoffEvent
     | CoreChangeEvent
+    | SelfChangedEvent
 )

@@ -22,6 +22,7 @@ from muika.core.code_review import (
     file_hash,
     get_code_reviewer,
 )
+from muika.core.self_change import notify_plugin_change
 from muika.plugin.command import _commands
 from muika.plugin.exceptions import PluginLoadError
 from muika.plugin.func_call.caller import _caller_data
@@ -307,6 +308,7 @@ class PluginDeployer:
 
         self._remove_staging(target.name)
         commands, tools = self._owned_names(record.module_name)
+        notify_plugin_change(record.module_name, "self", "reload" if was_loaded else "load")
         return (
             f"Plugin activated: {display_path(target)}\n"
             f"Commands: {', '.join(commands) if commands else '(none)'}\n"

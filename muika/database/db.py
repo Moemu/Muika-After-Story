@@ -115,8 +115,6 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
     if not db_path.exists():
         return  # 全新部署，无需标记
 
-    from alembic.script import ScriptDirectory
-
     conn = sqlite3.connect(str(db_path))
     try:
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'")
@@ -134,11 +132,9 @@ def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> 
         if has_user_tables:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if {"memory_runtime", "experience", "diary", "fact", "fact_recall"} <= tables:
-                head = (
-                    ScriptDirectory.from_config(alembic_cfg).get_current_head()
-                    if {"sync_event", "sync_reference", "sync_state"} <= tables
-                    else "5e446de27cb4"
-                )
+                # 有 sync 表的旧库只可能止步于 01163f475b84；
+                # 用当前 head 会导致其后的新迁移被跳过
+                head = "01163f475b84" if {"sync_event", "sync_reference", "sync_state"} <= tables else "5e446de27cb4"
             elif {"agent_task", "agent_call"} <= tables:
                 head = "3b6a7e5f332e"
             elif "self_modification_log" in tables:
