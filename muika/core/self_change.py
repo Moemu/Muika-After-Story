@@ -504,6 +504,15 @@ class SelfChangeDispatcher:
         """取消挂起的检查；账本与单例保留，等待下次唤醒。"""
         self._cancel_timer()
 
+    async def aclose(self) -> None:
+        """完全停机：取消定时器与所有后台任务，确保 close_db 前无在途 DB 操作。"""
+        self.shutdown()
+        tasks = [task for task in self._background if not task.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._background.clear()
+
     def _cancel_timer(self) -> None:
         if self._timer is not None:
             self._timer.cancel()
@@ -527,7 +536,13 @@ class SelfChangeDispatcher:
     def _spawn(self, coroutine) -> None:
         task = asyncio.create_task(coroutine)
         self._background.add(task)
-        task.add_done_callback(self._background.discard)
+
+        def _finish(done: asyncio.Task) -> None:
+            self._background.discard(done)
+            if not done.cancelled() and (error := done.exception()) is not None:
+                logger.error(f"[SelfChange] Background task failed: {error}")
+
+        task.add_done_callback(_finish)
 
     async def check(self) -> None:
         """门控检查：条件满足时冻结账本并投递一次合并的感知事件。"""
@@ -618,8 +633,15 @@ class SelfChangeDispatcher:
             return
         await self._confirm(batch_id)
 
-    async def on_adapter_online(self) -> None:
-        """适配器上线：暂存队列即将补发，确认此前因 queued 停靠的批次。"""
+    def on_adapter_online(self) -> None:
+        """适配器上线：暂存队列即将补发，确认此前因 queued 停靠的批次。
+
+        以后台任务执行——主循环任务可能随时被 gateway 待机取消，
+        在循环任务内做 DB 操作会在取消时污染共享连接。
+        """
+        self._spawn(self._confirm_parked())
+
+    async def _confirm_parked(self) -> None:
         state = await self.ledger.load_state()
         in_flight = state["delivery"].get("in_flight")
         if in_flight and in_flight.get("awaiting_flush"):
@@ -671,6 +693,15 @@ def teardown_self_change() -> None:
         _dispatcher.shutdown()
     _ledger = None
     _dispatcher = None
+
+
+async def aclose_self_change() -> None:
+    """完全停机并等待后台任务退出；必须在 ``close_db`` 之前调用，
+    避免在途 DB 操作在引擎销毁后报"no active connection"。
+    """
+    if _dispatcher is not None:
+        await _dispatcher.aclose()
+    teardown_self_change()
 
 
 def get_self_change_dispatcher() -> Optional[SelfChangeDispatcher]:

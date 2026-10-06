@@ -34,9 +34,9 @@ from muika.core.events import (
 from muika.core.executor import Executor, SendReceipt
 from muika.core.loop import Muika
 from muika.core.self_change import (
+    aclose_self_change,
     run_boot_self_change_check,
     setup_self_change,
-    teardown_self_change,
 )
 from muika.core.self_mod.proposals import (
     core_maintenance_message,
@@ -288,7 +288,7 @@ class CoreBootstrap:
             stop_plugin_watcher()
             get_plugin_manager().shutdown_all()
             await self._muika.stop()
-            teardown_self_change()
+            await aclose_self_change()
             await self._executor.scheduler.close()
             await close_db()
 

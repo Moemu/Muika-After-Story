@@ -192,9 +192,9 @@ class CoreApp:
             await self.muika.stop()
             self.muika = None
         if self._self_change_attached:
-            from muika.core.self_change import teardown_self_change
+            from muika.core.self_change import aclose_self_change
 
-            teardown_self_change()
+            await aclose_self_change()
             self._self_change_attached = False
         await close_db()
         self._recorder.record("lifecycle", action="stop")

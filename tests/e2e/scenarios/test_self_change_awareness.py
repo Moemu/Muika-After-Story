@@ -397,7 +397,7 @@ async def test_queued_receipt_parks_until_adapter_online(core_app_factory, fast_
     assert state["delivery"]["in_flight"]["awaiting_flush"] is True
 
     # 适配器上线：暂存队列补发，账本确认（不再重投，避免重复发言）
-    await app.muika.self_change.on_adapter_online()
+    app.muika.self_change.on_adapter_online()
     await app.wait_ledger_cleared()
     assert read_self_change_state()["pending"] == []
     assert len(self_change_notes(app)) == 1
