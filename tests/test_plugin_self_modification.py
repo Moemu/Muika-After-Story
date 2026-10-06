@@ -284,14 +284,21 @@ async def test_new_activation_failure_deletes_formal_file(deploy_env, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_deployer_revert_restores_old_plugin_or_deletes_new(deploy_env):
+async def test_deployer_revert_restores_old_plugin_or_deletes_new(deploy_env, monkeypatch):
     deployer, plugins, _ = deploy_env
+    # 回滚也是她自己的修改：基线必须同步推进，重启后不得被报告为外部变更
+    notified: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "muika.core.self_mod.plugin_deployer.notify_plugin_change",
+        lambda package_name, origin, action: notified.append((package_name, origin, action)),
+    )
     old_target = plugins / "old.py"
     old_target.write_text("value = 1\n", encoding="utf-8")
     await deployer.deploy(str(old_target), "value = 2\n", "update")
     await deployer.activate("old")
     await deployer.revert(str(old_target))
     assert old_target.read_text(encoding="utf-8") == "value = 1\n"
+    assert ("plugins.old", "self", "reload") in notified
 
     new_target = plugins / "created.py"
     await deployer.deploy(str(new_target), "value = 1\n", "create")
@@ -299,6 +306,7 @@ async def test_deployer_revert_restores_old_plugin_or_deletes_new(deploy_env):
     await deployer.revert(str(new_target))
     assert not new_target.exists()
     assert "plugins.created" not in get_plugins()
+    assert ("plugins.created", "self", "unload") in notified
 
 
 def test_watcher_ignores_management_and_suppressed_events(deploy_env):

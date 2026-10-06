@@ -11,6 +11,7 @@ import aiohttp
 
 from muika.config import mas_config
 from muika.core.events import ScheduledTriggerPayload
+from muika.core.executor import SendReceipt
 from muika.core.state import MuikaState
 from muika.database.db import get_session, observe_commits
 from muika.database.orm_models import SyncStateORM
@@ -78,10 +79,10 @@ class CoreLink:
         self.active = active
         await self.role(active, reason)
 
-    async def send(self, message: CoreToBotMessage, target: str | None = None) -> bool:
-        """在线输出带任期；此发送不等待平台确认。"""
+    async def send(self, message: CoreToBotMessage, target: str | None = None) -> SendReceipt:
+        """在线输出带任期；此发送不等待平台确认，写入网关连接即算 ``written``。"""
         if not self.active or not self.connected or self.ws is None:
-            return False
+            return SendReceipt.FAILED
         try:
             if isinstance(message, (SendMessage, CommandResult)):
                 message = message.model_copy(
@@ -92,10 +93,10 @@ class CoreLink:
             await self.ws.send_json(
                 {"kind": "output", "epoch": self.epoch, "message": message.model_dump(mode="json"), "target": target}
             )
-            return True
+            return SendReceipt.WRITTEN
         except (aiohttp.ClientError, OSError, ValueError) as exc:
             logger.error(f"[CoreLink] Could not send output: {exc}")
-            return False
+            return SendReceipt.FAILED
 
     async def handoff(self, target: str) -> None:
         """请求已在线的 Core 接管，结果通过角色事件返回。"""

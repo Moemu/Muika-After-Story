@@ -866,7 +866,10 @@ async def test_invalid_history_backs_off_without_repeated_stack_traces(live_gate
     assert recovered["sync_error"] is None
     await pc.close()
     stderr = next(entry["stderr"] for entry in reversed(recorder.entries) if entry["kind"] == "process_exit")
-    assert stderr.count("Traceback (most recent call last)") == 1
+    tracebacks = stderr.count("Traceback (most recent call last)")
+    if tracebacks != 1:
+        print("\n===== PC STDERR DIAG =====\n" + stderr + "\n===== END DIAG =====")
+    assert tracebacks == 1
     recorder.record("invalid_history_wait", status=status, recovered=recovered, attempts=attempts, traceback_count=1)
 
 

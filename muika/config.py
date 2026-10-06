@@ -125,6 +125,15 @@ class MASConfig(BaseSettings):
     scratch_retention_days: int = 3
     """任务临时工作区文件保留天数，启动时清理超期目录。"""
 
+    self_change_awareness_enabled: bool = True
+    """是否让 Muika 察觉自身代码/插件的变更。"""
+    self_change_settle_seconds: float = 60.0
+    """变更沉降窗口：最后一次变更记录后静默此时长，她才可能就此开口。"""
+    self_change_min_interval_seconds: float = 300.0
+    """两次变更感知投递之间的最小间隔。"""
+    self_change_max_defer_seconds: float = 86400.0
+    """变更账龄超过此时长后，在沉降满足时优先投递（不打破沉降窗口）。"""
+
     @model_validator(mode="before")
     @classmethod
     def migrate_action_permission(cls, values):

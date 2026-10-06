@@ -12,6 +12,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 from aiohttp import WSMsgType, web
 
 from muika.config import mas_config
+from muika.core.executor import SendReceipt
 from muika.models import AdapterInfo
 from muika.utils.logger import logger
 
@@ -136,12 +137,14 @@ class CoreWsServer:
         """是否有适配器已连接。"""
         return len(self._connections) > 0
 
-    async def send_to_bot(self, message: CoreToBotMessage, target: Optional[str] = None) -> bool:
+    async def send_to_bot(self, message: CoreToBotMessage, target: Optional[str] = None) -> SendReceipt:
         """
         向 Bot 发送一条消息。
 
         :param message: 要发送的 IPC 消息
         :param target: 目标适配器名称。
+        :return: ``written`` 已写入在线连接；``queued`` 已进入暂存队列（连接缺失，
+            适配器重连后补发）；``failed`` 暂存队列满被丢弃。
         """
         if not self.has_connection:
             logger.warning(f"[CoreWsServer] No adapter connected — queueing message: {message}")
@@ -154,7 +157,7 @@ class CoreWsServer:
 
         try:
             await ws.send_str(message.model_dump_json())
-            return True
+            return SendReceipt.WRITTEN
         except Exception as e:
             logger.warning(f"[CoreWsServer] Failed to send message: {e}")
             return self._queue_or_drop(message)
@@ -182,13 +185,13 @@ class CoreWsServer:
 
         return None
 
-    def _queue_or_drop(self, message: CoreToBotMessage) -> bool:
+    def _queue_or_drop(self, message: CoreToBotMessage) -> SendReceipt:
         if len(self._pending) >= _MAX_PENDING_MESSAGES:
             logger.warning(f"[CoreWsServer] Pending queue full ({_MAX_PENDING_MESSAGES}) — dropping message")
-            return False
+            return SendReceipt.FAILED
         self._pending.append(message)
         logger.debug(f"[CoreWsServer] Queued message (pending={len(self._pending)})")
-        return True
+        return SendReceipt.QUEUED
 
     async def flush_pending(self) -> int:
         """将暂存的消息全部发送给最近活跃的 Bot。"""

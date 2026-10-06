@@ -34,15 +34,17 @@ from .events import (
     AgentHandoffEvent,
     AgentTaskEvent,
     Event,
+    SelfChangedEvent,
     SessionEndEvent,
     TimeoutEvent,
     TimeTickEvent,
 )
-from .executor import Executor
+from .executor import Executor, SendReceipt
 from .memory import MemoryManager, RecallResult, StateUpdate
 from .processes import get_process_manager
 from .reflection import ReflectionAgent
 from .restart import RestartController
+from .self_change import SelfChangeDispatcher
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import TopicManager
@@ -96,6 +98,8 @@ class Muika:
         self.event_queue = event_queue
         self.executor = executor
         self.current_adapters: list[AdapterInfo] = []
+        self.self_change: Optional[SelfChangeDispatcher] = None
+        """自我变更感知调度器；由 CoreBootstrap / 测试 harness 接线。"""
 
         self.brain = MuikaBrain()
         self.agent = Agent()
@@ -278,6 +282,8 @@ class Muika:
         if event.type == "adapter_online":
             self.current_adapters.append(event.adapter)
             logger.debug(f"[Loop] Adapter online: {event.adapter!r} — status updated")
+            if self.self_change is not None:
+                self.self_change.on_adapter_online()
             if len(self.current_adapters) < 2:
                 return
 
@@ -532,13 +538,20 @@ class Muika:
         for update in parsed.state_updates:
             await self.memory.update_state(update)
         silent_turn = parsed.do_nothing
+        receipt: Optional[SendReceipt] = None
         if not silent_turn:
             if parsed.clean_reply:
                 logger.info(f"Muika: {parsed.clean_reply}")
-                await self.executor.send_message(parsed.clean_reply, resources=resources, target=parsed.target)
+                receipt = await self.executor.send_message(
+                    parsed.clean_reply, resources=resources, target=parsed.target
+                )
             await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
             if parsed.timeout is not None:
                 self._arm_timeout(parsed.timeout)
+        if isinstance(event, SelfChangedEvent) and self.self_change is not None:
+            self.self_change.on_processed(
+                event.payload.batch_id, silent=silent_turn, reply=parsed.clean_reply, receipt=receipt
+            )
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if not silent_turn:
@@ -641,12 +654,16 @@ class Muika:
         self.start_background_task(self.agent_tasks.run())
         self.start_background_task(self.loop())
         self._reflection_task = self.start_background_task(self.reflection.run_daily())
+        if self.self_change is not None:
+            self.self_change.wake()
 
     async def stop(self) -> None:
         """取消并等待所有核心任务结束。"""
         logger.info("Muika is going to sleep.")
         self.is_alive = False
         self._stopped = True
+        if self.self_change is not None:
+            self.self_change.shutdown()
         await self.agent_tasks.close()
         tasks = list(self._tasks)
         for task in tasks:

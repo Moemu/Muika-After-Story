@@ -31,8 +31,13 @@ from muika.core.events import (
     UserMessageEvent,
     UserMessagePayload,
 )
-from muika.core.executor import Executor
+from muika.core.executor import Executor, SendReceipt
 from muika.core.loop import Muika
+from muika.core.self_change import (
+    aclose_self_change,
+    run_boot_self_change_check,
+    setup_self_change,
+)
 from muika.core.self_mod.proposals import (
     core_maintenance_message,
     get_core_proposal_manager,
@@ -94,13 +99,11 @@ class CoreBootstrap:
 
         async def _send_llm_reply(
             content: str, resources: list[Resource] | None = None, target: str | None = None
-        ) -> None:
+        ) -> SendReceipt:
             """LLM 对话回复通过 SendMessage 发送，可按 *target* 路由到指定适配器。"""
             resources_dict = [r.to_dict() for r in resources] if resources else []
             msg = SendMessage(content=content, resources=resources_dict)
-            ok = await self._send(msg, target)
-            if not ok:
-                logger.warning("[Core] LLM reply dropped, no Bot connected")
+            return await self._send(msg, target)
 
         async def _send_command_result(
             content: str, resources: list[dict] | None = None, target: str | None = None
@@ -130,7 +133,7 @@ class CoreBootstrap:
         """提供当前人格和本地记忆，节点连接不拥有认知实现。"""
         return self._muika
 
-    async def _send(self, message: SendMessage | CommandResult, target: str | None) -> bool:
+    async def _send(self, message: SendMessage | CommandResult, target: str | None) -> SendReceipt:
         if self.node is not None and self.node.connected:
             return await self.node.send(message, target)
         if self.node is not None:
@@ -176,6 +179,10 @@ class CoreBootstrap:
         validate_template_configuration((mas_config.persona_template, mas_config.agent_template))
 
         await self._muika.memory.load()
+        setup_self_change(
+            self._muika,
+            can_send=lambda: (self.node is not None and self.node.connected) or self._ws_server.has_connection,
+        )
         self._register_handlers()
         self._register_adapter_callbacks()
         await self._ws_server.start()
@@ -186,6 +193,7 @@ class CoreBootstrap:
         )
         logger.success("Muika is ready.")
         directory = lifecycle_directory()
+        restart_record: Optional[RestartRecord] = None
         if directory is not None:
             write_json(directory / "ready.json", {"pid": os.getpid()})
             record_path = mas_config.data_dir.resolve() / "restart.json"
@@ -194,6 +202,7 @@ class CoreBootstrap:
                     for _ in range(30):
                         record = json.loads(record_path.read_text(encoding="utf-8"))
                         if record.get("status") in {"started", "restored", "failed"}:
+                            restart_record = record
                             await self._muika.memory.add_material(
                                 "agent",
                                 f"Core restart outcome: {record['status']}. "
@@ -205,6 +214,7 @@ class CoreBootstrap:
                         await asyncio.sleep(0.1)
                 except (OSError, ValueError, KeyError) as exc:
                     logger.error(f"[Restart] Could not load the saved restart outcome: {exc}")
+        await run_boot_self_change_check(self._muika, restart_record)
         if mas_config.gateway_url:
             self._executor.scheduler.persistent = True
             self._executor.scheduler.active = False
@@ -278,6 +288,7 @@ class CoreBootstrap:
             stop_plugin_watcher()
             get_plugin_manager().shutdown_all()
             await self._muika.stop()
+            await aclose_self_change()
             await self._executor.scheduler.close()
             await close_db()
 

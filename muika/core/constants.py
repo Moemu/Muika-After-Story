@@ -23,3 +23,9 @@ PROACTIVE_COOLDOWN: float = 60.0 * 60 * 1  # 两次主动情绪发言之间的�
 # 发言后孤独感不会清零，但此冷却期保证她不会连续倾诉。
 LONELINESS_PROACTIVE_RELIEF: float = 0.35
 # 主动发言后孤独感降低的幅度。表达出来会有所缓解，但不等于彻底不孤独。
+
+# 自我变更感知参数
+SELF_CHANGE_RETRY_BASE_SECONDS: float = 30.0  # 发送失败后的重试退避基数
+SELF_CHANGE_RETRY_MAX_SECONDS: float = 600.0  # 重试退避上限
+SELF_CHANGE_BATCH_MAX_AGE: float = 60.0 * 60  # 在途批次超此时长视为投递失败，重组批次
+SELF_CHANGE_SUMMARY_MAX_ITEMS: int = 8  # [System] 事实行中折叠列举的上限，超出以 +N more 表示

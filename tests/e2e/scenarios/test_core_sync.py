@@ -168,7 +168,7 @@ async def test_enable_sync_on_unversioned_existing_database(memory_process, tmp_
     await pc.command(action="dream")
     await pc.close()
     with sqlite3.connect(tmp_path / "pc" / "muika.db") as db:
-        for table in ("sync_event", "sync_reference", "sync_state", "alembic_version"):
+        for table in ("system_state", "sync_event", "sync_reference", "sync_state", "alembic_version"):
             db.execute(f"DROP TABLE {table}")
     pc, server = await memory_process("pc"), await memory_process("server")
     saved = await pc.command(action="state", mood="仍然记得你")

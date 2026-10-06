@@ -68,6 +68,15 @@ def reset_heartbeat():
         _model_config_manager.set_heart_intensity(mas_config.heartbeat_intensity)
 
 
+@pytest.fixture(autouse=True)
+def reset_self_change_wiring():
+    """每个测试结束后解除自我变更感知的观察者接线，防止调度器跨用例泄漏。"""
+    yield
+    from muika.core.self_change import teardown_self_change
+
+    teardown_self_change()
+
+
 @pytest_asyncio.fixture
 async def db_session(tmp_path):
     """临时 SQLite + ``create_all``，供 CRUD 静态方法直接使用（绕过 Alembic 迁移）。
