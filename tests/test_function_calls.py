@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -6,10 +7,12 @@ import pytest
 from arclet.alconna import Alconna, Args, Arparma
 from pydantic import BaseModel
 
+import muika.core.actions.tools  # noqa: F401  工具注册依赖导入副作用
 from muika.core.executor import Executor
 from muika.core.memory import MemoryManager
 from muika.core.state import MuikaState
-from muika.llm.utils.tools import function_call_handler
+from muika.llm._schema import ToolCall
+from muika.llm.utils.tools import dispatch_tool
 from muika.plugin.command import CommandDispatcher
 from muika.plugin.func_call.caller import Caller, FunctionCallValidationError
 from muika.plugin.func_call.context import ToolContext, get_dependencies, tool_context
@@ -45,15 +48,12 @@ async def test_function_call_error_is_returned_to_model(monkeypatch):
         async def run(self, **kwargs: Any):
             raise FunctionCallValidationError("Unexpected argument: line_start")
 
-    monkeypatch.setattr(
-        "muika.llm.utils.tools.get_function_calls",
-        lambda: {"read_file": BrokenCaller()},
-    )
+    call = ToolCall(id="t", name="read_file", arguments=json.dumps({"line_start": "120"}))
 
-    result = await function_call_handler("read_file", {"line_start": "120"})
+    result = await dispatch_tool(call, {"read_file": BrokenCaller()})
 
-    assert result.startswith("Tool error (read_file): FunctionCallValidationError")
-    assert result.endswith("Correct the arguments and retry.")
+    assert result.text.startswith("Tool error (read_file): FunctionCallValidationError")
+    assert result.text.endswith("Correct the arguments and retry.")
 
 
 async def test_tool_dependencies_follow_each_concurrent_context():

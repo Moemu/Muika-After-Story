@@ -184,7 +184,11 @@ class Azure(BaseLLM):
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
                     stream=stream,
-                    tools=self.__build_tools_definition(request.tools) if request.tools else None,
+                    tools=(
+                        self.__build_tools_definition([tool.data() for tool in request.tools])
+                        if request.tools
+                        else None
+                    ),
                     response_format=response_format,
                 )
 

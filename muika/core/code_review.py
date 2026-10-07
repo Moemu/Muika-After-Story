@@ -12,10 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from muika.config import get_model_config, mas_config
 from muika.llm import ModelRequest, load_model
-from muika.llm._execution import result_message
-from muika.llm._execution import step as model_step
+from muika.llm._execution import run_conversation
 from muika.llm._retry import LLMRequestError
-from muika.llm._schema import ModelMessage, ToolCall, ToolResult
+from muika.llm._schema import FunctionTool, ToolCall, ToolResult
 from muika.llm.context import input_budget, request_tokens, strip_json_fence
 from muika.plugin.func_call.context import ToolContext, get_dependencies
 from muika.utils.logger import logger
@@ -289,7 +288,7 @@ class CodeReviewer:
         return ToolResult(text="\n".join(matches) or "No matches.")
 
     async def assess(self, record: ReviewRecord) -> ReviewDecision:
-        """用独立模型会话审查，保留完整候选并限制工具种类。"""
+        """用独立模型会话审查，仅声明两个只读审查工具。"""
         model = load_model(get_model_config(mas_config.code_review_model or mas_config.agent_model))
         read_schema = {
             "type": "object",
@@ -301,43 +300,45 @@ class CodeReviewer:
             "properties": {"path": {"type": "string"}, "query": {"type": "string"}},
             "required": ["path", "query"],
         }
+
+        def review_tool(name: str, description: str, parameters: dict) -> FunctionTool:
+            return FunctionTool(
+                name=name,
+                description=description,
+                parameters=parameters,
+                handler=lambda **arguments: self.read_tool(
+                    ToolCall(id=name, name=name, arguments=json.dumps(arguments)), record
+                ),
+            )
+
         request = ModelRequest(
             prompt=record.model_dump_json(),
             system=_SYSTEM,
             format="json",
             json_schema=ReviewDecision,
             tools=[
-                {"type": "function", "function": {"name": name, "description": description, "parameters": schema}}
-                for name, description, schema in [
-                    ("review_read", "Read up to 200 source lines, starting at line_start.", read_schema),
-                    (
-                        "review_search",
-                        "Search exact text in Python source. Use returned paths to inspect callers.",
-                        search_schema,
-                    ),
-                ]
+                review_tool(
+                    "review_read",
+                    "Read up to 200 source lines, starting at line_start.",
+                    read_schema,
+                ),
+                review_tool(
+                    "review_search",
+                    "Search exact text in Python source. Use returned paths to inspect callers.",
+                    search_schema,
+                ),
             ],
             purpose="code_review",
         )
-        messages = [ModelMessage(role="user", content=request.prompt)]
-        for _ in range(24):
-            if request_tokens(request, messages) > input_budget(model.config):
-                raise ReviewError(
-                    "Review evidence exceeds the context budget. Split the proposal; no code was executed."
-                )
-            try:
-                response = await model.collect_stream(model_step(model, request, messages, stream=model.config.stream))
-            except LLMRequestError as exc:
-                raise ReviewError(f"Review model request failed: {exc}") from exc
-            if not response.succeed:
-                raise ReviewError(response.text)
-            if response.stop_reason == "tool_calls" and response.message is not None:
-                messages.append(response.message)
-                for call in response.message.tool_calls:
-                    messages.append(result_message(call, self.read_tool(call, record)))
-            else:
-                return ReviewDecision.model_validate_json(strip_json_fence(response.require_content()))
-        raise ReviewError("Review did not finish within 24 steps. Narrow the operation or supply missing context.")
+        if request_tokens(request) > input_budget(model.config):
+            raise ReviewError("Review evidence exceeds the context budget. Split the proposal; no code was executed.")
+        try:
+            completion = await model.collect_stream(run_conversation(model, request, stream=False, max_steps=24))
+        except LLMRequestError as exc:
+            raise ReviewError(f"Review model request failed: {exc}") from exc
+        if not completion.succeed:
+            raise ReviewError(completion.text)
+        return ReviewDecision.model_validate_json(strip_json_fence(completion.require_content()))
 
 
 _reviewer = CodeReviewer()

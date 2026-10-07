@@ -11,6 +11,7 @@ from muika.llm._execution import run_conversation
 from muika.llm._execution import step as model_step
 from muika.llm._retry import LLMRequestError
 from muika.llm._schema import (
+    FunctionTool,
     ModelMessage,
     ModelStreamCompletions,
     ToolCall,
@@ -76,7 +77,7 @@ async def test_tool_group_compaction_keeps_pairing_signatures_and_original_outpu
         last,
         ModelMessage(role="tool", tool_call_id="b", content="new output " * 3000 + "exact tail"),
     ]
-    request = ModelRequest(prompt="Keep the current objective", tools=[{"function": {"name": "write"}}])
+    request = ModelRequest(prompt="Keep the current objective", tools=[FunctionTool(name="write")])
     compacted, through, summary = await compactor.compact_messages(request, original, config)
     assert through == 2 and summary
     assert compacted[1] == last
@@ -116,7 +117,7 @@ async def test_context_length_retry_does_not_reexecute_tools(monkeypatch, fake_l
     chunks = [
         chunk
         async for chunk in run_conversation(
-            model, ModelRequest("Perform once", tools=[{"function": {"name": "write_once"}}]), stream=False
+            model, ModelRequest("Perform once", tools=[FunctionTool(name="write_once")]), stream=False
         )
     ]
     assert chunks[-1].chunk == "Verified."

@@ -127,7 +127,7 @@ class Ollama(BaseLLM):
             return await self.client.chat(
                 model=self.model,
                 messages=self._conversation_messages(request, messages),
-                tools=request.tools,
+                tools=[tool.data() for tool in request.tools],
                 stream=stream,
                 format=response_format,
                 options={

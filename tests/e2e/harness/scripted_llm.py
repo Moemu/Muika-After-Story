@@ -14,6 +14,7 @@ from muika.llm import ModelCompletions, ModelConfig, ModelRequest, Usage
 from muika.llm._schema import ModelMessage, ToolCall
 from muika.llm.context import ContextPreparer
 from muika.llm.utils.tools import dispatch_tool
+from muika.plugin.func_call import get_tool_list
 
 from .trace import TraceRecorder
 
@@ -169,7 +170,7 @@ class ScriptedLLM:
             if tool_round > _MAX_TOOL_ROUNDS:
                 raise AssertionError(f"ScriptedLLM: tool loop exceeded {_MAX_TOOL_ROUNDS} rounds in one request")
             for tool_call in completion.message.tool_calls:
-                result = await dispatch_tool(tool_call)
+                result = await dispatch_tool(tool_call, {tool.name: tool for tool in get_tool_list()})
                 self._recorder.record(
                     "tool_exec",
                     name=tool_call.name,

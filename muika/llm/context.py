@@ -57,7 +57,7 @@ def input_budget(config: ModelConfig) -> int:
 def request_tokens(request: ModelRequest, messages: Sequence[ModelMessage] = ()) -> int:
     """计算提示、历史、工具、协议字段与资源的估算开销。"""
     total = estimate_tokens((request.system or "") + request.prompt)
-    total += estimate_tokens(json.dumps(request.tools or [], ensure_ascii=False))
+    total += estimate_tokens(json.dumps([tool.data() for tool in request.tools or []], ensure_ascii=False))
     if request.json_schema is not None:
         schema = request.json_schema
         total += estimate_tokens(

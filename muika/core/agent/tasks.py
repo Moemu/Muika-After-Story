@@ -25,7 +25,7 @@ from muika.llm._execution import dispatch_call, observation_message, result_mess
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
 from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
 from muika.llm.utils.thought_processor import general_processor
-from muika.plugin.func_call import get_function_calls
+from muika.plugin.func_call import get_function_calls, get_tool_list
 from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
 
@@ -296,7 +296,7 @@ class AgentTasks:
             )
             if uncertain:
                 safe = {name for name, caller in get_function_calls().items() if caller.read_only}
-                request.tools = [tool for tool in request.tools or [] if tool["function"]["name"] in safe]
+                request.tools = [tool for tool in request.tools or [] if tool.name in safe]
                 request.prompt += (
                     "\n\nRecovery only: these actions have unknown outcomes. Inspect the actual state with read-only "
                     "tools. Do not execute or replay actions. Return JSON with resolved, evidence, evidence_call_ids. "
@@ -360,7 +360,7 @@ class AgentTasks:
                         task.messages.append(result_message(call, result))
                         await self._save(task)
                         continue
-                    allowed = {tool["function"]["name"] for tool in request.tools or []}
+                    allowed = {tool.name for tool in request.tools or []}
                     current_tool = get_function_calls().get(call.name)
                     if call.name not in allowed or uncertain and (current_tool is None or not current_tool.read_only):
                         result = ToolResult(
@@ -533,7 +533,7 @@ class AgentTasks:
                 ),
                 is_current=lambda: task.revision == revision and not task.cancel_requested and not self._closing,
             ):
-                return await dispatch_call(call)
+                return await dispatch_call(call, {tool.name: tool for tool in get_tool_list()})
 
         action_task = asyncio.create_task(action())
         try:

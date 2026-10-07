@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Literal, Optional, Sequence, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Sequence,
+    Type,
+    Union,
+)
 
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 
@@ -38,6 +50,45 @@ class ToolResult(BaseModel):
     text: str
     is_error: bool = False
     resources: list[MediaReference] = Field(default_factory=list)
+
+
+class Tool(Protocol):
+    """请求声明的工具对象：声明与执行一体，注册表工具与请求私有工具共用此接口。"""
+
+    shared: bool
+    """是否属于全局共享工具集；人格任务拦截器只接管共享工具。"""
+
+    @property
+    def name(self) -> str: ...
+
+    def data(self) -> dict: ...
+
+    async def run(self, **kwargs: Any) -> Any: ...
+
+
+@dataclass
+class FunctionTool:
+    """由可调用对象构成的请求私有工具，如审查 Agent 的专用读取器。"""
+
+    name: str
+    description: str = ""
+    parameters: dict = field(default_factory=dict)
+    handler: Callable[..., Any] | None = None
+    shared: bool = False
+
+    def data(self) -> dict:
+        return {
+            "type": "function",
+            "function": {"name": self.name, "description": self.description, "parameters": self.parameters},
+        }
+
+    async def run(self, **kwargs: Any) -> Any:
+        if self.handler is None:
+            raise ValueError(f"Tool {self.name} has no handler")
+        result = self.handler(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 
 class ModelMessage(BaseModel):
@@ -90,7 +141,7 @@ class ModelRequest:
     prompt: str
     history: Sequence["SessionTurn"] = field(default_factory=list)
     resources: List[Resource] = field(default_factory=list)
-    tools: Optional[List[dict]] = field(default_factory=list)
+    tools: Optional[List[Tool]] = field(default_factory=list)
     system: Optional[str] = None
     format: Literal["string", "json"] = "string"
     json_schema: Optional[Union[Type[BaseModel], TypeAdapter]] = None

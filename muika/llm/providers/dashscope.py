@@ -136,7 +136,7 @@ class Dashscope(BaseLLM):
             "temperature": self.temperature,
             "top_p": self.top_p,
             "stream": stream,
-            "tools": request.tools or None,
+            "tools": [tool.data() for tool in request.tools or []] or None,
             "parallel_tool_calls": True,
             "enable_search": self.enable_search,
             "incremental_output": self.incremental_output,

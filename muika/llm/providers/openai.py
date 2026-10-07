@@ -184,7 +184,7 @@ class Openai(BaseLLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             stream=stream,
-            tools=request.tools or NOT_GIVEN,
+            tools=[tool.data() for tool in request.tools or []] or NOT_GIVEN,
             extra_body=self.extra_body,
             response_format=self._response_format(request),
             **self._sampling_kwargs(),

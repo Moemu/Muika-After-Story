@@ -110,6 +110,29 @@ def transform_json(tool: Tool) -> dict[str, Any]:
     return output
 
 
-def get_mcp_list() -> list[dict[str, dict]]:
-    """返回初始化时获取的 MCP 工具列表副本。"""
-    return list(_tools)
+class McpTool:
+    """把 MCP 工具声明适配为与其他工具一致的调用对象。"""
+
+    shared: bool = True
+    """属于全局共享工具集；人格任务拦截器只接管共享工具。"""
+
+    def __init__(self, declaration: dict[str, Any]) -> None:
+        self._declaration = declaration
+
+    @property
+    def name(self) -> str:
+        return self._declaration["function"]["name"]
+
+    def data(self) -> dict[str, Any]:
+        return self._declaration
+
+    async def run(self, **kwargs: Any) -> str | ToolResult:
+        result = await handle_mcp_tool(self.name, kwargs)
+        if result is None:
+            return ToolError(f"Unknown function: {self.name}. Refresh the available tools before continuing.")
+        return result
+
+
+def get_mcp_list() -> list[McpTool]:
+    """返回初始化时获取的 MCP 工具对象列表。"""
+    return [McpTool(declaration) for declaration in _tools]

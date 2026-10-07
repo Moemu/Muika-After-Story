@@ -28,6 +28,7 @@ from muika.core.memory import (
 from muika.core.state import MuikaState
 from muika.core.topic_manager import EventTopic, StaticTopic, TopicSource
 from muika.llm import ModelCompletions, ModelConfig
+from muika.llm._schema import FunctionTool
 from muika.llm.context import ContextCompactor
 from muika.models import AdapterInfo, Message
 
@@ -281,12 +282,12 @@ async def test_generate_reply_god_mode_passes_tools(fake_llm_factory, monkeypatc
     brain = _brain(fake)
 
     def _tools():
-        return [{"name": "t"}]
+        return [FunctionTool(name="t")]
 
     monkeypatch.setattr("muika.core.brain.get_tool_list", _tools)
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
-    assert fake.requests[0].tools == [{"name": "t"}]
+    assert [tool.name for tool in fake.requests[0].tools] == ["t"]
 
 
 async def test_generate_reply_no_god_mode_no_tools(fake_llm_factory):
@@ -350,11 +351,11 @@ async def test_mcp_tools_remain_in_consecutive_requests_and_clear_on_cleanup(fak
         await client.initialize_servers()
         for _ in range(2):
             await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
-        assert all("remote_probe" in {t["function"]["name"] for t in r.tools} for r in fake.requests)
+        assert all("remote_probe" in {t.name for t in r.tools} for r in fake.requests)
         server.list_tools.assert_awaited_once()
         await client.cleanup_servers()
         await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
-        assert "remote_probe" not in {t["function"]["name"] for t in fake.requests[-1].tools}
+        assert "remote_probe" not in {t.name for t in fake.requests[-1].tools}
     finally:
         await client.cleanup_servers()
 

@@ -14,6 +14,7 @@ from muika.ipc.bootstrap import CoreBootstrap
 from muika.llm._schema import ToolCall
 from muika.llm.utils.tools import dispatch_tool
 from muika.plugin import load_plugins
+from muika.plugin.func_call import get_tool_list
 from muika.plugin.func_call.context import tool_context
 
 from .core_app import CoreApp
@@ -70,7 +71,8 @@ async def main() -> None:
                     tool_result = await dispatch_tool(
                         ToolCall(
                             id="handoff", name="request_handoff", arguments=json.dumps({"target": command["target"]})
-                        )
+                        ),
+                        {tool.name: tool for tool in get_tool_list()},
                     )
             assert core.node is not None
             print(

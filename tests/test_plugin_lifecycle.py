@@ -726,7 +726,7 @@ async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monk
 
     async def visible():
         await agent.execute_command("test", MuikaState(), MagicMock())
-        return {t["function"]["name"] for t in fake.requests[-1].tools}
+        return {t.name for t in fake.requests[-1].tools}
 
     assert "visible_probe" not in await visible()
     load_plugin("visible_probe")

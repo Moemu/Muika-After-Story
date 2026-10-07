@@ -10,6 +10,7 @@ from muika.llm import ModelCompletions, ModelConfig, ModelRequest
 from muika.llm import _wrapper as usage_wrapper
 from muika.llm._execution import run_conversation, step
 from muika.llm._schema import (
+    FunctionTool,
     MediaReference,
     ModelMessage,
     ModelStreamCompletions,
@@ -23,9 +24,18 @@ def _provider():
     return Openai(ModelConfig(provider="openai", model_name="test", api_key="test"))
 
 
-def _tools(*names):
-    """构造仅含名字的声明式工具表，用于断言请求声明即执法。"""
-    return [{"type": "function", "function": {"name": name, "parameters": {}}} for name in names]
+def _tools(*names, calls=None):
+    """构造仅含名字的声明式工具表；提供 calls 时记录每次调用的名称与参数。"""
+
+    def make(name):
+        async def handler(**arguments):
+            if calls is not None:
+                calls.append((name, arguments))
+            return "ok"
+
+        return FunctionTool(name=name, handler=handler)
+
+    return [make(name) for name in names]
 
 
 def _response(message, finish_reason="stop"):
@@ -136,13 +146,16 @@ async def test_tool_image_is_in_next_provider_request(monkeypatch, tmp_path):
         requests.append(kwargs["messages"])
         return batch if len(requests) == 1 else _response({"role": "assistant", "content": "inspected"})
 
-    async def handler(name, arguments):
+    async def view_handler(**arguments):
         return ToolResult(text="render", resources=[MediaReference(type="image", path=str(picture))])
 
     monkeypatch.setattr(provider.client.chat.completions, "create", create)
-    monkeypatch.setattr("muika.llm.utils.tools.function_call_handler", handler)
     await provider.collect_stream(
-        run_conversation(provider, ModelRequest("inspect", tools=_tools("view_image")), stream=False)
+        run_conversation(
+            provider,
+            ModelRequest("inspect", tools=[FunctionTool(name="view_image", handler=view_handler)]),
+            stream=False,
+        )
     )
     observation = requests[1][-1]
     assert observation["role"] == "user"
@@ -179,14 +192,11 @@ async def test_tool_batch_preserves_quotes_and_finishes_before_next_request(monk
         requests.append(kwargs["messages"])
         return batch if len(requests) == 1 else _response({"role": "assistant", "content": "done"})
 
-    async def handler(name, arguments):
-        calls.append((name, arguments))
-        return "ok"
-
     monkeypatch.setattr(provider.client.chat.completions, "create", create)
-    monkeypatch.setattr("muika.llm.utils.tools.function_call_handler", handler)
     result = await provider.collect_stream(
-        run_conversation(provider, ModelRequest("work", tools=_tools("execute_python", "read_file")), stream=False)
+        run_conversation(
+            provider, ModelRequest("work", tools=_tools("execute_python", "read_file", calls=calls)), stream=False
+        )
     )
     assert result.text == "done"
     assert calls == [("execute_python", {"code": "print('hello')"}), ("read_file", {"path": "result.txt"})]

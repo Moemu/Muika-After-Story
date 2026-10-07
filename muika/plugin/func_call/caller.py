@@ -29,9 +29,14 @@ class FunctionCallValidationError(ValueError):
 
 
 class Caller:
+    shared: bool = True
+    """是否属于全局共享工具集；人格任务拦截器只接管共享工具。"""
+
     def __init__(self, description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False):
         self._name: str = ""
         """函数名称"""
+        self._data: Optional[dict[str, Any]] = None
+        """缓存的工具声明；注册完成后不再变化"""
         self.read_only = read_only
         """函数是否只读取数据而不修改外部状态"""
         self._description: str = description
@@ -73,6 +78,10 @@ class Caller:
         # logger.debug(f"Function Call 函数 {self.module_name}.{self._name} 已成功加载")
         return func
 
+    @property
+    def name(self) -> str:
+        return self._name
+
     async def run(self, **kwargs: Any) -> Any:
         """
         执行 function call
@@ -109,7 +118,9 @@ class Caller:
         return await self.function(**inject_args)
 
     def data(self) -> dict[str, Any]:
-        """生成工具描述和参数模型的 JSON Schema。"""
+        """生成工具描述和参数模型的 JSON Schema，注册完成后缓存。"""
+        if self._data is not None:
+            return self._data
         if self._parameters_model:
             parameters = self._parameters_model.model_json_schema(schema_generator=FunctionCallJsonSchema)
         else:
@@ -124,7 +135,7 @@ class Caller:
                 "required": [],
             }
 
-        return {
+        self._data = {
             "type": "function",
             "function": {
                 "name": self._name,
@@ -132,6 +143,7 @@ class Caller:
                 "parameters": parameters,
             },
         }
+        return self._data
 
 
 def on_function_call(description: str, params: Optional[Type[BaseModel]] = None, *, read_only: bool = False) -> Caller:
@@ -154,20 +166,6 @@ def get_function_calls() -> dict[str, Caller]:
         dict[str, Caller]: 所有已注册的function call类
     """
     return _caller_data
-
-
-def get_function_list() -> list[dict[str, dict]]:
-    """
-    获取所有已注册的function call函数，并转换为工具格式
-
-    :return: 所有已注册的function call函数列表
-    """
-    tools: list[dict[str, dict]] = []
-
-    for name, caller in _caller_data.items():
-        tools.append(caller.data())
-
-    return tools
 
 
 def remove_callers_for_plugin(package_name: str) -> int:

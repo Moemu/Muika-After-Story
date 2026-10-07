@@ -348,7 +348,7 @@ async def test_uncertain_action_requires_new_read_evidence(factory):
         assert performed == []
         saved = await resumed.store.calls(task.id)
         assert next(c for c in saved if c.call.id == "unknown").status == "reconciled"
-        assert "mutate_state" not in {t["function"]["name"] for t in resumed.agent.model.requests[0][0].tools}
+        assert "mutate_state" not in {t.name for t in resumed.agent.model.requests[0][0].tools}
     finally:
         await _stop(resumed, worker)
 

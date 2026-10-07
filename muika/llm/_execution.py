@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import replace
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -19,6 +19,7 @@ from ._schema import (
     ModelMessage,
     ModelRequest,
     ModelStreamCompletions,
+    Tool,
     ToolCall,
     ToolResult,
     Usage,
@@ -115,28 +116,39 @@ async def step(
                 raise
 
 
-async def execute_call(call: ToolCall) -> ToolResult:
-    """执行工具并收集本次新增的资源。"""
+async def execute_call(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult:
+    """执行请求声明的工具并收集本次新增的资源。
+
+    人格任务拦截器只接管共享工具；请求私有工具（如审查读取器）始终直接执行。
+    """
+    tool = tools.get(call.name)
+    if tool is None:
+        logger.warning(f"[Tool] {call.name} failed | not declared for this request")
+        return ToolResult(
+            text=f"Tool {call.name!r} is not declared for this request. Use only the declared tools.",
+            is_error=True,
+        )
     context = get_dependencies().get(ToolContext)
-    if isinstance(context, ToolContext) and context.execute_tool is not None:
+    if isinstance(context, ToolContext) and context.execute_tool is not None and tool.shared:
         result = await context.execute_tool(call)
         context.resources.extend(ref.to_resource() for ref in result.resources)
         return result
-    return await dispatch_call(call)
+    return await dispatch_call(call, tools)
 
 
-async def dispatch_call(call: ToolCall) -> ToolResult:
-    """派发已取得执行权的动作，不重复进入检查点拦截器。"""
+async def dispatch_call(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult:
+    """派发已取得执行权的动作并收集资源，不重复进入人格拦截器。"""
     context = get_dependencies().get(ToolContext)
-    offset = len(context.resources) if isinstance(context, ToolContext) else 0
-    result = await dispatch_tool(call)
-    if isinstance(context, ToolContext):
-        for resource in context.resources[offset:]:
-            await ensure_resource_path(resource)
-            if resource.path:
-                ref = MediaReference(type=resource.type, path=resource.path, mimetype=resource.mimetype)
-                if ref not in result.resources:
-                    result.resources.append(ref)
+    if not isinstance(context, ToolContext):
+        return await dispatch_tool(call, tools)
+    offset = len(context.resources)
+    result = await dispatch_tool(call, tools)
+    for resource in context.resources[offset:]:
+        await ensure_resource_path(resource)
+        if resource.path:
+            ref = MediaReference(type=resource.type, path=resource.path, mimetype=resource.mimetype)
+            if ref not in result.resources:
+                result.resources.append(ref)
     return result
 
 
@@ -166,13 +178,26 @@ def observation_message(resources: list[MediaReference], *, multimodal: bool) ->
 
 
 async def run_conversation(
-    model: BaseLLM, request: ModelRequest, *, stream: bool
+    model: BaseLLM, request: ModelRequest, *, stream: bool, max_steps: int = 0
 ) -> AsyncGenerator[ModelStreamCompletions, None]:
-    """保持模型调用的工具循环和累计用量；请求未声明的工具不会执行。"""
+    """保持模型调用的工具循环和累计用量；请求未声明的工具不会执行。
+
+    :param max_steps: 工具循环步数上限；0 表示不限制，超出后按失败结束。
+    """
     messages: list[ModelMessage] = []
-    declared = {tool["function"]["name"] for tool in request.tools or []}
+    tools: Mapping[str, Tool] = {tool.name: tool for tool in request.tools or []}
     total = Usage()
+    steps = 0
     while True:
+        steps += 1
+        if max_steps and steps > max_steps:
+            yield ModelStreamCompletions(
+                chunk=f"Tool loop did not finish within {max_steps} steps.",
+                usage=total,
+                succeed=False,
+                stop_reason="error",
+            )
+            return
         completion = ModelCompletions()
         if stream:
             try:
@@ -226,13 +251,7 @@ async def run_conversation(
         messages.append(message)
         resources: list[MediaReference] = []
         for call in message.tool_calls:
-            if call.name in declared:
-                result = await execute_call(call)
-            else:
-                result = ToolResult(
-                    text=f"Tool {call.name!r} is not declared for this request. Use only the declared tools.",
-                    is_error=True,
-                )
+            result = await execute_call(call, tools)
             messages.append(result_message(call, result))
             resources.extend(result.resources)
         if resources:

@@ -43,7 +43,9 @@ from .. import (
     register,
 )
 from .._retry import RequestRetry
-from .._schema import ModelMessage, ToolCall
+from .._schema import ModelMessage
+from .._schema import Tool as DeclaredTool
+from .._schema import ToolCall
 from ..utils.protocol import json_arguments, stop_reason
 
 
@@ -92,14 +94,16 @@ class Gemini(BaseLLM):
         )
 
     def _build_gemini_config(
-        self, tools: Optional[List[dict]], response_format: Optional[Union[Type[BaseModel], TypeAdapter, dict]]
+        self,
+        tools: Optional[List[DeclaredTool]],
+        response_format: Optional[Union[Type[BaseModel], TypeAdapter, dict]],
     ) -> GenerateContentConfig:
         gemini_config = self.gemini_config.model_copy()
         format_tools = []
 
         # build tools
         for tool in tools if tools else []:
-            function = deepcopy(tool["function"])
+            function = deepcopy(tool.data()["function"])
             format_tools.append(function)
 
         function_tools = Tool(function_declarations=format_tools)

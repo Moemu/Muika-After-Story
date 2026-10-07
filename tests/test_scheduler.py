@@ -1,15 +1,18 @@
 """验证提醒参数、真实投递和关闭行为。"""
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
+import muika.core.actions.tools  # noqa: F401  工具注册依赖导入副作用
 from muika.core.executor import Executor
 from muika.core.scheduler import Scheduler
 from muika.core.state import MuikaState
-from muika.llm.utils.tools import function_call_handler
+from muika.llm._schema import ToolCall
+from muika.llm.utils.tools import dispatch_tool
 from muika.plugin.func_call import get_function_calls
 from muika.plugin.func_call.context import tool_context
 
@@ -52,7 +55,8 @@ async def test_invalid_schedule_creates_no_event(kwargs):
 
 
 async def test_tool_reports_failure_without_scheduling():
-    assert "Executor" in await function_call_handler("plan_future_event", {"event": "test", "trigger_in_seconds": 0})
+    call = ToolCall(id="t", name="plan_future_event", arguments=json.dumps({"event": "test", "trigger_in_seconds": 0}))
+    assert "Executor" in (await dispatch_tool(call, get_function_calls())).text
     executor = Executor(asyncio.Queue(), AsyncMock())
     with tool_context(MuikaState(), executor):
         assert "Cannot schedule" in await get_function_calls()["plan_future_event"].run(event=" ", trigger_in_seconds=0)
