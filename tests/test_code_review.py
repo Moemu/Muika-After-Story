@@ -9,10 +9,18 @@ import pytest
 
 from muika.config import MASConfig, mas_config
 from muika.core.actions.tools import _executor, _filesystem
-from muika.core.code_review import CodeReviewer, ReviewDecision, ReviewError, file_hash
+from muika.core.code_review import (
+    CodeReviewer,
+    ReviewDecision,
+    ReviewError,
+    ReviewRecord,
+    file_hash,
+)
 from muika.core.executor import Executor
 from muika.core.state import MuikaState
-from muika.llm._schema import ToolCall
+from muika.llm import ModelConfig
+from muika.llm._base import BaseLLM
+from muika.llm._schema import ModelMessage, ModelStreamCompletions, ToolCall
 from muika.plugin.func_call.context import tool_context
 
 
@@ -213,3 +221,40 @@ async def test_reviewer_can_inspect_adapter_source_without_filesystem_grant(monk
     )
     assert str(source) in result.text
     assert record.files[str(source)] == file_hash(source)
+
+
+async def test_assess_tolerates_markdown_fenced_json(monkeypatch):
+    """模型把 JSON 包进 markdown 围栏时审查仍能解析，不再整体 unavailable。"""
+
+    class FenceModel(BaseLLM):
+        def __init__(self, text: str) -> None:
+            super().__init__(ModelConfig(provider="openai", model_name="test", api_key="test"))
+            self.text = text
+
+        async def ask(self, request, *, stream=False):
+            raise NotImplementedError
+
+        async def request_step(self, request, messages, *, stream):
+            yield ModelStreamCompletions(
+                chunk=self.text,
+                message=ModelMessage(role="assistant", content=self.text),
+                stop_reason="stop",
+            )
+
+    body = json.dumps(
+        {"decision": "approve", "effect": "write", "reason": "Writes one file.", "suggestions": [], "impact": "可以。"}
+    )
+    model = FenceModel(f"```json\n{body}\n```")
+    monkeypatch.setattr("muika.core.code_review.get_model_config", lambda name: model.config)
+    monkeypatch.setattr("muika.core.code_review.load_model", lambda config: model)
+    record = ReviewRecord(
+        id="0" * 64,
+        kind="execution",
+        payload={"command": "print('hi')"},
+        owner=None,
+        context="test",
+        permission="write",
+        allowed_paths=[],
+    )
+    decision = await CodeReviewer().assess(record)
+    assert decision.decision == "approve" and decision.effect == "write"

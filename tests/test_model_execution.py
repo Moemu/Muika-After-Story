@@ -8,7 +8,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 from muika.llm import ModelCompletions, ModelConfig, ModelRequest
 from muika.llm import _wrapper as usage_wrapper
-from muika.llm._execution import collect_step, run_conversation
+from muika.llm._execution import run_conversation, step
 from muika.llm._schema import (
     MediaReference,
     ModelMessage,
@@ -21,6 +21,11 @@ from muika.llm.providers.openai import Openai
 
 def _provider():
     return Openai(ModelConfig(provider="openai", model_name="test", api_key="test"))
+
+
+def _tools(*names):
+    """构造仅含名字的声明式工具表，用于断言请求声明即执法。"""
+    return [{"type": "function", "function": {"name": name, "parameters": {}}} for name in names]
 
 
 def _response(message, finish_reason="stop"):
@@ -96,7 +101,7 @@ async def test_structured_content_preserves_json_and_private_reasoning(monkeypat
         return _response({"role": "assistant", "content": body, "reasoning_content": "private"})
 
     monkeypatch.setattr(provider.client.chat.completions, "create", create)
-    result = await provider._collect_stream(
+    result = await provider.collect_stream(
         run_conversation(provider, ModelRequest("classify", format="json"), stream=False)
     )
     assert result.require_content() == body
@@ -136,7 +141,9 @@ async def test_tool_image_is_in_next_provider_request(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.client.chat.completions, "create", create)
     monkeypatch.setattr("muika.llm.utils.tools.function_call_handler", handler)
-    await provider._collect_stream(run_conversation(provider, ModelRequest("inspect"), stream=False))
+    await provider.collect_stream(
+        run_conversation(provider, ModelRequest("inspect", tools=_tools("view_image")), stream=False)
+    )
     observation = requests[1][-1]
     assert observation["role"] == "user"
     assert observation["content"][1]["image_url"]["url"].endswith("aW1hZ2UtZXZpZGVuY2U=")
@@ -178,7 +185,9 @@ async def test_tool_batch_preserves_quotes_and_finishes_before_next_request(monk
 
     monkeypatch.setattr(provider.client.chat.completions, "create", create)
     monkeypatch.setattr("muika.llm.utils.tools.function_call_handler", handler)
-    result = await provider._collect_stream(run_conversation(provider, ModelRequest("work"), stream=False))
+    result = await provider.collect_stream(
+        run_conversation(provider, ModelRequest("work", tools=_tools("execute_python", "read_file")), stream=False)
+    )
     assert result.text == "done"
     assert calls == [("execute_python", {"code": "print('hello')"}), ("read_file", {"path": "result.txt"})]
     tool_results = [m for m in requests[1] if m["role"] == "tool"]
@@ -215,7 +224,7 @@ async def test_interleaved_stream_accumulates_all_calls(monkeypatch):
         )
 
     monkeypatch.setattr(provider.client.chat.completions, "create", AsyncMock(return_value=stream()))
-    result = await collect_step(provider, ModelRequest("read"), [])
+    result = await provider.collect_stream(step(provider, ModelRequest("read"), [], stream=True))
     assert result.message is not None
     assert [(c.id, json.loads(c.arguments)) for c in result.message.tool_calls] == [
         ("a", {"path": "a"}),
@@ -238,7 +247,9 @@ async def test_tool_error_does_not_repeat_successful_calls(monkeypatch):
     monkeypatch.setattr(provider.client.chat.completions, "create", AsyncMock(side_effect=responses))
     handler = AsyncMock(return_value=ToolResult(text="write failed", is_error=True))
     monkeypatch.setattr("muika.llm._execution.execute_call", handler)
-    result = await provider._collect_stream(run_conversation(provider, ModelRequest("work"), stream=False))
+    result = await provider.collect_stream(
+        run_conversation(provider, ModelRequest("work", tools=_tools("write_file")), stream=False)
+    )
     assert result.text == "blocked"
     handler.assert_awaited_once()
 

@@ -1,10 +1,10 @@
 import asyncio
-from collections.abc import AsyncGenerator
 
 import pytest
 
-from muika.llm import ModelCompletions, ModelConfig, ModelStreamCompletions, Usage
+from muika.llm import ModelConfig, ModelRequest, ModelStreamCompletions
 from muika.llm._base import BaseLLM
+from muika.llm._execution import step
 from muika.llm._retry import (
     LLMRequestError,
     RequestRetry,
@@ -12,7 +12,6 @@ from muika.llm._retry import (
     _defer_congestion,
     error_from_status,
 )
-from muika.models import Resource
 
 
 def _config(**values) -> ModelConfig:
@@ -155,49 +154,26 @@ async def test_timeout_is_left_for_stream_fallback():
     assert attempts == 1
 
 
-class _CompletionProbe:
-    def __init__(self, config: ModelConfig) -> None:
-        self.config = config
+class _StepProbe(BaseLLM):
+    """非流式请求超时，验证执行层自动降级为流式重试。"""
 
-    _collect_stream = BaseLLM._collect_stream
-    _complete_response = BaseLLM._complete_response
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__(config)
+
+    async def ask(self, request, *, stream=False):
+        raise NotImplementedError
+
+    async def request_step(self, request, messages, *, stream):
+        if not stream:
+            raise LLMRequestError("timed out", "timeout")
+        yield ModelStreamCompletions(chunk="recovered")
 
 
 async def _return(value):
     return value
 
 
-async def test_complete_response_collects_configured_stream():
-    probe = _CompletionProbe(_config(stream=True))
-    sync_called = False
-    usage = Usage(input_tokens=3, output_tokens=2)
-    resource = Resource(type="image", raw=b"image")
-
-    async def sync_call() -> ModelCompletions:
-        nonlocal sync_called
-        sync_called = True
-        return ModelCompletions(text="sync")
-
-    async def stream_call() -> AsyncGenerator[ModelStreamCompletions, None]:
-        yield ModelStreamCompletions(chunk="hel")
-        yield ModelStreamCompletions(chunk="lo", usage=usage, resources=[resource])
-
-    result = await probe._complete_response(sync_call, stream_call)
-
-    assert result.text == "hello"
-    assert result.usage is usage
-    assert result.resources == [resource]
-    assert sync_called is False
-
-
-async def test_complete_response_falls_back_after_timeout():
-    probe = _CompletionProbe(_config())
-
-    async def sync_call() -> ModelCompletions:
-        raise LLMRequestError("timeout", "timeout")
-
-    async def stream_call() -> AsyncGenerator[ModelStreamCompletions, None]:
-        yield ModelStreamCompletions(chunk="recovered")
-
-    result = await probe._complete_response(sync_call, stream_call)
+async def test_step_falls_back_to_stream_after_timeout():
+    probe = _StepProbe(_config(stream_fallback_on_timeout=True))
+    result = await probe.collect_stream(step(probe, ModelRequest("hi"), [], stream=False))
     assert result.text == "recovered"

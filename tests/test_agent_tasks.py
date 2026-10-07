@@ -18,7 +18,7 @@ from muika.core.memory import MemoryManager, MemoryQuery, StateUpdate
 from muika.core.memory_models import Intention
 from muika.core.state import MuikaState
 from muika.llm import ModelCompletions, ModelConfig, ModelRequest
-from muika.llm._execution import collect_step
+from muika.llm._execution import step as model_step
 from muika.llm._retry import LLMRequestError
 from muika.llm._schema import ModelMessage, ModelStreamCompletions, ToolCall, ToolResult
 from muika.llm.context import ContextCompactor
@@ -138,11 +138,19 @@ async def test_action_context_prepares_once_and_forced_retry_saves_before_sendin
     monkeypatch.setattr(compactor, "compact_messages", compact)
     monkeypatch.setattr(model, "request_step", step)
     generic = AsyncMock(side_effect=AssertionError("Duplicate generic preparation"))
-    monkeypatch.setattr("muika.llm._execution.prepare_request", generic)
+    monkeypatch.setattr("muika.llm._execution.fit_budget", generic)
     request = ModelRequest("inspect")
-    assert (await collect_step(model, request, task.messages, prepare_context=prepare)).succeed
+    assert (
+        await model.collect_stream(
+            model_step(model, request, task.messages, stream=model.config.stream, prepare_context=prepare)
+        )
+    ).succeed
     task.messages.append(ModelMessage(role="assistant", content="One more detail."))
-    assert (await collect_step(model, request, task.messages, prepare_context=prepare)).succeed
+    assert (
+        await model.collect_stream(
+            model_step(model, request, task.messages, stream=model.config.stream, prepare_context=prepare)
+        )
+    ).succeed
     assert preparations == [False, True]
     assert len(requests) == 3 and requests[-1] == compacted
     assert len(task.messages) == 2

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
-    Any,
     AsyncGenerator,
     List,
     Literal,
@@ -21,7 +19,6 @@ from ._schema import (
     ModelMessage,
     ModelRequest,
     ModelStreamCompletions,
-    Usage,
 )
 
 if TYPE_CHECKING:
@@ -141,23 +138,7 @@ class BaseLLM(ABC):
         """
         raise NotImplementedError
 
-    async def _ask_sync(
-        self, messages: list, tools: Any, response_format: Any, total_usage: Usage = Usage()
-    ) -> "ModelCompletions":
-        """
-        同步模型调用
-        """
-        raise NotImplementedError
-
-    def _ask_stream(
-        self, messages: list, tools: Any, response_format: Any, total_usage: Usage = Usage()
-    ) -> AsyncGenerator["ModelStreamCompletions", None]:
-        """
-        流式输出
-        """
-        raise NotImplementedError
-
-    async def _collect_stream(
+    async def collect_stream(
         self,
         stream: AsyncGenerator["ModelStreamCompletions", None],
     ) -> "ModelCompletions":
@@ -193,10 +174,15 @@ class BaseLLM(ABC):
     ) -> ModelCompletions:
         """执行并计量一步；允许任务层在请求及长度重试前持久保存工作上下文。"""
         # 执行层和用量记录依赖插件模块，须在模型注册完成后导入。
-        from ._execution import collect_step
+        from ._execution import step as run_step
         from ._wrapper import save_model_usage
 
-        completion = await collect_step(self, request, messages, prepare_context=prepare_context)
+        try:
+            completion = await self.collect_stream(
+                run_step(self, request, messages, stream=self.config.stream, prepare_context=prepare_context)
+            )
+        except LLMRequestError as exc:
+            completion = ModelCompletions(text=str(exc), succeed=False, stop_reason="error")
         await save_model_usage(self, completion.usage)
         return completion
 
@@ -209,22 +195,7 @@ class BaseLLM(ABC):
         response = run_conversation(self, request, stream=stream)
         if stream:
             return response
-        return await self._collect_stream(response)
-
-    async def _complete_response(
-        self,
-        sync_call: Callable[[], Awaitable["ModelCompletions"]],
-        stream_call: Callable[[], AsyncGenerator["ModelStreamCompletions", None]],
-    ) -> "ModelCompletions":
-        """按模型配置选择完整响应的传输方式。"""
-        if self.config.stream:
-            return await self._collect_stream(stream_call())
-        try:
-            return await sync_call()
-        except LLMRequestError as exc:
-            if exc.kind != "timeout" or not self.config.stream_fallback_on_timeout:
-                raise
-            return await self._collect_stream(stream_call())
+        return await self.collect_stream(response)
 
     @overload
     async def ask(self, request: "ModelRequest", *, stream: Literal[False] = False) -> "ModelCompletions": ...

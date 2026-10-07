@@ -12,9 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from muika.config import get_model_config, mas_config
 from muika.llm import ModelRequest, load_model
-from muika.llm._execution import collect_step, result_message
+from muika.llm._execution import result_message
+from muika.llm._execution import step as model_step
+from muika.llm._retry import LLMRequestError
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
-from muika.llm.context import input_budget, request_tokens
+from muika.llm.context import input_budget, request_tokens, strip_json_fence
 from muika.plugin.func_call.context import ToolContext, get_dependencies
 from muika.utils.logger import logger
 
@@ -323,7 +325,10 @@ class CodeReviewer:
                 raise ReviewError(
                     "Review evidence exceeds the context budget. Split the proposal; no code was executed."
                 )
-            response = await collect_step(model, request, messages)
+            try:
+                response = await model.collect_stream(model_step(model, request, messages, stream=model.config.stream))
+            except LLMRequestError as exc:
+                raise ReviewError(f"Review model request failed: {exc}") from exc
             if not response.succeed:
                 raise ReviewError(response.text)
             if response.stop_reason == "tool_calls" and response.message is not None:
@@ -331,7 +336,7 @@ class CodeReviewer:
                 for call in response.message.tool_calls:
                     messages.append(result_message(call, self.read_tool(call, record)))
             else:
-                return ReviewDecision.model_validate_json(response.require_content())
+                return ReviewDecision.model_validate_json(strip_json_fence(response.require_content()))
         raise ReviewError("Review did not finish within 24 steps. Narrow the operation or supply missing context.")
 
 

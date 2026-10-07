@@ -34,7 +34,7 @@ async def test_non_stream_response_prioritizes_tool_calls(monkeypatch):
     )
     call = AsyncMock(return_value=response)
     monkeypatch.setattr("dashscope.AioGeneration.call", call)
-    result = await provider._collect_stream(provider.request_step(ModelRequest("read"), [], stream=False))
+    result = await provider.collect_stream(provider.request_step(ModelRequest("read"), [], stream=False))
     assert result.message is not None
     assert [tool.id for tool in result.message.tool_calls] == ["call-1", "call-2"]
     assert result.stop_reason == "tool_calls"
@@ -55,7 +55,7 @@ async def test_dashscope_uses_async_sdk_and_normalizes_status(monkeypatch):
     monkeypatch.setattr("dashscope.AioGeneration.call", call)
 
     with pytest.raises(LLMRequestError) as exc_info:
-        await provider._collect_stream(provider.request_step(ModelRequest("test"), [], stream=False))
+        await provider.collect_stream(provider.request_step(ModelRequest("test"), [], stream=False))
 
     assert exc_info.value.kind == "congestion"
     call.assert_awaited_once()

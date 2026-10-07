@@ -1,5 +1,5 @@
-from collections.abc import Sequence
-from typing import Any, AsyncGenerator, List, Literal, Union, overload
+from collections.abc import AsyncGenerator, Sequence
+from typing import Literal, Union, overload
 
 from .. import (
     BaseLLM,
@@ -26,13 +26,18 @@ class Echo(BaseLLM):
     async def request_step(
         self, request: ModelRequest, messages: Sequence[ModelMessage], *, stream: bool
     ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        completion = await self._ask_sync(
-            self._build_messages(request) + [m.model_dump() for m in messages], request.tools, request.format
+        conversation = self._build_messages(request) + [m.model_dump() for m in messages]
+        text = (
+            f"Model: {self.__class__.__name__};\n"
+            f"Messages: {conversation}\n"
+            f"Tools: {request.tools}\n"
+            f"Format: {request.format}\n"
+            f"Input Length: {len(conversation)}\n\n"
         )
         yield ModelStreamCompletions(
-            chunk=completion.text,
-            usage=completion.usage,
-            message=ModelMessage(role="assistant", content=completion.text),
+            chunk=text,
+            usage=Usage(input_tokens=len(conversation)),
+            message=ModelMessage(role="assistant", content=text),
         )
 
     def _build_multi_messages(self, request: ModelRequest) -> dict:
@@ -41,7 +46,7 @@ class Echo(BaseLLM):
 
         此模型加载器支持的多模态类型: `audio` `image` `video` `file`
         """
-        user_content: List[dict] = [{"type": "text", "text": request.prompt}]
+        user_content: list[dict] = [{"type": "text", "text": request.prompt}]
 
         for resource in request.resources:
             if resource.path is None:
@@ -75,7 +80,7 @@ class Echo(BaseLLM):
         if request.system:
             messages.append({"role": "system", "content": request.system})
 
-        for item in request.history:
+        if request.history:
             history = self._normalize_session_turns(request.history)
             for item in history:
                 if item.role == "user":
@@ -98,42 +103,6 @@ class Echo(BaseLLM):
 
         return messages
 
-    async def _ask_sync(
-        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage | None = None
-    ) -> ModelCompletions:
-        """
-        同步模型调用
-        """
-        if total_usage is None:
-            total_usage = Usage()
-        total_usage.input_tokens += len(messages)
-
-        request_info = f"Model: {self.__class__.__name__};\n"
-        request_info += f"Messages: {messages}\n"
-        request_info += f"Tools: {tools}\n"
-        request_info += f"Format: {response_format}\n"
-        request_info += f"Input Length: {len(messages)}\n\n"
-
-        return ModelCompletions(text=request_info, usage=total_usage)
-
-    async def _ask_stream(
-        self, messages: list[dict[str, str]], tools: Any, response_format: Any, total_usage: Usage | None = None
-    ) -> AsyncGenerator[ModelStreamCompletions, None]:
-        """
-        流式输出
-        """
-        if total_usage is None:
-            total_usage = Usage()
-        request_info = f"Model: {self.__class__.__name__};\n"
-        request_info += f"Messages: {messages}\n"
-        request_info += f"Tools: {tools}\n"
-        request_info += f"Format: {response_format}\n"
-        request_info += f"Input Length: {len(messages)}\n\n"
-
-        for line in request_info.splitlines(keepends=True):
-            total_usage.input_tokens += len(line)
-            yield ModelStreamCompletions(chunk=line, usage=total_usage)
-
     @overload
     async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
 
@@ -144,7 +113,7 @@ class Echo(BaseLLM):
 
     async def ask(
         self, request: ModelRequest, *, stream: bool = False
-    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
+    ) -> Union[ModelCompletions, AsyncGenerator["ModelStreamCompletions", None]]:
         """
         模型交互询问
 
@@ -153,12 +122,4 @@ class Echo(BaseLLM):
 
         :return: 模型输出体
         """
-        messages = self._build_messages(request)
-
-        if stream:
-            return self._ask_stream(messages, request.tools, response_format=request.format)
-
-        return await self._complete_response(
-            lambda: self._ask_sync(messages, request.tools, response_format=request.format),
-            lambda: self._ask_stream(messages, request.tools, response_format=request.format),
-        )
+        return await self.run_conversation(request, stream=stream)

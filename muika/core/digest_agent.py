@@ -10,6 +10,7 @@ from muika.config import get_model_config, mas_config
 from muika.database.crud import RssDigestCacheCRUD, TopicHistoryCRUD
 from muika.database.db import get_session
 from muika.llm import ModelRequest, load_model
+from muika.llm.context import strip_json_fence
 from muika.llm.loader import refresh_model
 from muika.utils.logger import logger
 
@@ -149,7 +150,7 @@ class DigestAgent:
 
         try:
             resp = await self.model.ask(request)
-            return TopicFitAssessment.model_validate_json(resp.require_content())
+            return TopicFitAssessment.model_validate_json(strip_json_fence(resp.require_content()))
         except Exception as e:
             logger.warning(f"[DigestAgent] Topic fit evaluation failed: {e}")
             return None

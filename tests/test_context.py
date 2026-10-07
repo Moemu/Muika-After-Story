@@ -7,7 +7,8 @@ import pytest
 
 from muika.core.memory import MemoryManager
 from muika.llm import ModelCompletions, ModelConfig, ModelRequest
-from muika.llm._execution import collect_step, run_conversation
+from muika.llm._execution import run_conversation
+from muika.llm._execution import step as model_step
 from muika.llm._retry import LLMRequestError
 from muika.llm._schema import (
     ModelMessage,
@@ -112,7 +113,12 @@ async def test_context_length_retry_does_not_reexecute_tools(monkeypatch, fake_l
     action = AsyncMock(return_value=ToolResult(text="saved " * 1200))
     monkeypatch.setattr(model, "request_step", step)
     monkeypatch.setattr("muika.llm._execution.execute_call", action)
-    chunks = [chunk async for chunk in run_conversation(model, ModelRequest("Perform once"), stream=False)]
+    chunks = [
+        chunk
+        async for chunk in run_conversation(
+            model, ModelRequest("Perform once", tools=[{"function": {"name": "write_once"}}]), stream=False
+        )
+    ]
     assert chunks[-1].chunk == "Verified."
     assert action.await_count == 1 and len(requests) == 3
     assert requests[-1][0].tool_calls[0].id == "write1"
@@ -132,7 +138,7 @@ async def test_oversized_current_prompt_warns_and_reaches_provider_unchanged(mon
     monkeypatch.setattr(model, "request_step", step)
     request = ModelRequest("当前请求" * 5000)
     with pytest.warns(ContextOverflowWarning):
-        result = await collect_step(model, request, [])
+        result = await model.collect_stream(model_step(model, request, [], stream=model.config.stream))
     assert result.succeed and sent == [request]
     assert sent[0].prompt == "当前请求" * 5000
 
@@ -220,7 +226,9 @@ async def test_summary_failure_does_not_block_fitting_primary_request(
 
     monkeypatch.setattr(model, "request_step", step)
     with pytest.warns(ContextOverflowWarning, match="summary request failed"):
-        result = await collect_step(model, request, [], prepare_context=prepare)
+        result = await model.collect_stream(
+            model_step(model, request, [], stream=model.config.stream, prepare_context=prepare)
+        )
     assert result.succeed and result.text == "I remember your question."
     assert len(sent) == summary_model.call_count == 1
     assert sent[0].prompt == request.prompt and sent[0].history == request.history
@@ -270,7 +278,9 @@ async def test_model_timing_reports_usage_without_prompt_or_reasoning(monkeypatc
 
     try:
         monkeypatch.setattr(model, "request_step", step)
-        assert (await collect_step(model, ModelRequest("private input"), [])).succeed
+        assert (
+            await model.collect_stream(model_step(model, ModelRequest("private input"), [], stream=model.config.stream))
+        ).succeed
     finally:
         logger.remove(debug_sink)
         logger.remove(console_sink)

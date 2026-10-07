@@ -78,6 +78,13 @@ def public_text(text: str) -> str:
     return re.sub(r"<(?:timeout\s*:|target\s*:|enable_god_mode|do_nothing)[^>]*>", "", text, flags=re.I).strip()
 
 
+def strip_json_fence(text: str) -> str:
+    """剥离模型输出首尾的 markdown 代码围栏，返回纯 JSON 文本。"""
+    stripped = text.strip()
+    match = re.fullmatch(r"```[\w-]*\s*\n?(.*?)\n?\s*```", stripped, re.S)
+    return match.group(1) if match else stripped
+
+
 def split_text(text: str, budget: int) -> list[str]:
     """按估算预算分块；预算不足时警告并保留整段原文。"""
     if budget < 64:
@@ -243,10 +250,10 @@ class ContextCompactor:
         return compacted, boundary, summary
 
 
-async def prepare_request(
+async def fit_budget(
     model: BaseLLM, request: ModelRequest, messages: Sequence[ModelMessage], *, force: bool = False
 ) -> tuple[ModelRequest, list[ModelMessage]]:
-    """在所有共享模型执行路径检查预算，按需压缩历史。"""
+    """检查输入预算；超限或强制时压缩历史与消息，使其落入上下文窗口。"""
     budget = input_budget(model.config)
 
     if not force and request_tokens(request, messages) < budget * 0.8:

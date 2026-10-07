@@ -17,6 +17,7 @@ from muika.llm.context import (
     input_budget,
     request_tokens,
     split_text,
+    strip_json_fence,
 )
 from muika.utils.logger import logger
 
@@ -99,7 +100,7 @@ class MemoryReasoner:
                     purpose="memory_query",
                 )
             )
-            query = MemoryQuery.model_validate_json(response.require_content())
+            query = MemoryQuery.model_validate_json(strip_json_fence(response.require_content()))
         except Exception as exc:
             degraded, error = True, str(exc)
             logger.warning(f"[Memory] Query expansion failed: {exc}")
@@ -130,7 +131,7 @@ class MemoryReasoner:
                         purpose="memory_select",
                     )
                 )
-                chosen = set(RecallSelection.model_validate_json(response.require_content()).refs)
+                chosen = set(RecallSelection.model_validate_json(strip_json_fence(response.require_content())).refs)
                 if not chosen <= {hit.ref for hit in candidates}:
                     raise ValueError("Semantic recall returned an unknown source reference")
                 selected.update(chosen)
@@ -183,5 +184,5 @@ class MemoryReasoner:
         request.prompt = fixed + "\nDated experiences:\n" + source_text
         refs &= set(re.findall(r"(?:experience|fact|diary):\d+", request.prompt))
         response = await model.ask(request)
-        result = DreamResult.model_validate_json(response.require_content())
+        result = DreamResult.model_validate_json(strip_json_fence(response.require_content()))
         return await memory.save_dream(day, result, max(item.id for item in material), refs)
