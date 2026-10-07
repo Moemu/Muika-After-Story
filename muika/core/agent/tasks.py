@@ -8,10 +8,11 @@ import math
 import shutil
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -20,10 +21,15 @@ from muika.core.events import AgentTaskEvent, Event
 from muika.core.executor import Executor
 from muika.core.processes import get_process_manager
 from muika.core.state import MuikaState
-from muika.llm import BaseLLM, ModelConfig, ModelRequest
+from muika.llm import ModelConfig, ModelRequest
 from muika.llm._execution import dispatch_call, observation_message, result_message
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
-from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
+from muika.llm.context import (
+    ContextOverflowWarning,
+    input_budget,
+    over_budget,
+    request_tokens,
+)
 from muika.llm.utils.thought_processor import general_processor
 from muika.plugin.func_call import get_function_calls, get_tool_list
 from muika.plugin.func_call.context import tool_context
@@ -32,6 +38,9 @@ from muika.utils.logger import logger
 from .agent import Agent
 from .report import parse_report
 from .task_store import CallRecord, TaskRecord, TaskStore
+
+if TYPE_CHECKING:
+    from muika.llm.context import CompactionModel, ContextCompactor
 
 
 class RecoveryReport(BaseModel):
@@ -53,6 +62,72 @@ def _call_signature(call: ToolCall) -> str:
     except (TypeError, ValueError):
         arguments = call.arguments
     return f"{call.name}:{arguments}"
+
+
+class TaskContextPreparer:
+    """Agent 特调的上下文压缩：压缩后持久化工作视图，任务跨步可继续。
+
+    失败后记录模型与摘要配置，等待明显新增内容或配置变化才重试。
+    """
+
+    def __init__(
+        self,
+        task: TaskRecord,
+        store: TaskStore,
+        compactor: ContextCompactor,
+        failures: dict[str, tuple[ModelConfig, ModelConfig, int]],
+        save: Callable[[TaskRecord], Awaitable[None]],
+    ) -> None:
+        self.task = task
+        self._store = store
+        self._compactor = compactor
+        self._failures = failures
+        self._save = save
+
+    async def __call__(
+        self,
+        model: CompactionModel,
+        request: ModelRequest,
+        messages: Sequence[ModelMessage],
+        *,
+        force: bool = False,
+    ) -> tuple[ModelRequest, list[ModelMessage]]:
+        current = list(messages) if force else self._store.model_messages(self.task)
+        summary_config = self._compactor.model.config
+        budget = input_budget(model.config)
+        tokens = request_tokens(request, current)
+        previous = self._failures.get(self.task.id)
+        if not force and previous is not None:
+            failed_model, failed_summary, retry_tokens = previous
+            if (
+                model.config.model_dump() == failed_model.model_dump()
+                and summary_config.model_dump() == failed_summary.model_dump()
+                and tokens < retry_tokens
+            ):
+                logger.debug(f"[Context] deferred | task={self.task.id[:8]} input={tokens} retry_at={retry_tokens}")
+                if tokens > budget:
+                    warnings.warn(
+                        "The retained action context exceeds context_window", ContextOverflowWarning, stacklevel=2
+                    )
+                return request, current
+
+        revision = self.task.revision
+        compacted, _, _ = await self._compactor.compact_messages(request, current, model.config, force=force)
+        if self.task.revision != revision:
+            return request, current
+        after = request_tokens(request, compacted)
+        if compacted != current:
+            self.task.context_messages, self.task.context_through = compacted, len(self.task.messages)
+            await self._save(self.task)
+            self._failures.pop(self.task.id, None)
+            logger.info(
+                f"[Context] compressed | task={self.task.id[:8]} messages {len(current)}->{len(compacted)} | "
+                f"input {tokens} -> {after}/{budget}"
+            )
+        elif over_budget(tokens, budget):
+            self._failures[self.task.id] = (model.config, summary_config, math.ceil(tokens * 1.2))
+            logger.debug(f"[Context] unchanged | task={self.task.id[:8]} input={tokens} budget={budget}")
+        return request, compacted
 
 
 class AgentTasks:
@@ -313,14 +388,14 @@ class AgentTasks:
                 request = replace(request, tools=[])
             revision = task.revision
             model = self.agent.model
-
-            async def prepare_context(request: ModelRequest, messages: Sequence[ModelMessage], force: bool):
-                return await self._prepare_context(task, model, request, messages, force)
+            preparer = TaskContextPreparer(
+                task, self.store, self.agent.memory_reasoner.compactor, self._compaction_failures, self._save
+            )
 
             started = perf_counter()
             logger.debug(f"[AgentTask] step_start | task={task.id} revision={revision} messages={len(task.messages)}")
             with tool_context(self.state, self.executor, task_id=task.id):
-                completion = await model.step(request, self.store.model_messages(task), prepare_context=prepare_context)
+                completion = await model.step(request, self.store.model_messages(task), prepare_context=preparer)
             logger.debug(
                 f"[AgentTask] step_end | task={task.id} seconds={perf_counter() - started:.3f} "
                 f"status={completion.stop_reason}"
@@ -427,47 +502,6 @@ class AgentTasks:
                 continue
             if await self._finish_report(task, completion.text):
                 return
-
-    async def _prepare_context(
-        self,
-        task: TaskRecord,
-        model: BaseLLM,
-        request: ModelRequest,
-        messages: Sequence[ModelMessage],
-        force: bool,
-    ) -> tuple[ModelRequest, list[ModelMessage]]:
-        """在单一入口压缩并保存工作视图，失败后等待明显新增内容或模型配置变化。"""
-        current = list(messages) if force else self.store.model_messages(task)
-        compactor = self.agent.memory_reasoner.compactor
-        summary_config = compactor.model.config
-        budget = input_budget(model.config)
-        tokens = request_tokens(request, current)
-        previous = self._compaction_failures.get(task.id)
-        if not force and previous is not None:
-            failed_model, failed_summary, retry_tokens = previous
-            if (
-                model.config.model_dump() == failed_model.model_dump()
-                and summary_config.model_dump() == failed_summary.model_dump()
-                and tokens < retry_tokens
-            ):
-                logger.debug(f"[Context] deferred | task={task.id} input_tokens={tokens} retry_at={retry_tokens}")
-                if tokens > budget:
-                    warnings.warn(
-                        "The retained action context exceeds context_window", ContextOverflowWarning, stacklevel=2
-                    )
-                return request, current
-
-        revision = task.revision
-        compacted, _, _ = await compactor.compact_messages(request, current, model.config, force=force)
-        if task.revision != revision:
-            return request, current
-        if compacted != current:
-            task.context_messages, task.context_through = compacted, len(task.messages)
-            await self._save(task)
-            self._compaction_failures.pop(task.id, None)
-        elif tokens >= budget * 0.8:
-            self._compaction_failures[task.id] = (model.config, summary_config, math.ceil(tokens * 1.2))
-        return request, compacted
 
     @staticmethod
     def _complete_interrupted_batch(task: TaskRecord, calls: list[CallRecord]) -> None:

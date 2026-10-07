@@ -1,6 +1,7 @@
 """验证素材留存、日记事务、事实权重和持续状态。"""
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -321,11 +322,12 @@ async def test_context_summary_commits_before_replacing_history(monkeypatch):
     before = list(memory.recent_turns)
     save = memory._save_snapshot
     monkeypatch.setattr(memory, "_save_snapshot", AsyncMock(side_effect=OSError("checkpoint failed")))
+    model = SimpleNamespace(config=config, compactor=compactor)
     with pytest.raises(OSError):
-        await memory.prepare_context(request, config, compactor)
+        await memory.prepare_context(model, request, [])
     assert list(memory.recent_turns) == before and memory.snapshot.working_summary == ""
     monkeypatch.setattr(memory, "_save_snapshot", save)
-    prepared = await memory.prepare_context(request, config, compactor)
+    prepared, _ = await memory.prepare_context(model, request, [])
     assert prepared.prompt == "The current request" and len(prepared.history) < len(before)
     restored = MemoryManager()
     await restored.load()
@@ -339,7 +341,9 @@ async def test_current_request_is_never_silently_truncated():
     request = ModelRequest(prompt="required current input " * 2000)
     config = ModelConfig(provider="_echo", context_window=4096, max_tokens=1024)
     with pytest.warns(ContextOverflowWarning):
-        prepared = await memory.prepare_context(request, config, AsyncMock(spec=ContextCompactor))
+        prepared, _ = await memory.prepare_context(
+            SimpleNamespace(config=config, compactor=AsyncMock(spec=ContextCompactor)), request, []
+        )
     assert prepared is request
     assert request.prompt.endswith("required current input ")
 
@@ -402,8 +406,12 @@ async def test_empty_context_summary_warns_without_changing_saved_history(fake_l
     request = ModelRequest("Keep my current question", history=list(memory.recent_turns))
     compactor = ContextCompactor(fake_llm_factory(response=ModelCompletions(text="")))
     with pytest.warns(ContextOverflowWarning, match="summary was empty"):
-        prepared = await memory.prepare_context(
-            request, ModelConfig(provider="_echo", context_window=8192, max_tokens=1024), compactor
+        prepared, _ = await memory.prepare_context(
+            SimpleNamespace(
+                config=ModelConfig(provider="_echo", context_window=8192, max_tokens=1024), compactor=compactor
+            ),
+            request,
+            [],
         )
     restored = MemoryManager()
     await restored.load()

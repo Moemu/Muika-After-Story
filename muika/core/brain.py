@@ -237,7 +237,7 @@ class MuikaBrain:
         )
 
         try:
-            request = await memory.prepare_context(request, self.model.config, self.compactor)
+            request, _ = await memory.prepare_context(self.model, request, [])
             completions = await self.model.ask(request)
             if not completions.succeed:
                 raise RuntimeError(f"Model call failed: {completions.text}")
@@ -384,7 +384,7 @@ class MuikaBrain:
         )
 
         try:
-            request = await memory.prepare_context(request, self.model.config, self.compactor)
+            request, _ = await memory.prepare_context(self.model, request, [])
             completions = await self.model.ask(request)
             if not completions.succeed:
                 raise RuntimeError(f"Model call failed: {completions.text}")

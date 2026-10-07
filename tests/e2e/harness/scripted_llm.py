@@ -151,7 +151,7 @@ class ScriptedLLM:
         :param prepare_context: 真实的上下文准备函数；提供时按其真实语义先整理上下文
         """
         if prepare_context is not None:
-            request, messages = await prepare_context(request, messages, False)
+            request, messages = await prepare_context(self, request, messages, force=False)
         return self._take(request, messages)
 
     async def ask(self, request: ModelRequest, **_: object) -> ModelCompletions:

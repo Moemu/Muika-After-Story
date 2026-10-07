@@ -1,6 +1,7 @@
 """验证模型预算、完整工具交互压缩和超长重试。"""
 
 from asyncio import CancelledError
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -149,9 +150,10 @@ async def test_model_switch_recompresses_saved_summary(redirect_get_session):
     memory.snapshot.working_summary = "old context " * 3000
     compactor = AsyncMock(spec=ContextCompactor)
     compactor.summarize.return_value = "A shorter source-backed working summary."
-    request = await memory.prepare_context(
-        ModelRequest("new question"), ModelConfig(provider="_echo", context_window=4096, max_tokens=1024), compactor
+    model = SimpleNamespace(
+        config=ModelConfig(provider="_echo", context_window=4096, max_tokens=1024), compactor=compactor
     )
+    request, _ = await memory.prepare_context(model, ModelRequest("new question"), [])
     assert "new question" == request.prompt
     assert memory.snapshot.working_summary == "A shorter source-backed working summary."
 
@@ -217,8 +219,7 @@ async def test_summary_failure_does_not_block_fitting_primary_request(
     compactor = ContextCompactor(summary_model)
     sent = []
 
-    async def prepare(request, messages, force):
-        return await memory.prepare_context(request, model.config, compactor, force=force), list(messages)
+    model.compactor = compactor
 
     async def step(request, messages, *, stream):
         sent.append(request)
@@ -228,7 +229,7 @@ async def test_summary_failure_does_not_block_fitting_primary_request(
     monkeypatch.setattr(model, "request_step", step)
     with pytest.warns(ContextOverflowWarning, match="summary request failed"):
         result = await model.collect_stream(
-            model_step(model, request, [], stream=model.config.stream, prepare_context=prepare)
+            model_step(model, request, [], stream=model.config.stream, prepare_context=memory.prepare_context)
         )
     assert result.succeed and result.text == "I remember your question."
     assert len(sent) == summary_model.call_count == 1
@@ -286,7 +287,7 @@ async def test_model_timing_reports_usage_without_prompt_or_reasoning(monkeypatc
         logger.remove(debug_sink)
         logger.remove(console_sink)
     assert not console
-    assert any("[Context] prepared" in log and "input_after=" in log for log in logs)
+    assert any("[Context] within budget" in log and "budget=" in log for log in logs)
     assert any("[Model] request submitted" in log for log in logs)
     assert any(
         "first_chunk_seconds=" in log and "input_tokens=123 output_tokens=45 cached_tokens=67" in log for log in logs

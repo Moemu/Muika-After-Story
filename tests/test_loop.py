@@ -375,7 +375,7 @@ async def test_chat_and_session_end_keep_background_task(engine):
 
     async def step(request, messages, *, prepare_context=None):
         if prepare_context is not None:
-            request, messages = await prepare_context(request, messages, False)
+            request, messages = await prepare_context(engine.agent.model, request, messages, force=False)
         entered.set()
         await release.wait()
         return ModelCompletions(text='<agent_result status="completed">Verified.</agent_result>')

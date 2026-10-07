@@ -70,6 +70,20 @@ async def _timed_model_step(
         )
 
 
+async def _apply_preparer(
+    model: BaseLLM,
+    preparer: ContextPreparer | None,
+    request: ModelRequest,
+    messages: Sequence[ModelMessage],
+    *,
+    force: bool,
+) -> tuple[ModelRequest, list[ModelMessage]]:
+    """应用注入的上下文压缩器；未注入时使用内置共享地板 fit_budget。"""
+    if preparer is not None:
+        return await preparer(model, request, messages, force=force)
+    return await fit_budget(model, request, messages, force=force)
+
+
 async def step(
     model: BaseLLM,
     request: ModelRequest,
@@ -78,23 +92,9 @@ async def step(
     stream: bool,
     prepare_context: ContextPreparer | None = None,
 ) -> AsyncGenerator[ModelStreamCompletions, None]:
-    """执行单步模型请求：预算内准备上下文；超长压缩重试一次，非流式超时降级流式一次。"""
+    """执行单步模型请求：预算内压缩上下文；超长压缩重试一次，非流式超时降级流式一次。"""
 
-    async def prepare(request: ModelRequest, messages: Sequence[ModelMessage], force: bool):
-        started = perf_counter()
-        before = request_tokens(request, messages)
-        prepared = (
-            await prepare_context(request, messages, force)
-            if prepare_context is not None
-            else await fit_budget(model, request, messages, force=force)
-        )
-        logger.debug(
-            f"[Context] prepared | seconds={perf_counter() - started:.3f} force={force} "
-            f"input_before={before} input_after={request_tokens(*prepared)}"
-        )
-        return prepared
-
-    request, current = await prepare(request, messages, False)
+    request, current = await _apply_preparer(model, prepare_context, request, messages, force=False)
     while True:
         received = False
         try:
@@ -106,7 +106,7 @@ async def step(
             if received:
                 raise
             if exc.kind == "context_length":
-                smaller, compacted = await prepare(request, current, True)
+                smaller, compacted = await _apply_preparer(model, prepare_context, request, current, force=True)
                 if request_tokens(smaller, compacted) >= request_tokens(request, current):
                     raise
                 request, current = smaller, compacted

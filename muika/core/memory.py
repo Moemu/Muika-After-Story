@@ -7,10 +7,11 @@ import json
 import re
 import warnings
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select
@@ -33,17 +34,21 @@ from muika.database.orm_models import (
     MemoryRecordORM,
     MemoryRuntimeORM,
 )
-from muika.llm._config import ModelConfig
-from muika.llm._schema import ModelRequest, ToolResult
+from muika.llm._schema import ModelMessage, ModelRequest, ToolResult
 from muika.llm.context import (
-    ContextCompactor,
+    COMPACT_TARGET,
     ContextOverflowWarning,
     estimate_tokens,
     input_budget,
+    over_budget,
     public_text,
     request_tokens,
 )
 from muika.models import Resource
+from muika.utils.logger import logger
+
+if TYPE_CHECKING:
+    from muika.llm.context import CompactionModel
 
 from .memory_models import (
     Diary,
@@ -732,19 +737,25 @@ class MemoryManager:
         return page
 
     async def prepare_context(
-        self, request: ModelRequest, config: ModelConfig, compactor: ContextCompactor, *, force: bool = False
-    ) -> ModelRequest:
+        self,
+        model: "CompactionModel",
+        request: ModelRequest,
+        messages: Sequence[ModelMessage],
+        *,
+        force: bool = False,
+    ) -> tuple[ModelRequest, list[ModelMessage]]:
         """按模型预算整理工作历史，保存摘要与覆盖范围后才替换内存视图。
 
-        先注入已有摘要；输入达到预算的 80% 时，按完整用户回合划分新旧历史，
-        将旧摘要与旧回合一起压缩，目标是让整个请求回落到预算的 60%。
-        预算不足或摘要不可用时发出警告并保留历史，SQLite 原文始终保留。
+        先注入已有摘要；输入越过压缩线（force 时从 80% 降为压缩目标水位）时，
+        按完整用户回合划分新旧历史，将旧摘要与旧回合一起压缩，目标是让整个
+        请求回落到预算的 60%。预算不足或摘要不可用时发出警告并保留历史，
+        SQLite 原文始终保留。
 
+        :param model: 目标模型，提供预算配置与压缩器。
         :param request: 含当前输入、人格提示、检索内容及近期历史的请求。
-        :param config: 当前目标模型的上下文、输出和思考预算配置。
-        :param compactor: 使用摘要模型分块生成工作摘要的组件。
-        :param force: 将尝试压缩的触发线从 80% 降为 60%。
-        :return: 注入工作摘要并保留近期历史的请求；未能压缩时保留完整历史。
+        :param messages: 在途工具协议消息；对话压缩不触碰，原样返回。
+        :param force: 将尝试压缩的触发线降为压缩目标水位。
+        :return: 注入工作摘要并保留近期历史的请求，与未改动的在途消息。
         :raises RuntimeError: 摘要期间切换了会话，不能提交旧会话的覆盖范围。
         """
         async with self._context_lock:
@@ -754,9 +765,11 @@ class MemoryManager:
                 request = replace(
                     request, system=base_system + "\n[Working context summary]\n" + self.snapshot.working_summary
                 )
-            budget = input_budget(config)
-            if request_tokens(request) < budget * (0.6 if force else 0.8):
-                return request
+            budget = input_budget(model.config)
+            tokens = request_tokens(request)
+            if not over_budget(tokens, budget, force=force):
+                logger.debug(f"[Context] within budget | input={tokens} budget={budget}")
+                return request, list(messages)
             history = list(request.history)
             # 保留完整的最近用户回合，不在 assistant 中间划分摘要范围。
             boundaries = [i for i, turn in enumerate(history) if turn.role == "user" and i > 0]
@@ -767,7 +780,7 @@ class MemoryManager:
                 if candidate < boundary:
                     continue
                 retained = replace(request, system=base_system, history=history[candidate:])
-                if request_tokens(retained) + 192 < budget * 0.6:
+                if request_tokens(retained) + 192 < budget * COMPACT_TARGET:
                     boundary = candidate
                     break
             old, recent = history[:boundary], history[boundary:]
@@ -776,16 +789,16 @@ class MemoryManager:
                     warnings.warn(
                         "The current input and persona exceed context_window", ContextOverflowWarning, stacklevel=2
                     )
-                return request
+                return request, list(messages)
             base = replace(request, system=base_system, history=recent)
-            allowance = int(budget * 0.6) - request_tokens(base) - 64
+            allowance = int(budget * COMPACT_TARGET) - request_tokens(base) - 64
             if allowance < 128:
                 warnings.warn(
                     "The current input leaves no room for a useful history summary; keeping history",
                     ContextOverflowWarning,
                     stacklevel=2,
                 )
-                return request
+                return request, list(messages)
             transcript = (
                 self.snapshot.working_summary
                 + "\n"
@@ -794,9 +807,13 @@ class MemoryManager:
                     for turn in old
                 )
             )
-            summary = await compactor.summarize(transcript, min(4096, allowance), available_tokens=allowance)
+            if model.compactor is None:
+                logger.debug(f"[Context] kept | compactor unavailable | input={tokens} budget={budget}")
+                return request, list(messages)
+            summary = await model.compactor.summarize(transcript, min(4096, allowance), available_tokens=allowance)
             if summary is None:
-                return request
+                logger.debug(f"[Context] kept | summary unavailable | input={tokens} budget={budget}")
+                return request, list(messages)
             through = old[-1].id if old else self.snapshot.summary_through
             async with self._lock:
                 if session_id != self.session.session_id:
@@ -807,4 +824,9 @@ class MemoryManager:
                     await self._save_snapshot(db, snapshot)
                 self.snapshot = snapshot
                 self.recent_turns = deque(turn for turn in self.recent_turns if turn.id > through)
-            return replace(base, system=base_system + "\n[Working context summary]\n" + summary)
+            compressed = replace(base, system=base_system + "\n[Working context summary]\n" + summary)
+            logger.info(
+                f"[Context] compressed | turns {len(old)} -> summary {estimate_tokens(summary)}tok "
+                f"coverage=experience:{through} | input {tokens} -> {request_tokens(compressed)}/{budget}"
+            )
+            return compressed, list(messages)

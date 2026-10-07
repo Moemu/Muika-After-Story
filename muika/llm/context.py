@@ -6,11 +6,9 @@ import json
 import math
 import re
 import warnings
-from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from hashlib import sha256
 from time import perf_counter
-from typing import TYPE_CHECKING, Sequence, TypeAlias
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 from pydantic import TypeAdapter
 
@@ -24,9 +22,39 @@ if TYPE_CHECKING:
     from ._base import BaseLLM
 
 
-ContextPreparer: TypeAlias = Callable[
-    [ModelRequest, Sequence[ModelMessage], bool], Awaitable[tuple[ModelRequest, list[ModelMessage]]]
-]
+COMPACT_TRIGGER = 0.8
+"""输入预算的压缩触发水位；force 时降为 COMPACT_TARGET。"""
+
+COMPACT_TARGET = 0.6
+"""压缩目标水位：压缩后输入应回落到预算的这一比例。"""
+
+
+def over_budget(tokens: int, budget: int, *, force: bool = False) -> bool:
+    """判定输入是否越过压缩触发线。"""
+    return tokens >= budget * (COMPACT_TARGET if force else COMPACT_TRIGGER)
+
+
+class CompactionModel(Protocol):
+    """上下文压缩所需的模型视图：预算配置与压缩器。"""
+
+    @property
+    def config(self) -> ModelConfig: ...
+
+    @property
+    def compactor(self) -> "ContextCompactor | None": ...
+
+
+class ContextPreparer(Protocol):
+    """把请求与在途消息压缩进输入预算的注入点。
+
+    实现：fit_budget（共享地板，未注入时的默认）、
+    MemoryManager.prepare_context（对话特调：滚动工作摘要、完整回合边界、持久化与召回指针）、
+    TaskContextPreparer（Agent 特调：持久化工作视图，任务跨步可继续）。
+    """
+
+    async def __call__(
+        self, model: CompactionModel, request: ModelRequest, messages: Sequence[ModelMessage], *, force: bool = False
+    ) -> tuple[ModelRequest, list[ModelMessage]]: ...
 
 
 class ContextOverflowWarning(RuntimeWarning):
@@ -251,46 +279,31 @@ class ContextCompactor:
 
 
 async def fit_budget(
-    model: BaseLLM, request: ModelRequest, messages: Sequence[ModelMessage], *, force: bool = False
+    model: CompactionModel, request: ModelRequest, messages: Sequence[ModelMessage], *, force: bool = False
 ) -> tuple[ModelRequest, list[ModelMessage]]:
-    """检查输入预算；超限或强制时压缩历史与消息，使其落入上下文窗口。"""
-    budget = input_budget(model.config)
+    """共享地板：输入越过压缩线时压缩在途工具消息，使其落入预算。
 
-    if not force and request_tokens(request, messages) < budget * 0.8:
+    对话历史的压缩是对话变体（MemoryManager.prepare_context）的职责，这里只处理协议消息；
+    裸请求超窗时依赖 provider 拒绝后的 force 重试与告警。
+    """
+    budget = input_budget(model.config)
+    tokens = request_tokens(request, messages)
+    if not force and not over_budget(tokens, budget):
+        logger.debug(f"[Context] within budget | input={tokens} budget={budget}")
         return request, list(messages)
 
-    # 尝试压缩上下文
-    if model.compactor is not None and request.history:
-        history = list(request.history)
-        keep = min(4, len(history))
-        while keep > 0 and request_tokens(replace(request, history=history[-keep:]), messages) > budget * 0.55:
-            keep -= 1
-        old = history[:-keep] if keep else history
-        recent = history[-keep:] if keep else []
-        if old:
-            allowance = int(budget * 0.6) - request_tokens(replace(request, history=recent), messages) - 64
-            if allowance >= 128:
-                summary = await model.compactor.summarize(
-                    "\n".join(f"[{t.role}] {public_text(t.content) if t.role != 'user' else t.content}" for t in old),
-                    min(4096, allowance),
-                    available_tokens=allowance,
-                )
-                if summary is not None:
-                    source = model.compactor.save_source(
-                        "\n".join(
-                            f"[experience:{turn.id} | {turn.timestamp.isoformat()} | {turn.role}] "
-                            f"{public_text(turn.content)}"
-                            for turn in old
-                        )
-                    )
-                    summary += f"\n[Original context: {source}]"
-                    request = replace(
-                        request, history=recent, system=(request.system or "") + "\n[Earlier context]\n" + summary
-                    )
     current = list(messages)
     if model.compactor is not None and current:
         current, _, _ = await model.compactor.compact_messages(request, current, model.config, force=force)
-    if request_tokens(request, current) > budget:
+    after = request_tokens(request, current)
+    if after < tokens or len(current) != len(messages):
+        logger.info(
+            f"[Context] compressed | tool messages {len(messages)}->{len(current)} | "
+            f"input {tokens} -> {after}/{budget}"
+        )
+    else:
+        logger.debug(f"[Context] unchanged | input={after} budget={budget}")
+    if after > budget:
         warnings.warn(
             "The request exceeds context_window; sending its complete input", ContextOverflowWarning, stacklevel=2
         )

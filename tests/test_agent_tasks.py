@@ -12,7 +12,7 @@ import pytest
 
 from muika.config import mas_config
 from muika.core.agent.task_store import CallRecord, TaskRecord
-from muika.core.agent.tasks import AgentTasks
+from muika.core.agent.tasks import AgentTasks, TaskContextPreparer
 from muika.core.events import AgentTaskEvent
 from muika.core.memory import MemoryManager, MemoryQuery, StateUpdate
 from muika.core.memory_models import Intention
@@ -50,7 +50,7 @@ class StepModel:
 
     async def step(self, request, messages, *, prepare_context=None):
         if prepare_context is not None:
-            request, messages = await prepare_context(request, messages, False)
+            request, messages = await prepare_context(self, request, messages, force=False)
         self.requests.append((request, [m.model_copy(deep=True) for m in messages]))
         response = self.script.popleft()
         return await response(request, messages) if callable(response) else response
@@ -93,16 +93,24 @@ async def test_failed_compaction_waits_for_growth_or_changed_model(factory, monk
     monkeypatch.setattr(compactor, "compact_messages", compact)
     request = ModelRequest("inspect")
 
-    await manager._prepare_context(task, model, request, task.messages, False)
+    await TaskContextPreparer(task, manager.store, compactor, manager._compaction_failures, manager._save)(
+        model, request, task.messages
+    )
     task.messages.append(ModelMessage(role="assistant", content="Read another nearby line."))
-    await manager._prepare_context(task, model, request, task.messages, False)
+    await TaskContextPreparer(task, manager.store, compactor, manager._compaction_failures, manager._save)(
+        model, request, task.messages
+    )
     assert compact.await_count == 1
 
     task.messages.append(ModelMessage(role="user", content="new evidence " * 500))
-    await manager._prepare_context(task, model, request, task.messages, False)
+    await TaskContextPreparer(task, manager.store, compactor, manager._compaction_failures, manager._save)(
+        model, request, task.messages
+    )
     assert compact.await_count == 2
     model.config = model.config.model_copy(update={"context_window": 16000})
-    await manager._prepare_context(task, model, request, task.messages, False)
+    await TaskContextPreparer(task, manager.store, compactor, manager._compaction_failures, manager._save)(
+        model, request, task.messages
+    )
     assert compact.await_count == 3
 
 
@@ -132,8 +140,7 @@ async def test_action_context_prepares_once_and_forced_retry_saves_before_sendin
             assert saved.context_through == len(task.messages)
         yield ModelStreamCompletions(chunk="checked")
 
-    async def prepare(request, messages, force):
-        return await manager._prepare_context(task, model, request, messages, force)
+    prepare = TaskContextPreparer(task, manager.store, compactor, manager._compaction_failures, manager._save)
 
     monkeypatch.setattr(compactor, "compact_messages", compact)
     monkeypatch.setattr(model, "request_step", step)
