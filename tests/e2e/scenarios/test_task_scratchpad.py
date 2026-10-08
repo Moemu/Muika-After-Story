@@ -27,6 +27,75 @@ def _report(summary: str, verification: str) -> str:
     )
 
 
+@pytest.mark.parametrize("directory", ["memory_resources", "context_sources"])
+async def test_memory_files_resist_general_file_writes(core_app_factory, recorder, monkeypatch, tmp_path, directory):
+    """普通文件工具可读记忆，但不能改写其持久文件，任务临时文件仍可写入。"""
+    monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
+    monkeypatch.setattr(mas_config, "action_permission", "write")
+    target = mas_config.data_dir / directory / "nested" / "source.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = "Remember our first conversation."
+    target.write_text(original, encoding="utf-8")
+    new_target = target.parent / "new.txt"
+    scratch = mas_config.scratch_dir / "memory-check.txt"
+    operations = [
+        ("read_file", {"path": str(target)}),
+        ("write_file", {"path": str(target), "content": "replacement"}),
+        (
+            "edit_file",
+            {"path": str(target), "operation": "replace", "old_string": original, "new_string": "replacement"},
+        ),
+        ("delete_file", {"path": str(target)}),
+        ("write_file", {"path": str(new_target), "content": "new memory"}),
+        ("write_file", {"path": str(scratch), "content": "temporary notes"}),
+    ]
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(
+                when=lambda req: "[User]" in req.prompt,
+                name="persona_delegate",
+                text="我去确认一下。<agent>检查记忆文件和临时笔记的访问边界。</agent>",
+            ),
+            ScriptedTurn(
+                when=_is_agent_request,
+                name="agent_file_checks",
+                text="",
+                tool_calls=[
+                    ToolCall(id=f"memory-check-{index}", name=name, arguments=json.dumps(arguments))
+                    for index, (name, arguments) in enumerate(operations)
+                ],
+            ),
+            ScriptedTurn(
+                when=_is_agent_request,
+                name="agent_report",
+                text=_report("Memory files stayed intact; temporary notes were written.", "Checked file access."),
+            ),
+            ScriptedTurn(
+                when=lambda req: "[Action result]" in req.prompt,
+                name="persona_confirm",
+                text="记忆还好好的，临时笔记也写好了。",
+            ),
+        ]
+    )
+    await app.start()
+    await app.user_says("检查一下记忆文件的访问边界。")
+    assert_clean_visible(await app.next_reply())
+    assert_clean_visible(await app.next_reply(timeout=20))
+    await app.wait_processed("agent_task")
+
+    calls = [json.loads(row["payload"]) for row in app.db_query("SELECT payload FROM agent_call ORDER BY id")]
+    assert len(calls) == len(operations)
+    results = {call["call"]["id"]: call["result"]["text"] for call in calls}
+    assert original in results["memory-check-0"]
+    assert all("Access denied" in results[f"memory-check-{index}"] for index in range(1, 5))
+    assert "File written successfully" in results["memory-check-5"]
+    assert target.read_text(encoding="utf-8") == original
+    assert not new_target.exists()
+    assert scratch.read_text(encoding="utf-8") == "temporary notes"
+    assert app.scripted.pending_turns == 0
+    recorder.record("memory_files_preserved", directory=directory, writes_denied=4, scratch_written=True)
+
+
 async def test_repeated_failure_guides_and_data_root_blocks(core_app_factory, recorder, monkeypatch, tmp_path):
     """对 data 根的散落写入连续失败两次后，熔断引导必须出现在模型可见的对话历史中。"""
     # fs_allowed_paths 覆盖 tmp_path 使 data 目录可达；拦截来自路径保护而非工具禁用

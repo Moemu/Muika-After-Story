@@ -72,6 +72,8 @@ def is_protected_path(resolved: Path) -> bool:
             "restart.json",
             "agent_tasks",
             "agent_processes",
+            "memory_resources",
+            "context_sources",
             "muika.db",
             "user_agreement.json",
         )
