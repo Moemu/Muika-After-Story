@@ -146,7 +146,7 @@ async def test_ready_proposal_keeps_chat_and_code_active_until_apply(core_worksp
     monkeypatch.setattr(manager, "_audit_change", AsyncMock(return_value=None))
     await manager.prepare(patch_id)
     assert manager.load(patch_id)["status"] == "ready"
-    assert approved_review.await_count == 2
+    assert approved_review.await_count == 1
     assert not (root / "muika/core/new.py").exists()
     assert not proposals_module.is_core_maintenance_active()
     await manager.apply(patch_id)

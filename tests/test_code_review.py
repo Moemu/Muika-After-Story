@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -20,7 +19,7 @@ from muika.core.executor import Executor
 from muika.core.state import MuikaState
 from muika.llm import ModelConfig
 from muika.llm._base import BaseLLM
-from muika.llm._schema import ModelMessage, ModelStreamCompletions, ToolCall
+from muika.llm._schema import ModelMessage, ModelStreamCompletions
 from muika.plugin.func_call.context import tool_context
 
 
@@ -144,27 +143,6 @@ async def test_self_modification_execution_requires_structured_tools(monkeypatch
         reviewer.decide(reviewer.records()[0].id, True)
 
 
-async def test_review_tools_cannot_dispatch_an_execution_tool(approved_review):
-    reviewer = CodeReviewer()
-    record = await reviewer.authorize("execution", {"command": "read"})
-    call = ToolCall(id="bad", name="execute_python", arguments=json.dumps({"code": "raise RuntimeError()"}))
-    with pytest.raises(ReviewError, match="Unknown review tool"):
-        reviewer.read_tool(call, record)
-
-
-async def test_review_read_versions_expire_after_dependency_changes(tmp_path, monkeypatch, approved_review):
-    monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
-    path = tmp_path / "caller.py"
-    path.write_text("use(value)", encoding="utf-8")
-    reviewer = CodeReviewer()
-    record = await reviewer.authorize("execution", {"command": "read"})
-    reviewer.read_tool(ToolCall(id="read", name="review_read", arguments=json.dumps({"path": str(path)})), record)
-    reviewer.check(record)
-    path.write_text("use(other)", encoding="utf-8")
-    with pytest.raises(ReviewError, match="files changed"):
-        reviewer.check(record)
-
-
 async def test_player_can_revoke_an_approval_while_validation_runs(approved_review):
     reviewer = CodeReviewer()
     approved = await reviewer.authorize("plugin", {"after": "value = 1"})
@@ -203,24 +181,11 @@ async def test_deleted_file_does_not_block_later_review(tmp_path, monkeypatch, a
         await _filesystem.read_file(str(path))
         await _filesystem.delete_file(str(path))
         assert not path.exists()
-        record = await reviewer.authorize("execution", {"command": "print(1)"})
+        record = await reviewer.authorize("execution", {"command": "print(1)"}, files={str(path): file_hash(path)})
         reviewer.check(record)
         path.write_text("new content", encoding="utf-8")
         with pytest.raises(ReviewError, match="files changed"):
             reviewer.check(record)
-
-
-@pytest.mark.parametrize("tool", ["review_read", "review_search"])
-async def test_reviewer_can_inspect_adapter_source_without_filesystem_grant(monkeypatch, approved_review, tool):
-    monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
-    source = Path(__file__).resolve().parents[1] / "muika_bot" / "__init__.py"
-    reviewer = CodeReviewer()
-    record = await reviewer.authorize("core", {"path": "muika_bot/__init__.py"})
-    result = reviewer.read_tool(
-        ToolCall(id="adapter", name=tool, arguments=json.dumps({"path": str(source), "query": "import"})), record
-    )
-    assert str(source) in result.text
-    assert record.files[str(source)] == file_hash(source)
 
 
 async def test_assess_tolerates_markdown_fenced_json(monkeypatch):
@@ -247,6 +212,7 @@ async def test_assess_tolerates_markdown_fenced_json(monkeypatch):
     model = FenceModel(f"```json\n{body}\n```")
     monkeypatch.setattr("muika.core.code_review.get_model_config", lambda name: model.config)
     monkeypatch.setattr("muika.core.code_review.load_model", lambda config: model)
+    monkeypatch.setattr("muika.llm._wrapper.save_model_usage", AsyncMock())
     record = ReviewRecord(
         id="0" * 64,
         kind="execution",

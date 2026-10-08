@@ -42,10 +42,10 @@ async def _approve(review_id: str, muika: Muika) -> str:
         if record.owner:
             instruction = (
                 f"Continue prepare_core_change(patch_id={record.payload['patch_id']!r}); do not create a new proposal."
-                if record.kind in {"core", "core_validation"}
+                if record.kind == "core"
                 else ""
             )
-            await muika.agent_tasks.resume_review(record.owner, record.id, instruction)
+            await muika.agent_tasks.record_review_decision(record.owner, record.id, instruction)
             return "已批准这次操作。原任务将继续；内容发生变化时需要重新审查。"
         return "已批准这次操作。请再次执行原命令，内容发生变化时需要重新审查。"
     except (OSError, ValueError) as exc:
@@ -53,10 +53,12 @@ async def _approve(review_id: str, muika: Muika) -> str:
 
 
 @review_cmd.assign("deny")
-async def _deny(review_id: str) -> str:
+async def _deny(review_id: str, muika: Muika) -> str:
     """拒绝尚未执行的具体操作。"""
     try:
-        get_code_reviewer().decide(review_id, False)
+        record = get_code_reviewer().decide(review_id, False)
+        if record.owner:
+            await muika.agent_tasks.record_review_decision(record.owner, record.id)
         return "已拒绝这次操作。"
     except (OSError, ValueError) as exc:
         return f"无法拒绝：{exc}"

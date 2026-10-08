@@ -114,7 +114,7 @@ async def _start(command: list[str], timeout: float, yield_time: float, cwd: str
 
 @on_function_call(
     "Run Python in Muika's interpreter with UTF-8 output. A running result is not completion. "
-    "Use wait_process to continue waiting. Every execution requires code review within ACTION_PERMISSION.",
+    "Use wait_process to continue waiting. Every execution requires action approval within ACTION_PERMISSION.",
     params=ExecutePythonParams,
 )
 async def execute_python(
@@ -133,7 +133,7 @@ class ExecuteShellParams(ExecutionParams):
 
 @on_function_call(
     "Run a shell command and return a process ID, exit status and output. "
-    "Use wait_process for running work. Every execution requires code review within ACTION_PERMISSION.",
+    "Use wait_process for running work. Every execution requires action approval within ACTION_PERMISSION.",
     params=ExecuteShellParams,
 )
 async def execute_shell(

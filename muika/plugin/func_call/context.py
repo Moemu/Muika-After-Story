@@ -26,6 +26,7 @@ class ToolContext:
     file_versions: dict[str, str] = field(default_factory=dict)
     execute_tool: Callable[[ToolCall], Awaitable[ToolResult]] | None = None
     review_context: str = ""
+    review_id: str | None = None
     is_current: Callable[[], bool] | None = None
 
 

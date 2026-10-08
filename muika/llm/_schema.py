@@ -49,6 +49,7 @@ class ToolResult(BaseModel):
 
     text: str
     is_error: bool = False
+    review_id: str | None = None
     resources: list[MediaReference] = Field(default_factory=list)
 
 

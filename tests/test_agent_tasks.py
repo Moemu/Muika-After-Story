@@ -13,6 +13,7 @@ import pytest
 from muika.config import mas_config
 from muika.core.agent.task_store import CallRecord, TaskRecord
 from muika.core.agent.tasks import AgentTasks, TaskContextPreparer
+from muika.core.code_review import ReviewRecord, get_code_reviewer
 from muika.core.events import AgentTaskEvent
 from muika.core.memory import MemoryManager, MemoryQuery, StateUpdate
 from muika.core.memory_models import Intention
@@ -460,7 +461,22 @@ async def test_review_resume_delivers_each_approval_request(factory, delivered):
     if delivered:
         await manager.delivered(first)
     revision = task.revision
-    await manager.resume_review(task.id, "source-review")
+    review_id = "1" * 64
+    get_code_reviewer().save(
+        ReviewRecord(
+            id=review_id,
+            kind="execution",
+            payload={},
+            owner=task.id,
+            context=json.dumps({"revision": task.revision}),
+            permission=mas_config.action_permission,
+            allowed_paths=list(mas_config.fs_allowed_paths),
+            status="approved",
+            human=True,
+        )
+    )
+    task.pending_review_id = review_id
+    await manager.record_review_decision(task.id, review_id)
     assert task.revision == revision
     await manager._run_task(task)
     assert not manager.is_current_event(first)

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field, ValidationError
 
 from muika.config import mas_config
+from muika.core.code_review import get_code_reviewer
 from muika.core.events import AgentTaskEvent, Event
 from muika.core.executor import Executor
 from muika.core.processes import get_process_manager
@@ -36,7 +37,7 @@ from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
 
 from .agent import Agent
-from .report import parse_report
+from .report import AgentReport, parse_report
 from .task_store import CallRecord, TaskRecord, TaskStore
 
 if TYPE_CHECKING:
@@ -241,6 +242,7 @@ class AgentTasks:
             task = self.tasks[task_id]
             self._compaction_failures.pop(task_id, None)
             task.revision += 1
+            task.pending_review_id = None
             task.report = None
             task.report_error = None
             task.error = None
@@ -427,7 +429,7 @@ class AgentTasks:
                 call_names = ", ".join(call.name for call in message.tool_calls)
                 task.progress_summary = f"Executing: {call_names}"
                 observations = []
-                for call in message.tool_calls:
+                for call_index, call in enumerate(message.tool_calls):
                     if task.revision != revision or task.cancel_requested or self._persona_owner:
                         result = ToolResult(
                             text="Not executed: task instructions or execution ownership changed.", is_error=True
@@ -445,6 +447,27 @@ class AgentTasks:
                         await self._save(task)
                         continue
                     result = await self._record_call(task, call, message_index)
+                    if result.review_id and result.is_error:
+                        for skipped in message.tool_calls[call_index + 1 :]:
+                            skipped_result = ToolResult(
+                                text=f"Not executed: preceding action was blocked by approval {result.review_id}.",
+                                is_error=True,
+                            )
+                            skipped_record = CallRecord(
+                                task_id=task.id,
+                                call=skipped,
+                                message_index=message_index,
+                                status="completed",
+                                result=skipped_result,
+                                completed_at=datetime.now(timezone.utc),
+                            )
+                            self.store.archive_result(skipped_record, skipped_result)
+                            task.messages.append(result_message(skipped, skipped_result))
+                            await self._save(task, skipped_record)
+                        if task.revision != revision:
+                            break
+                        await self._notify(task)
+                        return
                     if result.is_error:
                         err_key = _call_signature(call)
                         consecutive_errors[err_key] = consecutive_errors.get(err_key, 0) + 1
@@ -543,6 +566,12 @@ class AgentTasks:
             await self._save(task, record)
 
         async def action() -> ToolResult:
+            if task.pending_review_id:
+                return ToolResult(
+                    text=f"Not executed: task is waiting for action approval {task.pending_review_id}.",
+                    is_error=True,
+                    review_id=task.pending_review_id,
+                )
             if (
                 task.revision != revision
                 or task.cancel_requested
@@ -581,9 +610,29 @@ class AgentTasks:
         async with self._lock:
             task.messages.append(result_message(call, result))
             task.resources.extend(ref for ref in result.resources if ref not in task.resources)
+            if result.review_id and task.revision == revision:
+                review = get_code_reviewer().load(result.review_id)
+                if result.is_error:
+                    task.pending_review_id = review.id
+                    task.status = "blocked"
+                    task.report = None
+                    task.error = (
+                        f"Action approval {review.id}: {review.status}. {review.error} "
+                        f"Work remains: {task.instruction}"
+                    )
             record.status = "completed"
             record.completed_at = datetime.now(timezone.utc)
             await self._save(task, record)
+        if result.review_id and task.pending_review_id == result.review_id:
+            review = get_code_reviewer().load(result.review_id)
+            if review.human and review.status in {"approved", "denied"}:
+                instruction = (
+                    f"Continue prepare_core_change(patch_id={review.payload['patch_id']!r}); "
+                    "do not create a new proposal."
+                    if review.kind == "core"
+                    else ""
+                )
+                await self.record_review_decision(task.id, review.id, instruction)
         await self._remember_call(record)
         return result
 
@@ -778,15 +827,23 @@ class AgentTasks:
         message_index = len(task.messages)
         task.messages.append(ModelMessage(role="assistant", content="Main personality action.", tool_calls=[call]))
         async with self.agent.action_lock:
-            return await self._record_call(task, call, message_index)
+            result = await self._record_call(task, call, message_index)
+        await self._notify(task)
+        return result
 
     async def release_persona(self) -> None:
         for task in self.tasks.values():
             if task.handoff:
                 task.handoff = False
-                if task.status == "blocked" and not task.cancel_requested:
+                if (
+                    task.status == "blocked"
+                    and not task.cancel_requested
+                    and task.pending_review_id is None
+                    and task.report is None
+                ):
                     task.status = "recovering"
                 await self._save(task)
+                await self._notify(task)
         self._persona_owner = False
         self._wake.set()
 
@@ -814,28 +871,60 @@ class AgentTasks:
         for task in self.tasks.values():
             await get_process_manager().stop_owner(task.id)
 
-    async def resume_review(self, task_id: str, review_id: str, instruction: str = "") -> None:
-        """让原任务继续处理已批准的具体请求，不改变授权对应的任务版本。"""
+    async def record_review_decision(self, task_id: str, review_id: str, instruction: str = "") -> None:
+        """记录玩家对当前请求的决定，批准恢复动作，拒绝通知主人格。"""
         await self.initialize()
         async with self._lock:
             task = self.tasks.get(task_id)
-            if task is None or task.cancel_requested or task.status == "cancelled":
+            record = get_code_reviewer().load(review_id)
+            if (
+                task is None
+                or task.cancel_requested
+                or task.status == "cancelled"
+                or task.status != "blocked"
+                or task.pending_review_id != review_id
+                or record.owner != task_id
+                or not record.human
+                or record.status not in {"approved", "denied"}
+            ):
                 return
-            task.messages.append(
-                ModelMessage(
-                    role="user",
-                    content=(
-                        f"Review {review_id} was approved by the player. Retry that exact pending operation; "
-                        "changed inputs require a new review. Do not repeat completed operations. " + instruction
-                    ),
+            task.pending_review_id = None
+            task.report = None
+            if record.status == "approved":
+                task.messages.append(
+                    ModelMessage(
+                        role="user",
+                        content=(
+                            f"Review {review_id} was approved by the player. Retry that exact pending operation; "
+                            "changed inputs require a new review. Do not repeat completed operations. " + instruction
+                        ),
+                    )
                 )
-            )
-            if task.status in {"blocked", "failed", "completed"}:
-                task.status = "queued"
-                task.report = None
-                task.error = None
-                task.notified_revision = 0
-                task.notified_status = ""
-                self._notifications = {key for key in self._notifications if key[0] != task.id}
+                task.status = "blocked" if task.handoff else "queued"
+                task.error = (
+                    "Player approved the pending action; main personality retains execution ownership."
+                    if task.handoff
+                    else None
+                )
+            else:
+                feedback = (
+                    f"The player denied action approval {review_id}. Do not execute this action. "
+                    f"Work remains: {task.instruction}"
+                )
+                task.messages.append(ModelMessage(role="user", content=feedback))
+                task.status = "blocked"
+                task.error = feedback
+                task.report = AgentReport(
+                    status="blocked",
+                    summary=feedback,
+                    verification=[f"Player denied action approval {review_id}; the action was not started."],
+                    remaining=[task.instruction],
+                )
+            task.notified_revision = 0
+            task.notified_status = ""
+            self._notifications = {key for key in self._notifications if key[0] != task.id}
             await self._save(task)
-            self._wake.set()
+            if record.status == "approved" and not task.handoff:
+                self._wake.set()
+        if record.status == "denied":
+            await self._notify(task)

@@ -119,7 +119,7 @@ async def step(
 async def execute_call(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult:
     """执行请求声明的工具并收集本次新增的资源。
 
-    人格任务拦截器只接管共享工具；请求私有工具（如审查读取器）始终直接执行。
+    人格任务拦截器只接管共享工具；请求私有工具始终直接执行。
     """
     tool = tools.get(call.name)
     if tool is None:
@@ -142,7 +142,9 @@ async def dispatch_call(call: ToolCall, tools: Mapping[str, Tool]) -> ToolResult
     if not isinstance(context, ToolContext):
         return await dispatch_tool(call, tools)
     offset = len(context.resources)
+    context.review_id = None
     result = await dispatch_tool(call, tools)
+    result.review_id = context.review_id
     for resource in context.resources[offset:]:
         await ensure_resource_path(resource)
         if resource.path:

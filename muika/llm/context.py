@@ -105,10 +105,25 @@ def public_text(text: str) -> str:
 
 
 def strip_json_fence(text: str) -> str:
-    """剥离模型输出首尾的 markdown 代码围栏，返回纯 JSON 文本。"""
+    """剥离说明和代码围栏，保留第一个完整 JSON 值。"""
     stripped = text.strip()
     match = re.fullmatch(r"```[\w-]*\s*\n?(.*?)\n?\s*```", stripped, re.S)
-    return match.group(1) if match else stripped
+    stripped = match.group(1) if match else stripped
+    decoder = json.JSONDecoder()
+    try:
+        _, end = decoder.raw_decode(stripped)
+        return stripped[:end]
+    except ValueError:
+        pass
+    for index, character in enumerate(stripped):
+        if character not in "{[":
+            continue
+        try:
+            _, end = decoder.raw_decode(stripped[index:])
+            return stripped[index : index + end]
+        except ValueError:
+            continue
+    return stripped
 
 
 def split_text(text: str, budget: int) -> list[str]:

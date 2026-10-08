@@ -154,6 +154,7 @@ class CoreProposalBase(TypedDict):
 class CoreProposal(CoreProposalBase, total=False):
     ready_at: str
     review_ids: list[str]
+    approved_validation: ValidationReport
     applying_at: str
     approved_at: str
     approved_boot_id: str
@@ -796,9 +797,7 @@ class CoreProposalManager:
         ):
             raise CoreProposalError("The candidate no longer matches its review. Prepare a fresh proposal.")
 
-    async def _review(
-        self, proposal: CoreProposal, *, human: bool = False, report: ValidationReport | None = None
-    ) -> str:
+    async def _review(self, proposal: CoreProposal, *, human: bool = False) -> str:
         """审查完整候选或候选及验证结果。"""
         files = {
             str(self.project_root / c["path"]): file_hash(self.project_root / c["path"]) for c in proposal["changes"]
@@ -809,11 +808,9 @@ class CoreProposalManager:
             "changes": self._candidate_changes(proposal),
             "workspace": proposal["workspace_fingerprint"],
         }
-        if report is not None:
-            payload["validation"] = json.loads(json.dumps(report))
         try:
             review = await get_code_reviewer().authorize(
-                "core_validation" if report is not None else "core",
+                "core",
                 payload,
                 files=files,
                 human=human,
@@ -861,18 +858,17 @@ class CoreProposalManager:
                 raise CoreProposalError("Proposal validation has invalid status.")
             if report["status"] == "failed" or report["status"] == "unavailable" and not allow_unvalidated:
                 raise CoreProposalError(f"Proposal validation {report['status']}: {report['reason']}")
-            last_review = await self._review(proposal, human=human, report=report)
             proposal = self.load(patch_id)
             self._check_review(proposal, first_review)
-            self._check_review(proposal, last_review)
             if proposal["status"] != "pending" or self.is_stale(proposal):
                 raise CoreProposalError("Proposal changed during validation or review.")
             proposal["status"] = "ready"
             proposal["ready_at"] = datetime.now().isoformat()
-            proposal["review_ids"] = [first_review, last_review]
+            proposal["review_ids"] = [first_review]
+            proposal["approved_validation"] = report
             proposal["unvalidated_approval"] = report["status"] == "unavailable"
             self._save(proposal)
-            logger.info("[CoreProposal] Change is ready; normal conversation can continue.")
+            logger.info(f"[CoreProposal] Prepared 1 change {patch_id}; active code is unchanged.")
             return (
                 f"Core proposal {patch_id} is ready, not applied. "
                 "Choose when to restart; normal conversation can continue."
@@ -884,7 +880,7 @@ class CoreProposalManager:
         proposal = self.load(patch_id)
         if proposal["status"] != "ready" or self.is_stale(proposal):
             raise CoreProposalError("Proposal is not ready or became stale. Prepare a fresh proposal.")
-        if len(proposal.get("review_ids", [])) != 2:
+        if len(proposal.get("review_ids", [])) != 1:
             raise CoreProposalError("Proposal has no review evidence.")
         for review_id in proposal["review_ids"]:
             self._check_review(proposal, review_id)
@@ -912,8 +908,7 @@ class CoreProposalManager:
                 raise CoreProposalError(f"Proposal validation has invalid status: {report['status']}.")
 
             proposal = self.check_ready(patch_id)
-            final_review = get_code_reviewer().load(proposal["review_ids"][-1])
-            if final_review.payload.get("validation") != json.loads(json.dumps(report)):
+            if proposal.get("approved_validation") != report:
                 raise CoreProposalError("Validation results changed after review. Prepare a fresh proposal.")
             proposal["status"] = "applying"
             proposal["applying_at"] = datetime.now().isoformat()
