@@ -5,7 +5,6 @@
 import importlib
 
 MODEL_DEPENDENCY_MAP = {
-    "Azure": ["azure-ai-inference>=1.0.0b7"],
     "Dashscope": ["dashscope>=1.22.1"],
     "Gemini": ["google-genai>=1.8.0"],
     "Ollama": ["ollama>=0.4.7"],

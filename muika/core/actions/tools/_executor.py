@@ -21,7 +21,6 @@ from muika.plugin.func_call.context import ToolContext, get_dependencies
 
 _SENSITIVE_PREFIXES = (
     "OPENAI_",
-    "AZURE_",
     "DASHSCOPE_",
     "GEMINI_",
     "GOOGLE_",
