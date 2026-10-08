@@ -46,7 +46,6 @@ class Dashscope(BaseLLM):
         self.repetition_penalty = self.config.repetition_penalty
         self.enable_search = self.config.online_search
         self.enable_thinking = self.config.enable_thinking
-        self.thinking_budget = self.config.thinking_budget
         self.incremental_output = self.config.incremental_output
 
         self.extra_headers = {"X-DashScope-Wait-Timeout": "30"}
@@ -148,7 +147,6 @@ class Dashscope(BaseLLM):
             kwargs.update(
                 repetition_penalty=self.repetition_penalty,
                 enable_thinking=self.enable_thinking,
-                thinking_budget=self.thinking_budget,
             )
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 

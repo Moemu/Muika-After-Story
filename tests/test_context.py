@@ -31,17 +31,6 @@ from muika.llm.providers.openai import Openai
 from muika.utils.logger import logger
 
 
-def test_output_and_separate_thinking_are_reserved():
-    config = ModelConfig(
-        provider="dashscope", context_window=32000, max_tokens=4000, enable_thinking=True, thinking_budget=8000
-    )
-    assert input_budget(config) == 18400
-    config.enable_thinking = False
-    assert input_budget(config) == 26400
-    with pytest.warns(ContextOverflowWarning):
-        assert input_budget(ModelConfig(provider="_echo", context_window=4096, max_tokens=4096)) == 0
-
-
 def test_split_preserves_original_without_exceeding_budget():
     from muika.llm.context import estimate_tokens
 

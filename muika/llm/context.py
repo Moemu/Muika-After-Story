@@ -70,8 +70,6 @@ def estimate_tokens(text: str) -> int:
 def input_budget(config: ModelConfig) -> int:
     """预留输出、独立思考额度和协议余量。"""
     output = config.max_tokens
-    if config.provider == "dashscope" and config.enable_thinking and config.thinking_budget:
-        output += max(0, config.thinking_budget)
     budget = config.context_window - output - max(512, int(config.context_window * 0.05))
     if budget < 512:
         warnings.warn(
