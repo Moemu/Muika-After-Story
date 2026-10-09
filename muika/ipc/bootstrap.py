@@ -269,6 +269,17 @@ class CoreBootstrap:
 
         self._restart_task = asyncio.create_task(restart())
 
+    @staticmethod
+    async def watch_stop_request(stop_event: asyncio.Event, core_task: asyncio.Task[None]) -> None:
+        """监听系统信号和父进程请求，取消当前运行阶段以进入退出清理。"""
+        directory = lifecycle_directory()
+        while not stop_event.is_set():
+            if directory is not None and (directory / "stop.json").is_file():
+                stop_event.set()
+                break
+            await asyncio.sleep(0.1)
+        core_task.cancel()
+
     async def stop(self) -> None:
         """停止接入和后台活动，再关闭数据库。"""
         if self._shutdown_event.is_set():
@@ -430,11 +441,20 @@ async def run_core(
     logger.info(f"Muika-After-Story version: {get_version()}")
     logger.debug(f"Muika-After-Story data directory: {mas_config.data_dir.resolve()}")
 
-    logger.debug("Loading Database...")
-    await init_db()
-
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            signal.signal(sig, lambda _signum, _frame: loop.call_soon_threadsafe(stop_event.set))
+    core_task = asyncio.current_task()
+    assert core_task is not None
+    stop_watcher = asyncio.create_task(CoreBootstrap.watch_stop_request(stop_event, core_task))
     bootstrap: Optional[CoreBootstrap] = None
     try:
+        logger.debug("Loading Database...")
+        await init_db()
         recovered = get_core_proposal_manager().recover_incomplete()
         if recovered:
             logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
@@ -449,22 +469,20 @@ async def run_core(
         load_plugins(BUILTIN_PLUGINS_PATH, mas_config.plugins_dir)
 
         bootstrap = CoreBootstrap(host=host, port=port, ipc_secret=mas_config.ipc_secret)
+        bootstrap.stop_requested = stop_event
         if mas_config.enable_plugin_hot_reload:
             start_plugin_watcher(get_plugin_manager(), Path(mas_config.plugins_dir))
 
-        stop_event = bootstrap.stop_requested
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, stop_event.set)
-            except NotImplementedError:
-                pass
-
         await bootstrap.start()
         await stop_event.wait()
+    except asyncio.CancelledError:
+        if not stop_event.is_set():
+            raise
     except KeyboardInterrupt:
         logger.info("Muika was stopped by the user.")
     finally:
+        stop_watcher.cancel()
+        await asyncio.gather(stop_watcher, return_exceptions=True)
         try:
             if bootstrap is not None:
                 await bootstrap.stop()

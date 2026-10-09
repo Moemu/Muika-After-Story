@@ -15,6 +15,7 @@ services:
   core:
     image: mas-multi-device-local
     command: ["python", "-m", "muika.ipc.bootstrap"]
+    stop_grace_period: 190s
     env_file: ../.env.multi-device.local
     environment:
       GATEWAY_URL: ws://gateway:8765/cores

@@ -16,11 +16,14 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import psutil
 
+from muika.utils.logger import logger
+
 if TYPE_CHECKING:
     from muika.core.self_mod.proposals import CoreProposal
 
 RESTART_EXIT_CODE = 75
 STARTUP_TIMEOUT = 180
+SHUTDOWN_TIMEOUT = 180
 
 
 class RestartRecordBase(TypedDict):
@@ -137,70 +140,100 @@ def restore_proposal(proposal_file: Path) -> None:
 
 def supervise(argv: list[str]) -> int:
     """保持父 PID 不变，仅在明确的重启请求后启动新 Core。"""
-    with tempfile.TemporaryDirectory(prefix="muika-lifecycle-") as temporary:
-        directory = Path(temporary)
-        env = dict(os.environ, MUIKA_LIFECYCLE_DIR=str(directory), MUIKA_SUPERVISOR_PID=str(os.getpid()))
-        creationflags = 0
-        if sys.platform == "win32" and not any(
-            stream is not None and stream.isatty() for stream in (sys.stdout, sys.stderr)
-        ):
-            creationflags = subprocess.CREATE_NO_WINDOW
-        restart: RestartRecord | None = None
-        restored = False
-        while True:
-            ready = directory / "ready.json"
-            ready.unlink(missing_ok=True)
-            child = subprocess.Popen(
-                [sys.executable, "-m", "muika.ipc.bootstrap", *argv],
-                env=env,
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-                creationflags=creationflags,
-            )
-            started = time.monotonic()
-            healthy = False
-            try:
-                while child.poll() is None:
-                    if not healthy and ready.is_file():
-                        healthy = True
-                        if restart is not None:
-                            restart["status"] = "restored" if restored else "started"
-                            write_json(Path(restart["record_path"]), restart)
-                            restart = None
-                            restored = False
-                    if not healthy and time.monotonic() - started > STARTUP_TIMEOUT:
+    stop_signals: list[int] = []
+
+    def request_stop(signum: int, frame: object) -> None:
+        stop_signals.append(signum)
+
+    previous_handlers = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        with tempfile.TemporaryDirectory(prefix="muika-lifecycle-") as temporary:
+            directory = Path(temporary)
+            env = dict(os.environ, MUIKA_LIFECYCLE_DIR=str(directory), MUIKA_SUPERVISOR_PID=str(os.getpid()))
+            creationflags = 0
+            if sys.platform == "win32" and not any(
+                stream is not None and stream.isatty() for stream in (sys.stdout, sys.stderr)
+            ):
+                creationflags = subprocess.CREATE_NO_WINDOW
+            restart: RestartRecord | None = None
+            restored = False
+            while True:
+                if stop_signals:
+                    return 0
+                ready = directory / "ready.json"
+                ready.unlink(missing_ok=True)
+                child = subprocess.Popen(
+                    [sys.executable, "-m", "muika.ipc.bootstrap", *argv],
+                    env=env,
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    creationflags=creationflags,
+                )
+                started = time.monotonic()
+                healthy = False
+                try:
+                    while child.poll() is None and not stop_signals:
+                        if not healthy and ready.is_file():
+                            healthy = True
+                            if restart is not None:
+                                restart["status"] = "restored" if restored else "started"
+                                write_json(Path(restart["record_path"]), restart)
+                                restart = None
+                                restored = False
+                        if not healthy and time.monotonic() - started > STARTUP_TIMEOUT:
+                            stop_tree(child.pid)
+                            break
+                        time.sleep(0.1)
+                    if stop_signals:
+                        logger.info(
+                            f"[Supervisor] Requested 1 Core shutdown; waiting up to {SHUTDOWN_TIMEOUT} seconds."
+                        )
+                        write_json(directory / "stop.json", {})
+                        deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+                        while child.poll() is None:
+                            if len(stop_signals) > 1:
+                                logger.warning("[Supervisor] Received a second stop signal; forcing 1 Core shutdown.")
+                                break
+                            if time.monotonic() >= deadline:
+                                logger.warning(
+                                    f"[Supervisor] Core exceeded {SHUTDOWN_TIMEOUT} seconds; forcing shutdown."
+                                )
+                                break
+                            time.sleep(0.1)
+                        if child.poll() is None:
+                            stop_tree(child.pid)
+                        child.wait()
+                        return 0
+                    code = child.wait()
+                finally:
+                    if child.poll() is None:
                         stop_tree(child.pid)
-                        break
-                    time.sleep(0.1)
-                code = child.wait()
-            except (KeyboardInterrupt, SystemExit):
-                stop_tree(child.pid)
-                child.wait()
-                return 0
-            finally:
-                if child.poll() is None:
-                    stop_tree(child.pid)
-                    child.wait()
-            request_file = directory / "restart.json"
-            if code == RESTART_EXIT_CODE and request_file.is_file():
-                restart = cast(RestartRecord, json.loads(request_file.read_text(encoding="utf-8")))
-                request_file.unlink()
-                restored = False
-                continue
-            if restart is not None and not healthy:
-                restart["error"] = f"Core did not become ready; exit code {code}. See the Core startup log."
-                if not restored and restart["proposal_file"] is not None:
-                    try:
-                        restore_proposal(Path(restart["proposal_file"]))
-                        restored = True
-                        restart["status"] = "restoring"
-                        write_json(Path(restart["record_path"]), restart)
-                        continue
-                    except (OSError, ValueError, KeyError) as exc:
-                        restart["error"] = str(exc)
-                restart["status"] = "failed"
-                write_json(Path(restart["record_path"]), restart)
-            return code if code != 0 or healthy else 1
+                        child.wait()
+                if stop_signals:
+                    return 0
+                request_file = directory / "restart.json"
+                if code == RESTART_EXIT_CODE and request_file.is_file():
+                    restart = cast(RestartRecord, json.loads(request_file.read_text(encoding="utf-8")))
+                    request_file.unlink()
+                    restored = False
+                    continue
+                if restart is not None and not healthy:
+                    restart["error"] = f"Core did not become ready; exit code {code}. See the Core startup log."
+                    if not restored and restart["proposal_file"] is not None:
+                        try:
+                            restore_proposal(Path(restart["proposal_file"]))
+                            restored = True
+                            restart["status"] = "restoring"
+                            write_json(Path(restart["record_path"]), restart)
+                            continue
+                        except (OSError, ValueError, KeyError) as exc:
+                            restart["error"] = str(exc)
+                    restart["status"] = "failed"
+                    write_json(Path(restart["record_path"]), restart)
+                return code if code != 0 or healthy else 1
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -211,10 +244,6 @@ def main(argv: list[str] | None = None) -> None:
             # Windows venv 启动器持有 Launcher 记录的 PID，实际解释器必须随它退出。
             watch_process(parent.pid)
 
-    def terminate(signum: int, frame: object) -> None:
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, terminate)
     raise SystemExit(supervise(sys.argv[1:] if argv is None else argv))
 
 
