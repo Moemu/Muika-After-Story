@@ -14,10 +14,12 @@ from muika.core.events import AgentHandoffEvent, AgentTaskEvent, Event
 from muika.core.loop import Muika
 from muika.core.memory import MemoryManager, RecallResult, SessionTurn, StateUpdate
 from muika.core.state import MuikaState
-from muika.llm import ModelConfig, ModelRequest
+from muika.llm import ModelRequest
+from muika.llm._schema import ModelMessage
 from muika.llm.context import (
-    ContextCompactor,
+    CompactionModel,
     input_budget,
+    over_budget,
     public_text,
     request_tokens,
 )
@@ -134,11 +136,11 @@ class ScenarioMemory(MemoryManager):
         self.persistent.last_considered_at = self.fixed_now or datetime.now()
 
     async def prepare_context(
-        self, request: ModelRequest, config: ModelConfig, compactor: ContextCompactor, *, force: bool = False
-    ) -> ModelRequest:
-        if request_tokens(request) >= input_budget(config) * 0.8:
+        self, model: CompactionModel, request: ModelRequest, messages: Sequence[ModelMessage], *, force: bool = False
+    ) -> tuple[ModelRequest, list[ModelMessage]]:
+        if over_budget(request_tokens(request, messages), input_budget(model.config), force=force):
             raise ValueError("The short dialogue fixture exceeded its budget; use a core context regression scenario")
-        return request
+        return request, list(messages)
 
 
 class _FixtureAgent:

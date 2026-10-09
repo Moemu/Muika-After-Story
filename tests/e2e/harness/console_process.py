@@ -25,11 +25,14 @@ async def run(directory: Path, port: int, mode: str) -> None:
     with ExitStack() as stack:
         output = stack.enter_context((directory / "stdout.log").open("w", encoding="utf-8"))
         errors = stack.enter_context((directory / "stderr.log").open("w", encoding="utf-8"))
+        creationflags = 0
+        if sys.platform == "win32" and mode == "background":
+            creationflags = subprocess.CREATE_NO_WINDOW
         process = subprocess.Popen(
             [sys.executable, str(directory / "core_main.py"), "--port", str(port)],
             stdout=output if mode in {"background", "stdout_file"} else None,
             stderr=errors if mode in {"background", "stderr_file"} else None,
-            creationflags=subprocess.CREATE_NO_WINDOW if mode == "background" and sys.platform == "win32" else 0,
+            creationflags=creationflags,
         )
         try:
             async with aiohttp.ClientSession() as session:
@@ -71,7 +74,7 @@ async def run(directory: Path, port: int, mode: str) -> None:
         finally:
             stop_tree(process.pid)
             process.wait(timeout=10)
-            if mode != "background":
+            if sys.platform == "win32" and mode != "background":
                 console = win32console.GetStdHandle(win32console.STD_OUTPUT_HANDLE)
                 size = console.GetConsoleScreenBufferInfo()["Size"]
                 result["console"] = console.ReadConsoleOutputCharacter(
