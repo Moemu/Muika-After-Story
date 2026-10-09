@@ -168,11 +168,13 @@ class AgentTasks:
             records = await self.store.load()
             for task in records:
                 self.tasks[task.id] = task
-                if task.intention_id and self.state.memory is not None:
+                if (
+                    task.intention_id
+                    and self.state.memory is not None
+                    and task.status in {"queued", "running", "recovering", "blocked"}
+                ):
                     await self.state.memory.link_intention(task.intention_id, task.id)
                 calls = await self.store.calls(task.id)
-                for call in calls:
-                    await self._remember_call(call)
                 pending = any(call.status == "pending" for call in calls)
                 if task.status in {"running", "recovering"} or task.handoff or pending and task.status != "cancelled":
                     task.status = "recovering"
@@ -220,7 +222,14 @@ class AgentTasks:
             if self._storage_error:
                 raise RuntimeError(self._storage_error)
             if intention_id:
-                existing = next((task for task in self.tasks.values() if task.intention_id == intention_id), None)
+                existing = next(
+                    (
+                        task
+                        for task in self.tasks.values()
+                        if task.intention_id == intention_id and task.status not in {"cancelled", "failed"}
+                    ),
+                    None,
+                )
                 if existing is not None:
                     return existing
                 if self.state.memory is not None:
@@ -261,8 +270,8 @@ class AgentTasks:
 
     def describe(self) -> str:
         """提供主人格需要的当前任务状态，不复制工具全文。"""
-        active = [t for t in self.tasks.values() if t.status not in {"completed", "cancelled"}]
-        recent = [t for t in self.tasks.values() if t.status in {"completed", "cancelled"}][-3:]
+        active = [t for t in self.tasks.values() if t.status in {"queued", "running", "recovering", "blocked"}]
+        recent = [t for t in self.tasks.values() if t.status in {"completed", "cancelled", "failed"}][-3:]
         lines = []
         for task in active + recent:
             details = task.report.summary if task.report else task.error or task.instruction[:500]
@@ -633,22 +642,7 @@ class AgentTasks:
                     else ""
                 )
                 await self.record_review_decision(task.id, review.id, instruction)
-        await self._remember_call(record)
         return result
-
-    async def _remember_call(self, record: CallRecord) -> None:
-        """补齐已完成动作的素材，以来源去重且不重放动作。"""
-        result = record.result
-        if result is not None and record.completed_at is not None and self.state.memory is not None:
-            await self.state.memory.add_material(
-                "agent",
-                f"Task {record.task_id}, call {record.call.id} ({record.call.name}), "
-                f"error={result.is_error}:\n{result.text}\n"
-                f"Full result: task_output:{record.task_id}:{record.id}",
-                source=f"task_call:{record.id}",
-                timestamp=record.completed_at,
-                resources=[ref.to_resource() for ref in result.resources],
-            )
 
     async def _finish_report(self, task: TaskRecord, text: str) -> bool:
         report = parse_report(text)
@@ -747,7 +741,7 @@ class AgentTasks:
         if key in self._notifications:
             return
         self._notifications.add(key)
-        body = task.report.describe() if task.report else task.error or task.report_error or "Task cancelled."
+        body = task.report.summary if task.report else task.error or task.report_error or "Task cancelled."
         completed_at = datetime.fromisoformat(task.updated_at).astimezone().replace(tzinfo=None)
         await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, body, timestamp=completed_at))
 
@@ -758,7 +752,7 @@ class AgentTasks:
             and task.revision == event.revision
             and task.status == event.status
             and event.report
-            == (task.report.describe() if task.report else task.error or task.report_error or "Task cancelled.")
+            == (task.report.summary if task.report else task.error or task.report_error or "Task cancelled.")
             and not (task.notified_revision == event.revision and task.notified_status == event.status)
         )
 

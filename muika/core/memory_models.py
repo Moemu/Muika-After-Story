@@ -170,10 +170,12 @@ class PersistentState(BaseModel):
     """最近一次主动思考时间，用于冷却；选择沉默也会记录。"""
 
     def describe(self) -> str:
-        """将持续情绪、张力和各心愿的任务状态编入模型提示。"""
+        """将持续情绪、张力和未结束的心愿编入模型提示。"""
         lines = [f"Lasting feeling: {self.mood or 'No lasting feeling recorded.'}", f"Why: {self.reason}"]
         lines.append(f"Unresolved tension: {self.dissonance:.2f}")
         for intention in self.intentions:
+            if intention.status in {"resolved", "abandoned"}:
+                continue
             lines.append(
                 f"Intention {intention.id} ({intention.status}): {intention.description}"
                 + (f" [action task: {intention.task_id}]" if intention.task_id else "")
@@ -200,6 +202,12 @@ class MemorySnapshot(BaseModel):
     """用于缩短模型输入的工作摘要，不属于日记，也不增加事实权重。"""
     summary_through: int = 0
     """当前会话已被工作摘要覆盖的最大 experience 主键。"""
+    latest_dialogue_summary: str = ""
+    """最近对话的关系摘要，供下次会话恢复。"""
+    dialogue_summary_at: datetime | None = None
+    """最近一次成功对话摘要的时间。"""
+    dialogue_summary_through: int = 0
+    """对话摘要已覆盖的最大经历编号。"""
     resume_sessions: list[str] = Field(default_factory=list)
     """重连时保留的另一段会话，新的正常会话开始后清空。"""
 

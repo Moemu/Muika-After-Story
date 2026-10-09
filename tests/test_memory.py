@@ -35,7 +35,7 @@ async def test_raw_dialogue_survives_cache_size_and_restart():
         await memory.add_context("user", f"第 {index} 句原话", timestamp=start + timedelta(minutes=index))
     restored = MemoryManager()
     await restored.load()
-    assert len(restored.recent_turns) == 145
+    assert not restored.recent_turns
     matches = await restored.search(MemoryQuery(terms=["第 17 句"]))
     assert len(matches) == 1
     original = await restored.read_source(matches[0].ref)
@@ -331,8 +331,8 @@ async def test_context_summary_commits_before_replacing_history(monkeypatch):
     assert prepared.prompt == "The current request" and len(prepared.history) < len(before)
     restored = MemoryManager()
     await restored.load()
-    assert restored.snapshot.working_summary == memory.snapshot.working_summary
-    assert len(restored.recent_turns) == len(memory.recent_turns)
+    assert restored.snapshot.working_summary == restored.snapshot.latest_dialogue_summary
+    assert not restored.recent_turns
     assert "Turn 0:" in await restored.read_source("experience:1")
 
 
@@ -417,4 +417,4 @@ async def test_empty_context_summary_warns_without_changing_saved_history(fake_l
     await restored.load()
     assert prepared is request
     assert not restored.snapshot.working_summary and restored.snapshot.summary_through == 0
-    assert list(restored.recent_turns) == list(memory.recent_turns)
+    assert not restored.recent_turns

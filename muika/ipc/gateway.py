@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 import signal
 import time
 from dataclasses import dataclass
@@ -66,6 +67,98 @@ class Gateway:
                 pending INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(adapter, id));
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
         """)
+        async with self.db.execute("SELECT value FROM settings WHERE key='sync_protocol'") as cursor:
+            protocol = await cursor.fetchone()
+        # 独立库迁移与 aa2e94f12c06.upgrade 保持相同的经历删除和日记水位规则。
+        if protocol is None or protocol[0] != int(SYNC_PROTOCOL):
+            async with self.db.execute("SELECT sequence, payload FROM activity ORDER BY sequence") as cursor:
+                history = [(row[0], json.loads(row[1])) for row in await cursor.fetchall()]
+            if any("tasks" in activity or "calls" in activity for _, activity in history):
+                archive = self.directory / "activity-before-sync-v2.json"
+                if not archive.exists():
+                    temporary = archive.with_suffix(".json.tmp")
+                    with temporary.open("w", encoding="utf-8") as file:
+                        json.dump(history, file, ensure_ascii=False)
+                        file.flush()
+                        os.fsync(file.fileno())
+                    temporary.replace(archive)
+                removed = {
+                    f"{activity['origin']}:experience:{item['id']}"
+                    for _, activity in history
+                    for item in activity.get("experiences", [])
+                    if (item.get("source") or "").startswith("task_call:")
+                }
+                retained = {
+                    f"{activity['origin']}:experience:{item['id']}"
+                    for _, activity in history
+                    for item in activity.get("experiences", [])
+                    if not (item.get("source") or "").startswith("task_call:")
+                }
+                for sequence, activity in history:
+                    activity.pop("tasks", None)
+                    activity.pop("calls", None)
+                    obsolete = {
+                        f"experience:{item['id']}"
+                        for item in activity.get("experiences", [])
+                        if (item.get("source") or "").startswith("task_call:")
+                    }
+                    obsolete.update(ref for ref, source in activity.get("references", {}).items() if source in removed)
+                    activity["experiences"] = [
+                        item for item in activity.get("experiences", []) if f"experience:{item['id']}" not in obsolete
+                    ]
+                    for fact in activity.get("facts", []):
+                        if obsolete.intersection(fact.get("source_refs", [])):
+                            fact["active"] = False
+                            fact["source_refs"] = [ref for ref in fact["source_refs"] if ref not in obsolete]
+                    for diary in activity.get("diaries", []):
+                        diary["source_refs"] = [ref for ref in diary.get("source_refs", []) if ref not in obsolete]
+                        watermark = f"experience:{diary['covered_through']}"
+                        if watermark in obsolete:
+                            origin, _, value = activity["references"][watermark].rpartition(":experience:")
+                            candidates = [
+                                (int(source.rpartition(":experience:")[2]), source)
+                                for source in retained
+                                if source.rpartition(":experience:")[0] == origin
+                                and int(source.rpartition(":experience:")[2]) <= int(value)
+                            ]
+                            through, replacement = max(candidates, default=(0, ""))
+                            if through:
+                                keys = {
+                                    int(ref.split(":")[1])
+                                    for ref in activity["references"]
+                                    if ref.startswith("experience:")
+                                }
+                                existing = next(
+                                    (
+                                        int(ref.split(":")[1])
+                                        for ref, source in activity["references"].items()
+                                        if ref.startswith("experience:") and source == replacement
+                                    ),
+                                    None,
+                                )
+                                through = existing if existing is not None else max(keys, default=0) + 1
+                                activity["references"][f"experience:{through}"] = replacement
+                            diary["covered_through"] = through
+                    snapshot = activity.get("snapshot")
+                    if snapshot:
+                        snapshot["working_summary"], snapshot["summary_through"] = "", 0
+                        for intention in snapshot.get("state", {}).get("intentions", []):
+                            intention["source_refs"] = [
+                                ref for ref in intention.get("source_refs", []) if ref not in obsolete
+                            ]
+                    activity["references"] = {
+                        ref: source for ref, source in activity.get("references", {}).items() if ref not in obsolete
+                    }
+                    await self.db.execute(
+                        "UPDATE activity SET payload=? WHERE sequence=?",
+                        (json.dumps(activity, ensure_ascii=False), sequence),
+                    )
+                await self.db.commit()
+                logger.info(
+                    f"[Gateway] Archived execution history | activities={len(history)} tool_experiences={len(removed)}"
+                )
+            await self.db.execute("INSERT OR REPLACE INTO settings VALUES ('sync_protocol', ?)", (int(SYNC_PROTOCOL),))
+            await self.db.commit()
         async with self.db.execute("SELECT value FROM settings WHERE key='epoch'") as cursor:
             saved = await cursor.fetchone()
         self.epoch = int(saved[0]) + 1 if saved else 1

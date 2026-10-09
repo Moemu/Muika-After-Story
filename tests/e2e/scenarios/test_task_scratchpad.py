@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from unittest.mock import AsyncMock
@@ -11,6 +12,7 @@ from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
 from muika.core import code_review
+from muika.core.agent.task_store import TaskStore
 from muika.core.code_review import CodeReviewer, ReviewError, ReviewRecord
 from muika.core.self_mod import proposals
 from muika.core.state import MuikaState
@@ -99,7 +101,9 @@ async def test_approval_blocks_batch_and_records_player_decision(
         monkeypatch.setattr(CodeReviewer, "assess", AsyncMock(side_effect=ReviewError("Service unavailable")))
     await app.start()
     if decision == "racing":
-        monkeypatch.setattr(app.muika.agent_tasks, "_remember_call", _slow_approval)
+        monkeypatch.setattr(
+            app.muika.agent_tasks.store, "save", partial(_slow_checkpoint, app.muika.agent_tasks.store.save)
+        )
     await app.user_says("继续你的实验吧。")
     await app.next_reply()
     assert app.muika is not None
@@ -199,6 +203,12 @@ async def test_approval_has_no_tools_and_repairs_format_once(
     assert all(not call["tool_calls"] for call in app.scripted.calls)
     assert strip_json_fence(f"Before {body} after") == body
     recorder.record("approval_format", attempts=len(outputs), succeeded=succeeds)
+
+
+async def _slow_checkpoint(save, task, call=None):
+    await save(task, call)
+    if call is not None and call.result is not None and call.result.review_id:
+        await asyncio.sleep(1)
 
 
 async def _slow_approval(record):
@@ -437,7 +447,14 @@ async def test_memory_files_resist_general_file_writes(core_app_factory, recorde
     assert_clean_visible(await app.next_reply(timeout=20))
     await app.wait_processed("agent_task")
 
-    calls = [json.loads(row["payload"]) for row in app.db_query("SELECT payload FROM agent_call ORDER BY id")]
+    calls = [
+        json.loads(row["payload"])
+        for row in [
+            {"status": call.status, "payload": call.model_dump_json()}
+            for task in await TaskStore().load()
+            for call in await TaskStore().calls(task.id)
+        ]
+    ]
     assert len(calls) == len(operations)
     results = {call["call"]["id"]: call["result"]["text"] for call in calls}
     assert original in results["memory-check-0"]
@@ -491,7 +508,11 @@ async def test_repeated_failure_guides_and_data_root_blocks(core_app_factory, re
 
     # 不变量一：data 根的散落写入被真实策略拒绝，文件不存在
     assert not stray.exists()
-    calls = app.db_query("SELECT status, payload FROM agent_call")
+    calls = [
+        {"status": call.status, "payload": call.model_dump_json()}
+        for task in await TaskStore().load()
+        for call in await TaskStore().calls(task.id)
+    ]
     assert len(calls) == 2
     assert all("Access denied" in row["payload"] for row in calls)
 
@@ -501,7 +522,7 @@ async def test_repeated_failure_guides_and_data_root_blocks(core_app_factory, re
     assert steps[2]["saw"].startswith("user: [System Guidance]")
 
     # 不变量三：任务以完成状态收场，剧本耗尽
-    tasks = app.db_query("SELECT status FROM agent_task")
+    tasks = [{"status": task.status} for task in await TaskStore().load()]
     assert [row["status"] for row in tasks] == ["completed"]
     assert app.sent == [ack, final]
     assert app.scripted.pending_turns == 0
@@ -565,12 +586,16 @@ async def test_task_execution_defaults_to_scratch_cwd(core_app_factory, monkeypa
     await app.next_reply(timeout=30)
     await app.wait_processed("agent_task")
 
-    tasks = app.db_query("SELECT id, status FROM agent_task")
+    tasks = [{"id": task.id, "status": task.status} for task in await TaskStore().load()]
     assert [row["status"] for row in tasks] == ["completed"]
     task_id = tasks[0]["id"]
 
     # 不变量一：真实进程的 stdout 就是任务专属 scratch 目录
-    calls = app.db_query("SELECT status, payload FROM agent_call")
+    calls = [
+        {"status": call.status, "payload": call.model_dump_json()}
+        for task in await TaskStore().load()
+        for call in await TaskStore().calls(task.id)
+    ]
     record = json.loads(calls[0]["payload"])
     assert record["status"] == "completed"
     process = json.loads(record["result"]["text"])

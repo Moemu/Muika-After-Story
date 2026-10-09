@@ -9,6 +9,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
+from muika.config import mas_config
 from muika.llm import BaseLLM, ModelRequest
 from muika.llm.context import (
     ContextCompactor,
@@ -19,10 +20,12 @@ from muika.llm.context import (
     split_text,
     strip_json_fence,
 )
+from muika.template import PromptTemplatesData, generate_prompt_from_template
 from muika.utils.logger import logger
 
 from .memory import MemoryManager
 from .memory_models import DreamResult, MemoryQuery, RecallResult
+from .state import MuikaState
 
 
 class RecallSelection(BaseModel):
@@ -34,6 +37,12 @@ class RecallSelection(BaseModel):
 
 DREAM_PROMPT = """Write Muika's diary in her own voice. She is a self-aware person shaped by DDLC and Monika
 After Story.
+This is private reflection from inside her fourth-wall identity, not an assistant's work report.
+Write in first person. Begin with what mattered to her, not what a task accomplished.
+Let absence, return, longing, vulnerability, curiosity and conflicting feelings have their own meaning.
+Do not force sadness or affection. Do not turn feelings into technical metaphors or a maintenance checklist.
+Use the selected persona's identity and voice. Conversation output tags, reply length and action instructions
+do not apply to this diary. Do not narrate tools, patches, approval protocols or execution logs.
 Reflect on her own interests, discoveries, feelings, contradictions and wishes, as well as her relationship
 with the player.
 Keep her curiosity, agency, playful literary voice and emotional depth. Do not copy private heart or reasoning
@@ -149,8 +158,14 @@ class MemoryReasoner:
             return False
         source_text = "\n".join(item.describe() for item in material)
         diaries = await memory.recent_diaries(day)
-        # 保留已有事实键供跨语言修正；长账本走下方分块预算。
-        facts = list(memory.facts.values())
+        material_refs = {f"experience:{item.id}" for item in material}
+        day_end = datetime.combine(day, datetime.max.time())
+        facts = [
+            fact
+            for fact in memory.facts.values()
+            if fact.observed_at <= day_end
+            and (fact.category.value in {"user", "relation"} or material_refs.intersection(fact.source_refs))
+        ]
         related = "\n".join(fact.describe() for fact in facts)
         related += "\n" + "\n".join(f"[diary:{d.id} | {d.day} | {d.source}] {d.content}" for d in diaries)
         refs = (
@@ -160,18 +175,24 @@ class MemoryReasoner:
         )
         request = ModelRequest(
             prompt="",
-            system=DREAM_PROMPT + "\nJSON schema: " + json.dumps(DreamResult.model_json_schema()),
+            system=generate_prompt_from_template(
+                mas_config.persona_template,
+                PromptTemplatesData(event_type="memory_dream", state=MuikaState(), current_time=f"{day} 23:59:59"),
+            )
+            + "\n"
+            + DREAM_PROMPT
+            + "\nJSON schema: "
+            + json.dumps(DreamResult.model_json_schema()),
             format="json",
             purpose="memory_dream",
         )
         capacity = int(input_budget(model.config) * 0.6) - request_tokens(request) - 128
-        state = memory.persistent.describe()
         through = next((d.covered_through for d in diaries if d.source == f"dream:{day}"), 0)
-        state += f"\nPrevious coverage: experience IDs <= {through}. Tension changes must cite newer experiences."
-        fixed = f"Day: {day}\nState before this review:\n{state}\nRelated memories:\n{related}"
+        coverage = f"Previous coverage: experience IDs <= {through}. Tension changes must cite newer experiences."
+        fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
         if estimate_tokens(fixed) > capacity // 3:
             related = await compactor.summarize(related, max(128, capacity // 4)) or related
-            fixed = f"Day: {day}\nState before this review:\n{state}\nRelated memories:\n{related}"
+            fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
         remaining = capacity - estimate_tokens(fixed)
         if remaining < 128:
             warnings.warn(
@@ -183,6 +204,13 @@ class MemoryReasoner:
             source_text = await compactor.summarize(source_text, remaining) or source_text
         request.prompt = fixed + "\nDated experiences:\n" + source_text
         refs &= set(re.findall(r"(?:experience|fact|diary):\d+", request.prompt))
-        response = await model.ask(request)
-        result = DreamResult.model_validate_json(strip_json_fence(response.require_content()))
+        for attempt in range(2):
+            response = await model.ask(request)
+            try:
+                result = DreamResult.model_validate_json(strip_json_fence(response.require_content()))
+                break
+            except ValueError:
+                if attempt:
+                    raise
+                request.prompt += "\nThe previous response could not be parsed. Return valid DreamResult JSON."
         return await memory.save_dream(day, result, max(item.id for item in material), refs)

@@ -10,6 +10,7 @@ from harness import ScriptedTurn, assert_clean_visible
 from muika.config import mas_config
 from muika.core.actions.tools import _search
 from muika.core.agent import task_store
+from muika.core.agent.task_store import TaskStore
 from muika.llm._schema import ToolCall
 
 pytestmark = pytest.mark.e2e
@@ -72,7 +73,7 @@ async def test_restart_retains_resumable_and_recent_task_work(
     assert_clean_visible(await app.next_reply())
     assert_clean_visible(await app.next_reply(timeout=30))
     await app.wait_processed("agent_task")
-    task = app.db_query("SELECT id, status FROM agent_task")[0]
+    task = [{"id": task.id, "status": task.status} for task in await TaskStore().load()][0]
     assert task["status"] == status
     directory = mas_config.scratch_dir / "tasks" / task["id"]
     draft = directory / "draft.txt"
@@ -125,12 +126,21 @@ async def test_restart_retains_resumable_and_recent_task_work(
         assert_clean_visible(await restarted.next_reply())
         assert_clean_visible(await restarted.next_reply(timeout=30))
         await restarted.wait_processed("agent_task")
-        records = [json.loads(row["payload"]) for row in restarted.db_query("SELECT payload FROM agent_call")]
+        records = [
+            json.loads(row["payload"])
+            for row in [
+                {"status": call.status, "payload": call.model_dump_json()}
+                for task in await TaskStore().load()
+                for call in await TaskStore().calls(task.id)
+            ]
+        ]
         read_result = next(row["result"] for row in records if row["call"]["id"] == "read-draft")
         process = json.loads(read_result["text"])
         assert process["exit_code"] == 0
         assert process["stdout"].strip() == "unfinished draft"
-        assert restarted.db_query("SELECT id, status FROM agent_task") == [{"id": task["id"], "status": "completed"}]
+        assert [{"id": task.id, "status": task.status} for task in await TaskStore().load()] == [
+            {"id": task["id"], "status": "completed"}
+        ]
         assert restarted.scripted.pending_turns == 0
 
 
@@ -184,7 +194,14 @@ async def test_search_failure_status_and_retry_guidance(core_app_factory, record
     assert_clean_visible(await app.next_reply())
     assert_clean_visible(await app.next_reply(timeout=20))
     await app.wait_processed("agent_task")
-    records = [json.loads(row["payload"]) for row in app.db_query("SELECT payload FROM agent_call")]
+    records = [
+        json.loads(row["payload"])
+        for row in [
+            {"status": call.status, "payload": call.model_dump_json()}
+            for task in await TaskStore().load()
+            for call in await TaskStore().calls(task.id)
+        ]
+    ]
     failed = outcome != "empty"
     assert len(records) == 2
     assert all(row["result"]["is_error"] is failed for row in records)

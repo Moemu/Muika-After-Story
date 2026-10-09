@@ -331,6 +331,8 @@ def engine(monkeypatch, redirect_get_session):
     engine = Muika(MagicMock(send_message=AsyncMock()), asyncio.Queue())
     engine.reflection.maybe_reflect = AsyncMock()
     engine.agent.model.config = ModelConfig(provider="_echo")
+    engine.agent.model.ask = AsyncMock(return_value=ModelCompletions(text="We talked about a small personal detail."))
+    engine.brain.compactor = ContextCompactor(engine.agent.model)
     engine.agent.memory_reasoner.compactor = ContextCompactor(engine.agent.model)
     engine.agent.memory_reasoner.recall = AsyncMock(return_value=RecallResult())
     return engine
@@ -411,7 +413,7 @@ async def test_chat_and_session_end_keep_background_task(engine):
         await asyncio.gather(worker, return_exceptions=True)
 
 
-async def test_session_end_keeps_raw_material_without_diary_or_model_call(engine):
+async def test_session_end_keeps_raw_material_and_saves_dialogue_summary(engine):
     await engine.memory.add_context("user", "A small detail worth keeping.")
     session_id = engine.memory.session.session_id
     await engine._handle_session_end()
@@ -420,7 +422,8 @@ async def test_session_end_keeps_raw_material_without_diary_or_model_call(engine
     hits = await engine.memory.search(MemoryQuery(terms=["small detail"]))
     assert len(hits) == 1
     assert await engine.memory.recent_diaries(datetime.now().date()) == []
-    engine.agent.model.ask.assert_not_called()
+    engine.agent.model.ask.assert_awaited_once()
+    assert engine.memory.snapshot.latest_dialogue_summary == "We talked about a small personal detail."
 
 
 async def test_shutdown_waits_for_background_cleanup(engine):
@@ -468,6 +471,7 @@ async def test_failed_memory_does_not_discard_following_silent_notes(engine):
 async def test_idle_session_end_does_not_depend_on_summary_service(engine):
     from muika.core.constants import SESSION_IDLE_TIMEOUT
 
+    engine.agent.model.ask = AsyncMock(side_effect=RuntimeError("Summary service unavailable"))
     engine.state.last_interaction = datetime.now() - timedelta(seconds=SESSION_IDLE_TIMEOUT + 1)
     engine._last_digest_time = datetime.now().timestamp()
     await engine.memory.add_context("user", "I will return.")

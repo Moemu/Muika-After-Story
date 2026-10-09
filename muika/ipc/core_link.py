@@ -180,8 +180,6 @@ class CoreLink:
                     and not baseline.experiences
                     and not baseline.facts
                     and not baseline.diaries
-                    and not baseline.tasks
-                    and not baseline.calls
                 ):
                     await self.store.apply(pending[0].model_copy(update={"gateway_sequence": 0}))
             if self._preserve and not self._captured:

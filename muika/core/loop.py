@@ -345,6 +345,7 @@ class Muika:
                 await self.create_event(SessionEndEvent())
 
         self.start_background_task(self.reflection.maybe_reflect())
+        self.start_background_task(self.memory.summarize_dialogue(self.brain.compactor.model))
 
     @staticmethod
     def _parse_reply_tags(reply: str) -> ParsedReply:
@@ -677,6 +678,7 @@ class Muika:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        await self.memory.summarize_dialogue(self.brain.compactor.model, force=True)
         await get_process_manager().close()
         self._timeout_task = None
         self._reflection_task = None
@@ -703,6 +705,7 @@ class Muika:
         self._god_mode_pending = False
         await self.agent_tasks.release_persona()
 
+        await self.memory.summarize_dialogue(self.brain.compactor.model, force=True)
         await self.memory.new_session()
         self.start_background_task(self.reflection.maybe_reflect())
 

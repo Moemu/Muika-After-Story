@@ -6,6 +6,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import select
+
 from muika.config import mas_config
 from muika.core.agent.task_store import CallRecord, TaskRecord, TaskStore
 from muika.core.events import TimeTickEvent
@@ -13,7 +15,7 @@ from muika.core.memory import MemoryManager
 from muika.core.memory_models import DreamResult, StateUpdate
 from muika.core.state import MuikaState
 from muika.database.db import close_db, get_session, init_db, observe_commits
-from muika.database.orm_models import MemoryRuntimeORM
+from muika.database.orm_models import ExperienceORM, MemoryRuntimeORM
 from muika.ipc.sync_models import SyncEntry
 from muika.ipc.sync_store import SyncStore
 from muika.llm._schema import ToolCall
@@ -44,6 +46,9 @@ async def main() -> None:
                 snapshot = memory.snapshot.model_copy(deep=True)
                 snapshot.working_summary = "Saved foreground conversation summary."
                 snapshot.summary_through = memory.recent_turns[-1].id
+                snapshot.latest_dialogue_summary = snapshot.working_summary
+                snapshot.dialogue_summary_through = snapshot.summary_through
+                snapshot.dialogue_summary_at = datetime.now()
                 async with get_session() as db:
                     await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
                 await memory.load(record_activity=False)
@@ -87,6 +92,14 @@ async def main() -> None:
                 await TaskStore().save(task, call)
             elif command["action"] == "stop":
                 break
+            async with get_session(record_activity=False) as db:
+                dialogue = list(
+                    await db.scalars(
+                        select(ExperienceORM.content)
+                        .where(ExperienceORM.kind.in_(["user", "muika", "agent"]))
+                        .order_by(ExperienceORM.id)
+                    )
+                )
             print(
                 json.dumps(
                     {
@@ -103,6 +116,8 @@ async def main() -> None:
                             )
                         ],
                         "turns": [turn.content for turn in memory.recent_turns],
+                        "summary": memory.snapshot.latest_dialogue_summary,
+                        "experiences": dialogue,
                         "tasks": [task.model_dump(mode="json") for task in await TaskStore().load()],
                         "calls": [
                             call.model_dump(mode="json")

@@ -60,7 +60,8 @@ async def test_foreground_summary_does_not_hide_other_branch(memory_process):
     await pc.command(action="material", kind="user", text="前台单独的经历。")
     summarized = await pc.command(action="summary")
     restored = await server.command(action="apply", entries=summarized["entries"])
-    assert "摘要没有包括的远端经历。" in restored["turns"]
+    assert "摘要没有包括的远端经历。" in restored["experiences"]
+    assert restored["summary"] == "Saved foreground conversation summary."
 
 
 async def test_same_external_input_merges_sources_but_keeps_independent_outputs(memory_process):
@@ -71,18 +72,18 @@ async def test_same_external_input_merges_sources_but_keeps_independent_outputs(
     await server.command(action="material", kind="user", text="同一条输入。", source=source)
     second = await server.command(action="material", kind="muika", text="远端产生的回复。")
     merged = await pc.command(action="apply", entries=second["entries"], preserve_state=True)
-    assert merged["turns"].count("同一条输入。") == 1
-    assert "前台产生的回复。" in merged["turns"] and "远端产生的回复。" in merged["turns"]
+    assert merged["experiences"].count("同一条输入。") == 1
+    assert "前台产生的回复。" in merged["experiences"] and "远端产生的回复。" in merged["experiences"]
     repeated = await server.command(action="apply", entries=first["entries"])
-    assert repeated["turns"].count("同一条输入。") == 1
+    assert repeated["experiences"].count("同一条输入。") == 1
 
 
 async def test_foreign_queued_task_does_not_run_on_another_device(memory_process):
     pc, server = await memory_process("pc"), await memory_process("server")
     queued = await pc.command(action="interrupted", status="queued")
     copied = await server.command(action="apply", entries=queued["entries"])
-    assert copied["tasks"][0]["status"] == "failed"
-    assert copied["calls"][0]["result"]["is_error"] is True
+    assert not copied["tasks"] and not copied["calls"]
+    assert queued["tasks"][0]["status"] == "queued"
 
 
 async def test_sync_silent_state_and_independent_output(memory_process):
@@ -92,11 +93,11 @@ async def test_sync_silent_state_and_independent_output(memory_process):
     assert len(silent["entries"]) == len(first["entries"]) + 1
     replica = await server.command(action="apply", entries=silent["entries"])
     assert replica["mood"] == "安静而安心"
-    assert replica["turns"] == ["今天可以安静待着。"]
+    assert replica["experiences"] == ["今天可以安静待着。"]
     proactive = await pc.command(action="material", kind="muika", text="我想把这首诗留给你。")
     replica = await server.command(action="apply", entries=proactive["entries"])
     repeated = await server.command(action="apply", entries=proactive["entries"])
-    assert repeated["turns"] == replica["turns"] == ["今天可以安静待着。", "我想把这首诗留给你。"]
+    assert repeated["experiences"] == replica["experiences"] == ["今天可以安静待着。", "我想把这首诗留给你。"]
 
 
 async def test_offline_histories_keep_local_ids_and_foreground_state(memory_process):
@@ -109,10 +110,10 @@ async def test_offline_histories_keep_local_ids_and_foreground_state(memory_proc
     right = await server.command(action="state", mood="专心阅读")
     merged_pc = await pc.command(action="apply", entries=right["entries"], preserve_state=True)
     assert merged_pc["mood"] == "期待散步"
-    assert {"本地散步计划。", "服务器上的阅读计划。"} <= set(merged_pc["turns"])
+    assert {"本地散步计划。", "服务器上的阅读计划。"} <= set(merged_pc["experiences"])
     merged_server = await server.command(action="apply", entries=left["entries"])
     assert merged_server["mood"] == "期待散步"
-    assert set(merged_server["turns"]) == set(merged_pc["turns"])
+    assert set(merged_server["experiences"]) == set(merged_pc["experiences"])
 
 
 async def test_replica_dream_references_imported_experience(memory_process):
@@ -135,7 +136,7 @@ async def test_sync_survives_restart_with_existing_memory(memory_process):
     replica = await server.command(action="apply", entries=saved["entries"])
     assert replica["mood"] == "记得我们的约定"
     assert replica["facts"][0]["source_refs"] == ["experience:1"]
-    assert replica["turns"] == ["重启前我们已见过面。"]
+    assert replica["experiences"] == ["重启前我们已见过面。"]
 
 
 async def test_replica_updates_original_fact_without_duplicate_version(memory_process):
@@ -156,10 +157,8 @@ async def test_imported_interrupted_action_is_failure_not_replayed(memory_proces
     pc, server = await memory_process("pc"), await memory_process("server")
     interrupted = await pc.command(action="interrupted")
     recovered = await server.command(action="apply", entries=interrupted["entries"])
-    assert recovered["tasks"][0]["status"] == "failed"
-    assert recovered["calls"][0]["status"] == "completed"
-    assert recovered["calls"][0]["result"]["is_error"] is True
-    assert "interrupted" in recovered["calls"][0]["result"]["text"].lower()
+    assert not recovered["tasks"] and not recovered["calls"]
+    assert interrupted["calls"][0]["status"] == "pending"
 
 
 async def test_enable_sync_on_unversioned_existing_database(memory_process, tmp_path):
@@ -212,5 +211,5 @@ async def test_rejoin_keeps_conversation_from_both_session_branches(memory_proce
     await server.command(action="new_session")
     other = await server.command(action="material", kind="user", text="服务器上的阅读。")
     merged = await pc.command(action="apply", entries=other["entries"], preserve_state=True)
-    assert {"离线时的散步。", "服务器上的阅读。"} <= set(merged["turns"])
+    assert {"离线时的散步。", "服务器上的阅读。"} <= set(merged["experiences"])
     assert merged["mood"] == "保持前台的感受"

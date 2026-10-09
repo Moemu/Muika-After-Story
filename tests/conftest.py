@@ -178,5 +178,4 @@ def redirect_get_session(db_session, session_ctx_factory, monkeypatch):
     monkeypatch.setattr("muika.database.db.get_session", factory)
     monkeypatch.setattr("muika.core.memory.get_session", factory)
     monkeypatch.setattr("muika.core.topic_manager.get_session", factory)
-    monkeypatch.setattr("muika.core.agent.task_store.get_session", factory)
     return db_session

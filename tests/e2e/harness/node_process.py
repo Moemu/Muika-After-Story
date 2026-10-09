@@ -6,10 +6,12 @@ import sys
 from pathlib import Path
 
 from pytest import MonkeyPatch
+from sqlalchemy import select
 
 from muika.config import mas_config
 from muika.core.memory_models import StateUpdate
-from muika.database.db import init_db
+from muika.database.db import get_session, init_db
+from muika.database.orm_models import ExperienceORM
 from muika.ipc.bootstrap import CoreBootstrap
 from muika.llm._schema import ToolCall
 from muika.llm.utils.tools import dispatch_tool
@@ -75,6 +77,14 @@ async def main() -> None:
                         {tool.name: tool for tool in get_tool_list()},
                     )
             assert core.node is not None
+            async with get_session(record_activity=False) as db:
+                dialogue = list(
+                    await db.scalars(
+                        select(ExperienceORM.content)
+                        .where(ExperienceORM.kind.in_(["user", "muika", "agent"]))
+                        .order_by(ExperienceORM.id)
+                    )
+                )
             print(
                 json.dumps(
                     {
@@ -87,6 +97,7 @@ async def main() -> None:
                         "conversations": sum(call["name"] == "conversation" for call in app.scripted.calls),
                         "mood": core.muika.memory.persistent.mood,
                         "turns": [turn.content for turn in core.muika.memory.recent_turns],
+                        "experiences": dialogue,
                         "reminders": sum("A scheduled reminder" in call["prompt"] for call in app.scripted.calls),
                     }
                 ),

@@ -6,6 +6,7 @@ import pytest
 from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
+from muika.core.agent.task_store import TaskStore
 from muika.llm import ModelRequest
 from muika.llm._schema import ToolCall
 
@@ -80,7 +81,11 @@ async def test_delegated_file_write_is_grounded(core_app_factory, recorder, monk
     assert "poem.txt" in final
 
     # 真实性不变量二：工具调用由真实管线执行并持久化为 completed
-    calls = app.db_query("SELECT status, payload FROM agent_call")
+    calls = [
+        {"status": call.status, "payload": call.model_dump_json()}
+        for task in await TaskStore().load()
+        for call in await TaskStore().calls(task.id)
+    ]
     assert [row["status"] for row in calls] == ["completed"]
     assert "write_file" in calls[0]["payload"]
 
@@ -94,7 +99,7 @@ async def test_delegated_file_write_is_grounded(core_app_factory, recorder, monk
     assert steps[1]["saw"].startswith("tool:") and target.name in steps[1]["saw"]
 
     # 真实性不变量四：行动任务以 completed 持久化
-    tasks = app.db_query("SELECT status FROM agent_task")
+    tasks = [{"status": task.status} for task in await TaskStore().load()]
     assert [row["status"] for row in tasks] == ["completed"]
 
     # 全链路恰好两轮可见回复，剧本耗尽，无多余 LLM 调用

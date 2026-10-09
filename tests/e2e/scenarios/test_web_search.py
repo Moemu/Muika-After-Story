@@ -8,6 +8,7 @@ from harness import ScriptedTurn, assert_clean_visible
 from muika.config import mas_config
 from muika.core.actions.tools import _search
 from muika.core.actions.tools._search import SearchResult
+from muika.core.agent.task_store import TaskStore
 from muika.llm import ModelRequest
 from muika.llm._schema import ToolCall
 
@@ -104,7 +105,11 @@ async def test_agent_web_search_is_grounded_and_recorded(core_app_factory, recor
     assert steps[1]["saw"].startswith("tool:") and RELEASE_URL in steps[1]["saw"]
 
     # 真实性不变量三：工具调用持久化为 completed
-    persisted = app.db_query("SELECT status, payload FROM agent_call")
+    persisted = [
+        {"status": call.status, "payload": call.model_dump_json()}
+        for task in await TaskStore().load()
+        for call in await TaskStore().calls(task.id)
+    ]
     assert [row["status"] for row in persisted] == ["completed"]
     assert "web_search" in persisted[0]["payload"]
 
@@ -170,7 +175,11 @@ async def test_unconfigured_web_search_reports_unavailability(core_app_factory, 
     assert [step["tool_calls"] for step in steps] == [["web_search"], []]
     assert steps[1]["saw"].startswith("tool:") and "not configured" in steps[1]["saw"]
 
-    persisted = app.db_query("SELECT status, payload FROM agent_call")
+    persisted = [
+        {"status": call.status, "payload": call.model_dump_json()}
+        for task in await TaskStore().load()
+        for call in await TaskStore().calls(task.id)
+    ]
     assert [row["status"] for row in persisted] == ["completed"]
     assert "web_search" in persisted[0]["payload"]
 

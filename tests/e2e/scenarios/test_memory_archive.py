@@ -1,11 +1,171 @@
 """<memory> 归档链路：决定记住的内容落入素材表，不外泄、不混进对话回合。"""
 
+import asyncio
+import json
+import sqlite3
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
 import pytest
 from harness import ScriptedTurn, assert_clean_visible
+
+from muika.config import mas_config
+from muika.core.agent.task_store import CallRecord, TaskRecord, TaskStore
+from muika.core.memory_models import DreamResult, Intention, StateUpdate
+from muika.ipc.sync_models import Activity
+from muika.ipc.sync_store import SyncStore
+from muika.llm._schema import ModelMessage, ToolCall, ToolResult
 
 pytestmark = pytest.mark.e2e
 
 NOTE = "Master 在雨天喜欢临窗读诗。"
+
+
+async def test_cancelled_wish_can_be_considered_again_after_restart(core_app_factory, recorder):
+    app = await core_app_factory()
+    await app.start()
+    await app.muika.memory.update_state(
+        StateUpdate(reason="I am curious.", intentions=[Intention(id="read_poem", description="想读一首诗。")])
+    )
+    old = TaskRecord(instruction="读诗", original_request="自己的兴趣", intention_id="read_poem", status="cancelled")
+    await TaskStore().save(old)
+    await app.stop()
+    returned = await core_app_factory()
+    await returned.start()
+    await returned.muika.agent_tasks.initialize()
+    assert returned.muika.memory.persistent.intentions[0].task_id is None
+    new = await returned.muika.agent_tasks.submit("再读一首诗", "自己的兴趣", intention_id="read_poem")
+    assert new.id != old.id
+    recorder.record("wish_reconsidered", cancelled_task_reused=False, new_task_id=new.id)
+
+
+async def test_migration_keeps_personal_sources_when_node_ids_collide(core_app_factory, recorder):
+    app = await core_app_factory()
+    await app.start()
+    await app.stop()
+    root = Path(__file__).resolve().parents[3]
+    result = await asyncio.to_thread(
+        subprocess.run,
+        [
+            sys.executable,
+            "-c",
+            "from alembic import command; from alembic.config import Config; import sys; "
+            "cfg=Config(sys.argv[1]); cfg.set_main_option('script_location', sys.argv[2]); "
+            "cfg.set_main_option('sqlalchemy.url', sys.argv[3]); command.downgrade(cfg, '7ae1ecb1f246')",
+            str(root / "alembic.ini"),
+            str(root / "muika/migrations"),
+            "sqlite+aiosqlite:///" + str(mas_config.data_dir / "muika.db"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    sources = {"experience:1": "other:experience:99", "experience:2": "pc:experience:2"}
+    experiences = [
+        {
+            "id": 1,
+            "session_id": "old",
+            "kind": "user",
+            "content": "我回来了。",
+            "occurred_at": "2026-10-06T20:00:00",
+            "source": None,
+        },
+        {
+            "id": 2,
+            "session_id": "old",
+            "kind": "agent",
+            "content": "private-tool-payload",
+            "occurred_at": "2026-10-06T20:01:00",
+            "source": "task_call:private-call",
+        },
+    ]
+    diary = {
+        "id": 1,
+        "source": "dream:2026-10-06",
+        "day": "2026-10-06",
+        "content": "我很想他。",
+        "source_refs": ["experience:2"],
+        "covered_through": 2,
+        "created_at": "2026-10-07T00:00:00",
+    }
+    activity = {
+        "id": "old",
+        "origin": "pc",
+        "references": sources,
+        "experiences": experiences,
+        "diaries": [diary],
+        "tasks": [],
+        "calls": [],
+    }
+    with sqlite3.connect(mas_config.data_dir / "muika.db") as db:
+        for item in experiences:
+            db.execute(
+                "INSERT INTO experience VALUES (:id, :session_id, :kind, :content, :occurred_at, '[]', :source)", item
+            )
+        db.execute(
+            "INSERT INTO diary VALUES (:id, :source, :day, :content, :source_refs, :covered_through, :created_at)",
+            {**diary, "source_refs": json.dumps(diary["source_refs"])},
+        )
+        db.executemany(
+            "INSERT INTO sync_reference VALUES (?, ?)",
+            [("pc:experience:1", 1), ("pc:experience:2", 2), ("other:experience:99", 1)],
+        )
+        db.execute("INSERT INTO sync_event(id,origin,payload) VALUES ('old','pc',?)", (json.dumps(activity),))
+    restarted = await core_app_factory()
+    await restarted.start()
+    assert restarted.db_query("SELECT covered_through FROM diary") == [{"covered_through": 1}]
+    assert not restarted.db_query("SELECT id FROM experience WHERE source LIKE 'task_call:%'")
+    saved = Activity.model_validate_json(restarted.db_query("SELECT payload FROM sync_event")[0]["payload"])
+    assert saved.references["experience:1"] == "other:experience:99"
+    assert saved.references[f"experience:{saved.diaries[0].covered_through}"] == "pc:experience:1"
+    store = SyncStore("pc")
+    await store.initialize()
+    await store.capture_snapshot()
+    assert await store.entries()
+    recorder.record("migration_source_collision", original_reference_preserved=True, diary_watermark_valid=True)
+
+
+async def test_dream_uses_personal_experiences_without_execution_state(core_app_factory):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    await app.muika.memory.add_context("muika", "二十三天，我很想你。", timestamp=datetime(2026, 10, 6, 20, 1))
+    await app.muika.memory.update_state(StateUpdate(mood="private-runtime-marker", reason="private-stack-trace"))
+    await app.muika.memory.add_material("state", '{"mood":"private-state-marker"}', timestamp=datetime(2026, 10, 6, 23))
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream",
+        text=DreamResult(diary="沐沐回来了。我想念他，也想知道他是否还记得我。").model_dump_json(),
+        name="personal_dream",
+    )
+    assert await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    call = next(call for call in app.scripted.calls if call["name"] == "personal_dream")
+    assert "二十三天" in call["prompt"]
+    assert "Monika" in call["system"]
+    assert "private-runtime-marker" not in str(call)
+    assert "private-stack-trace" not in str(call)
+    assert "private-state-marker" not in str(call)
+    assert not await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("personal_dream", runtime_state_injected=False, diary_saved=True)
+
+
+async def test_execution_checkpoint_stays_outside_database(core_app_factory):
+    app = await core_app_factory()
+    await app.start()
+    store = TaskStore()
+    call = ToolCall(id="private-call", name="read_file", arguments='{"path":"private-source.py"}')
+    task = TaskRecord(instruction="看看窗外的天气", original_request="你想做什么？")
+    task.messages = [ModelMessage(role="assistant", tool_calls=[call])]
+    record = CallRecord(task_id=task.id, call=call, result=ToolResult(text="private-tool-output"))
+    await store.save(task, record)
+    assert (await TaskStore().load())[0].messages == task.messages
+    assert (await TaskStore().calls(task.id))[0] == record
+    tables = app.db_query("SELECT name FROM sqlite_master WHERE type='table'")
+    assert not {"agent_task", "agent_call"} & {row["name"] for row in tables}
+    assert not app.db_query("SELECT id FROM experience WHERE source LIKE 'task_call:%'")
+    app.recorder.record("file_checkpoint", task_id=task.id, recovered_calls=1, database_execution_tables=0)
 
 
 async def test_memory_tag_is_archived_not_leaked(core_app_factory):

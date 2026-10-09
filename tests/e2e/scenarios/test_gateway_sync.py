@@ -16,9 +16,87 @@ from pathlib import Path
 import aiohttp
 import pytest
 
+from muika.ipc.sync_models import SYNC_PROTOCOL
 from tests.e2e.harness.process import MemoryProcess
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+async def test_gateway_archives_execution_from_old_history(tmp_path, recorder):
+    from muika.ipc.gateway import Gateway
+    from muika.ipc.sync_models import Activity
+
+    directory = tmp_path / "old-gateway"
+    directory.mkdir()
+    activity = {
+        "id": "old-activity",
+        "origin": "pc",
+        "tasks": [{"messages": "private-tool-payload"}],
+        "calls": [],
+        "experiences": [
+            {
+                "id": 1,
+                "session_id": "old",
+                "kind": "user",
+                "content": "我回来了。",
+                "occurred_at": "2026-10-06T20:00:00",
+                "source": None,
+            },
+            {
+                "id": 2,
+                "session_id": "old",
+                "kind": "agent",
+                "content": "private-tool-payload",
+                "occurred_at": "2026-10-06T20:01:00",
+                "source": "task_call:private-call",
+            },
+            {
+                "id": 3,
+                "session_id": "old",
+                "kind": "agent",
+                "content": "imported-tool-payload",
+                "occurred_at": "2026-10-06T20:02:00",
+                "source": None,
+            },
+        ],
+        "references": {
+            "experience:1": "other:experience:99",
+            "experience:2": "pc:experience:2",
+            "experience:3": "pc:experience:2",
+        },
+        "diaries": [
+            {
+                "id": 1,
+                "source": "dream:2026-10-06",
+                "day": "2026-10-06",
+                "content": "我想念他。",
+                "source_refs": ["experience:2"],
+                "covered_through": 2,
+                "created_at": "2026-10-07T00:00:00",
+            }
+        ],
+    }
+    with sqlite3.connect(directory / "gateway.db") as db:
+        db.execute(
+            "CREATE TABLE activity(sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL)"
+        )
+        db.execute("INSERT INTO activity(id,payload) VALUES (?,?)", (activity["id"], json.dumps(activity)))
+    gateway = Gateway(directory, "127.0.0.1", 0, "test-ipc-secret")
+    await gateway.start()
+    try:
+        async with gateway.db.execute("SELECT payload FROM activity") as cursor:
+            saved = (await cursor.fetchone())[0]
+        parsed = Activity.model_validate_json(saved)
+        assert [item.content for item in parsed.experiences] == ["我回来了。"]
+        assert parsed.references[f"experience:{parsed.diaries[0].covered_through}"] == "pc:experience:1"
+        assert parsed.references["experience:1"] == "other:experience:99"
+        assert "private-tool-payload" not in saved
+        assert "imported-tool-payload" not in saved
+        assert "private-tool-payload" in (directory / "activity-before-sync-v2.json").read_text(encoding="utf-8")
+        recorder.record("gateway_history_migrated", preserved_dialogue=1, execution_payloads=0)
+    finally:
+        await gateway.stop()
 
 
 @pytest.fixture
@@ -105,7 +183,7 @@ async def gateway_process(tmp_path, recorder):
             (trace_path.parent / "gateway.log").write_bytes((tmp_path / "gateway.log").read_bytes())
 
 
-async def connect_core(session, base, name, *, protocol="1"):
+async def connect_core(session, base, name, *, protocol=SYNC_PROTOCOL):
     return await session.ws_connect(
         base + "/cores",
         headers={
@@ -179,7 +257,7 @@ async def test_attachments_use_each_devices_gateway_address(gateway_process, nod
     await bot_output(bot, recorder)
     await pc.command(action="handoff", target="server")
     await wait_node(server, active=True)
-    assert (await server.command(action="status"))["turns"].count("这是聊天附件。") == 1
+    assert (await server.command(action="status"))["experiences"].count("这是聊天附件。") == 1
 
 
 async def test_gateway_handoff_fences_old_output_without_reply_pairing(gateway_process):
@@ -477,8 +555,8 @@ async def test_network_partition_merges_both_live_histories(gateway_process, nod
         await wait_node(server, active=False, mood="前台的安心")
         for node in (pc, server):
             state = await node.command(action="status")
-            assert state["turns"].count("远端留下的一段经历。") == 1
-            assert state["turns"].count("本地留下的一段经历。") == 1
+            assert state["experiences"].count("远端留下的一段经历。") == 1
+            assert state["experiences"].count("本地留下的一段经历。") == 1
             assert state["conversations"] == 1
     finally:
         await runner.cleanup()
@@ -502,7 +580,7 @@ async def test_real_core_shutdown_takeover_retains_memory(gateway_process, node_
     await bot.send_json({"type": "user_message", "id": "second", "message": "接着陪我聊聊。"})
     assert (await bot_output(bot, recorder))["content"] == "我记得我们的散步约定。"
     restored = await server.command(action="status")
-    assert restored["turns"].count("记住我们的散步约定。") == 1
+    assert restored["experiences"].count("记住我们的散步约定。") == 1
 
 
 async def test_pc_becomes_primary_after_server_started_first(gateway_process, node_process):
@@ -578,7 +656,7 @@ async def test_reconnect_keeps_foreground_feeling_without_replaying_output(gatew
     await restart()
     restored = await wait_node(pc, active=True, connected=True, mood="离线时留下的感受")
     await wait_node(server, active=False, connected=True, mood="离线时留下的感受")
-    assert restored["turns"].count("失联时的对话。") == 1
+    assert restored["experiences"].count("失联时的对话。") == 1
     assert restored["conversations"] == conversations
     remote = await session.ws_connect(base + "/ws", headers={"X-Client-Name": "remote"})
     with pytest.raises(TimeoutError):
@@ -855,6 +933,11 @@ async def test_invalid_history_backs_off_without_repeated_stack_traces(live_gate
 
     monkeypatch.setattr(gateway, "_history", counted_history)
     pc, _ = await node_process("pc", base, fallback=True)
+    for _ in range(100):
+        if attempts:
+            break
+        await asyncio.sleep(0.1)
+    assert attempts
     await asyncio.sleep(7)
     status = await pc.command(action="status")
     assert not status["active"]

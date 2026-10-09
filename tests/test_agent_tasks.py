@@ -58,8 +58,7 @@ class StepModel:
 
 
 @pytest.fixture
-def factory(monkeypatch, db_session, session_ctx_factory):
-    monkeypatch.setattr("muika.core.agent.task_store.get_session", lambda: session_ctx_factory(db_session))
+def factory(monkeypatch):
     monkeypatch.setattr("muika.plugin.func_call.caller._caller_data", get_function_calls().copy())
 
     def create(script, queue=None):
@@ -507,7 +506,7 @@ async def test_failed_process_arguments_are_not_reclassified_as_unknown_actions(
     assert (await manager.store.calls(task.id))[0].status == "completed"
 
 
-async def test_completed_call_missing_from_memory_is_restored_once(factory, redirect_get_session):
+async def test_completed_call_stays_in_task_files_after_restart(factory, redirect_get_session):
     memory = MemoryManager()
     manager = factory([])
     task = await manager.submit("Read a poem", "Read it")
@@ -525,9 +524,8 @@ async def test_completed_call_missing_from_memory_is_restored_once(factory, redi
         restored.state.memory = memory
         await restored.initialize()
     hits = await memory.search(MemoryQuery(terms=["old poem"]))
-    assert len(hits) == 1
-    assert "2026-09-01" in hits[0].occurred_at
-    assert f"task_output:{task.id}:{call.id}" in hits[0].content
+    assert not hits
+    assert (await restored.store.calls(task.id))[0] == call
 
 
 async def test_same_intention_does_not_submit_duplicate_task_after_restart(factory, redirect_get_session):

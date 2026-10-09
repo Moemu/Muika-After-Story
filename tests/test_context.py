@@ -226,9 +226,9 @@ async def test_summary_failure_does_not_block_fitting_primary_request(
     assert before.working_summary in sent[0].system
     restored = MemoryManager()
     await restored.load()
-    assert restored.snapshot.working_summary == before.working_summary
+    assert restored.snapshot.working_summary == restored.snapshot.latest_dialogue_summary == ""
     assert restored.snapshot.summary_through == before.summary_through
-    assert list(restored.recent_turns) == request.history
+    assert not restored.recent_turns
 
 
 async def test_summary_cancellation_propagates(fake_llm_factory):

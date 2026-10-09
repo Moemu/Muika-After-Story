@@ -6,12 +6,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from muika.core.agent.task_store import CallRecord, TaskRecord
 from muika.core.memory_models import Diary, Experience, Fact, MemorySnapshot
 from muika.core.scheduler import Reminder
 from muika.core.state import StateRhythm
 
-SYNC_PROTOCOL = "1"
+SYNC_PROTOCOL = "2"
 MAX_SYNC_BYTES = 32 * 1024 * 1024
 
 
@@ -59,8 +58,6 @@ class Activity(BaseModel):
     experiences: list[RecordedExperience] = Field(default_factory=list)
     facts: list[RecordedFact] = Field(default_factory=list)
     diaries: list[Diary] = Field(default_factory=list)
-    tasks: list[TaskRecord] = Field(default_factory=list)
-    calls: list[CallRecord] = Field(default_factory=list)
     recalls: list[RecordedRecall] = Field(default_factory=list)
     reminders: list[Reminder] = Field(default_factory=list)
 

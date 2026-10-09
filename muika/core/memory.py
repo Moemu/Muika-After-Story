@@ -43,11 +43,13 @@ from muika.llm.context import (
     over_budget,
     public_text,
     request_tokens,
+    split_text,
 )
 from muika.models import Resource
 from muika.utils.logger import logger
 
 if TYPE_CHECKING:
+    from muika.llm import BaseLLM
     from muika.llm.context import CompactionModel
 
 from .memory_models import (
@@ -82,6 +84,10 @@ __all__ = [
     "MemoryQuery",
 ]
 
+DIALOGUE_SUMMARY_INTERVAL = timedelta(minutes=5)
+DIALOGUE_SUMMARY_MIN_TURNS = 6
+NON_REFLECTION_KINDS = ("legacy", "state")
+
 
 class MemoryManager:
     """协调记忆事务和有预算的工作视图。"""
@@ -92,6 +98,7 @@ class MemoryManager:
         self.snapshot = MemorySnapshot()
         self._lock = asyncio.Lock()
         self._context_lock = asyncio.Lock()
+        self._last_summary_attempt = datetime.now()
 
     @property
     def session(self) -> SessionState:
@@ -111,6 +118,7 @@ class MemoryManager:
     async def load(self, *, record_activity: bool = True) -> None:
         """恢复记忆；数据库失败时不替换当前状态。"""
         async with self._lock:
+            previous_session = self.session.session_id
             async with get_session(record_activity=record_activity) as db:
                 saved = await db.get(MemoryRuntimeORM, 1)
                 snapshot = MemorySnapshot.model_validate_json(saved.payload) if saved else MemorySnapshot()
@@ -120,21 +128,13 @@ class MemoryManager:
                     row.id: fact_from_row(row)
                     for row in await db.scalars(select(FactORM).where(FactORM.active.is_(True)))
                 }
-                rows = list(
-                    await db.scalars(
-                        select(ExperienceORM)
-                        .where(
-                            ExperienceORM.session_id.in_([snapshot.session.session_id, *snapshot.resume_sessions]),
-                            ExperienceORM.id > snapshot.summary_through,
-                            ExperienceORM.kind.in_(["user", "muika", "agent"]),
-                        )
-                        .order_by(ExperienceORM.id)
-                    )
-                )
+                if previous_session != snapshot.session.session_id:
+                    snapshot.working_summary = snapshot.latest_dialogue_summary
                 snapshot.session.is_first_session = snapshot.first_interaction_at is None and not facts
                 await self._save_snapshot(db, snapshot)
             self.snapshot, self.facts = snapshot, facts
-            self.recent_turns = deque(self._turn(row) for row in rows)
+            if previous_session != snapshot.session.session_id:
+                self.recent_turns.clear()
 
     async def contains_source(self, source: str) -> bool:
         """检查同一外部事件是否已成为本地经历。"""
@@ -293,11 +293,74 @@ class MemoryManager:
             snapshot = self.snapshot.model_copy(deep=True)
             snapshot.session = SessionState(is_first_session=not self.has_history)
             snapshot.resume_sessions = []
-            snapshot.working_summary, snapshot.summary_through = "", 0
+            snapshot.working_summary, snapshot.summary_through = snapshot.latest_dialogue_summary, 0
             async with get_session() as db:
                 await self._save_snapshot(db, snapshot)
             self.snapshot = snapshot
             self.recent_turns.clear()
+
+    async def summarize_dialogue(self, model: "BaseLLM", *, force: bool = False) -> bool:
+        """定期或在结束前保存关系摘要，失败时保留已有摘要及原文。"""
+        async with self._context_lock:
+            now = datetime.now()
+            if not force and now - self._last_summary_attempt < DIALOGUE_SUMMARY_INTERVAL:
+                return False
+            self._last_summary_attempt = now
+            session_id = self.session.session_id
+            async with get_session(record_activity=False) as db:
+                rows = await db.scalars(
+                    select(ExperienceORM)
+                    .where(
+                        ExperienceORM.session_id.in_([session_id, *self.snapshot.resume_sessions]),
+                        ExperienceORM.id > self.snapshot.dialogue_summary_through,
+                        ExperienceORM.kind.in_(["user", "muika", "agent"]),
+                        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+                    )
+                    .order_by(ExperienceORM.id)
+                )
+                turns = [self._turn(row) for row in rows]
+            if not turns or not any(turn.role in {"user", "muika"} for turn in turns):
+                return False
+            if not force and len(turns) < DIALOGUE_SUMMARY_MIN_TURNS:
+                return False
+            system = (
+                "Summarize Muika's conversation for her next meeting with the player. "
+                "Preserve feelings, shared interests, relationship changes, corrections and meaningful outcomes. "
+                "Distinguish wishes, attempts and completed actions. Do not turn this into a task list. "
+                "Omit tool arguments, source code, execution logs, IDs and technical troubleshooting details. "
+                "Keep concrete personal details and unresolved feelings. Do not invent missing experiences. "
+                "Use the conversation's language. Return only the concise summary, without private reasoning."
+            )
+            transcript = (
+                self.snapshot.latest_dialogue_summary
+                + "\n"
+                + "\n".join(f"[{turn.timestamp.isoformat()} | {turn.role}] {turn.content}" for turn in turns)
+            )
+            capacity = int(input_budget(model.config) * 0.6) - estimate_tokens(system) - 128
+            try:
+                parts = []
+                for chunk in split_text(transcript, capacity):
+                    response = await model.ask(ModelRequest(prompt=chunk, system=system, purpose="dialogue_summary"))
+                    parts.append(public_text(response.require_content()))
+                summary = "\n".join(parts).strip()
+                if not summary or estimate_tokens(summary) > input_budget(model.config) * 0.25:
+                    raise ValueError("The dialogue summary is empty or exceeds its budget")
+                async with self._lock:
+                    if self.session.session_id != session_id:
+                        return False
+                    snapshot = self.snapshot.model_copy(deep=True)
+                    snapshot.latest_dialogue_summary = summary
+                    snapshot.dialogue_summary_at = now
+                    snapshot.dialogue_summary_through = turns[-1].id
+                    async with get_session() as db:
+                        await self._save_snapshot(db, snapshot)
+                    self.snapshot = snapshot
+                logger.info(f"[Memory] Saved dialogue summary | turns={len(turns)} characters={len(summary)}")
+                return True
+            except Exception as exc:
+                logger.warning(f"[Memory] Dialogue summary failed: {type(exc).__name__}")
+                logger.debug(f"[Memory] Dialogue summary error: {exc}")
+                return False
 
     def get_memory_prompt(self, budget: int = 2048) -> str:
         """在预算内提供关系日期及按回顾权重选择的最多二十条原子事实。"""
@@ -390,6 +453,8 @@ class MemoryManager:
             for item in snapshot.state.intentions:
                 if item.task_id == task_id and item.status not in {"resolved", "abandoned"}:
                     item.status = "awaiting_feedback" if status == "completed" else "open"
+                    if status == "cancelled":
+                        item.task_id = None
                     item.updated_at = datetime.now()
             async with get_session() as db:
                 await self._save_snapshot(db, snapshot)
@@ -413,7 +478,10 @@ class MemoryManager:
             days = (
                 await db.execute(
                     select(func.substr(ExperienceORM.occurred_at, 1, 10), func.max(ExperienceORM.id))
-                    .where(ExperienceORM.kind != "legacy")
+                    .where(
+                        ExperienceORM.kind.not_in(NON_REFLECTION_KINDS),
+                        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+                    )
                     .group_by(func.substr(ExperienceORM.occurred_at, 1, 10))
                 )
             ).all()
@@ -435,6 +503,8 @@ class MemoryManager:
                 .where(
                     ExperienceORM.occurred_at >= day.isoformat(),
                     ExperienceORM.occurred_at < (day + timedelta(days=1)).isoformat(),
+                    ExperienceORM.kind.not_in(NON_REFLECTION_KINDS),
+                    or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
                 )
                 .order_by(ExperienceORM.occurred_at, ExperienceORM.id)
             )

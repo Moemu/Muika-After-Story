@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,11 +11,8 @@ from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 
 from muika.config import mas_config
-from muika.database.db import get_session
-from muika.database.orm_models import AgentCallORM, AgentTaskORM
 from muika.llm._schema import MediaReference, ModelMessage, ToolCall, ToolResult
 from muika.models import Resource
 
@@ -73,49 +71,48 @@ class CallRecord(BaseModel):
 
 
 class TaskStore:
-    """协调数据库检查点与持久文件输出。"""
+    """原子保存文件检查点与执行输出。"""
 
     def __init__(self) -> None:
         self.directory = mas_config.data_dir.resolve() / "agent_tasks"
         self._write_lock = asyncio.Lock()
 
     async def load(self) -> list[TaskRecord]:
-        async with get_session() as session:
-            rows = await session.scalars(select(AgentTaskORM).order_by(AgentTaskORM.created_at, AgentTaskORM.id))
-            return [TaskRecord.model_validate_json(row.payload) for row in rows]
+        tasks = [
+            TaskRecord.model_validate(json.loads(path.read_text(encoding="utf-8"))["task"])
+            for path in self.directory.glob("*/checkpoint.json")
+        ]
+        return sorted(tasks, key=lambda task: (task.created_at, task.id))
 
     async def calls(self, task_id: str) -> list[CallRecord]:
-        async with get_session() as session:
-            rows = await session.scalars(select(AgentCallORM).where(AgentCallORM.task_id == task_id))
-            return [CallRecord.model_validate_json(row.payload) for row in rows]
+        path = self.directory / task_id / "checkpoint.json"
+        if not path.exists():
+            return []
+        return [CallRecord.model_validate(call) for call in json.loads(path.read_text(encoding="utf-8"))["calls"]]
 
     async def save(self, task: TaskRecord, call: CallRecord | None = None) -> None:
-        """在一个事务中保存任务和本次动作，失败交由执行层停止。"""
+        """在一个文件中提交任务和动作，失败交由执行层停止。"""
         async with self._write_lock:
             task.updated_at = _now()
-            async with get_session() as session:
-                await session.merge(
-                    AgentTaskORM(
-                        id=task.id,
-                        status=task.status,
-                        revision=task.revision,
-                        created_at=task.created_at,
-                        updated_at=task.updated_at,
-                        payload=task.model_dump_json(),
-                    )
-                )
-                if call is not None:
-                    await session.merge(
-                        AgentCallORM(
-                            id=call.id,
-                            task_id=task.id,
-                            status=call.status,
-                            payload=call.model_dump_json(),
-                        )
-                    )
+            calls = {item.id: item for item in await self.calls(task.id)}
+            if call is not None:
+                if call.task_id != task.id:
+                    raise ValueError("The call belongs to another task")
+                calls[call.id] = call
+            self.save_output(
+                task.id,
+                "checkpoint.json",
+                json.dumps(
+                    {
+                        "task": task.model_dump(mode="json"),
+                        "calls": [item.model_dump(mode="json") for item in calls.values()],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
 
     def save_output(self, task_id: str, name: str, text: str) -> Path:
-        """原子写入完整输出，数据库仅保存可读摘要及索引。"""
+        """原子写入检查点或完整输出。"""
         directory = self.directory / task_id
         directory.mkdir(parents=True, exist_ok=True)
         destination = directory / name

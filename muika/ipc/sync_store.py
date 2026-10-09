@@ -10,7 +10,6 @@ from pydantic import TypeAdapter
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from muika.core.agent.task_store import CallRecord, TaskRecord
 from muika.core.events import TimeTickEvent
 from muika.core.memory_models import MemorySnapshot
 from muika.core.scheduler import Reminder
@@ -18,8 +17,6 @@ from muika.core.state import MuikaState, StateRhythm
 from muika.database.crud import diary_from_row, experience_from_row, fact_from_row
 from muika.database.db import get_session
 from muika.database.orm_models import (
-    AgentCallORM,
-    AgentTaskORM,
     Base,
     DiaryORM,
     ExperienceORM,
@@ -30,7 +27,6 @@ from muika.database.orm_models import (
     SyncReferenceORM,
     SyncStateORM,
 )
-from muika.llm._schema import ToolResult
 
 from .sync_models import (
     Activity,
@@ -79,8 +75,6 @@ class SyncStore:
                 FactORM,
                 DiaryORM,
                 MemoryRuntimeORM,
-                AgentTaskORM,
-                AgentCallORM,
                 FactRecallORM,
                 SyncStateORM,
             ):
@@ -132,10 +126,6 @@ class SyncStore:
                 await self._source(db, "diary", row.id)
             elif isinstance(row, FactRecallORM):
                 activity.recalls.append(RecordedRecall(fact_id=row.fact_id, day=row.day))
-            elif isinstance(row, AgentTaskORM):
-                activity.tasks.append(TaskRecord.model_validate_json(row.payload))
-            elif isinstance(row, AgentCallORM):
-                activity.calls.append(CallRecord.model_validate_json(row.payload))
             elif isinstance(row, SyncStateORM) and row.key.startswith("reminder:"):
                 activity.reminders.append(Reminder.model_validate_json(row.payload))
 
@@ -145,8 +135,6 @@ class SyncStore:
                 activity.experiences,
                 activity.facts,
                 activity.diaries,
-                activity.tasks,
-                activity.calls,
                 activity.recalls,
                 activity.reminders,
             )
@@ -159,6 +147,7 @@ class SyncStore:
             used.update(f"experience:{diary.covered_through}" for diary in activity.diaries)
             if activity.snapshot is not None:
                 used.add(f"experience:{activity.snapshot.summary_through}")
+                used.add(f"experience:{activity.snapshot.dialogue_summary_through}")
                 used.update(ref for intention in activity.snapshot.state.intentions for ref in intention.source_refs)
             for ref in used:
                 kind, separator, value = ref.partition(":")
@@ -335,25 +324,32 @@ class SyncStore:
                         merged_sessions.update(previous.resume_sessions)
                 snapshot.resume_sessions = sorted(set(snapshot.resume_sessions) | merged_sessions)
                 snapshot.summary_through = await reference("experience", snapshot.summary_through)
-                if (
-                    snapshot.summary_through
-                    and await db.scalar(
-                        select(ExperienceORM.id)
-                        .where(
-                            ExperienceORM.id <= snapshot.summary_through,
-                            ExperienceORM.session_id.in_([snapshot.session.session_id, *snapshot.resume_sessions]),
-                            ExperienceORM.kind.in_(["user", "muika", "agent"]),
-                            ExperienceORM.id.not_in(
-                                select(SyncReferenceORM.local_id).where(
-                                    SyncReferenceORM.source.like(f"{activity.origin}:experience:%")
-                                )
-                            ),
+                snapshot.dialogue_summary_through = await reference("experience", snapshot.dialogue_summary_through)
+                uncovered: set[int] = set()
+                for coverage in {snapshot.summary_through, snapshot.dialogue_summary_through}:
+                    if (
+                        coverage
+                        and await db.scalar(
+                            select(ExperienceORM.id)
+                            .where(
+                                ExperienceORM.id <= coverage,
+                                ExperienceORM.session_id.in_([snapshot.session.session_id, *snapshot.resume_sessions]),
+                                ExperienceORM.kind.in_(["user", "muika", "agent"]),
+                                ExperienceORM.id.not_in(
+                                    select(SyncReferenceORM.local_id).where(
+                                        SyncReferenceORM.source.like(f"{activity.origin}:experience:%")
+                                    )
+                                ),
+                            )
+                            .limit(1)
                         )
-                        .limit(1)
-                    )
-                    is not None
-                ):
+                        is not None
+                    ):
+                        uncovered.add(coverage)
+                if snapshot.summary_through in uncovered:
                     snapshot.summary_through, snapshot.working_summary = 0, ""
+                if snapshot.dialogue_summary_through in uncovered:
+                    snapshot.dialogue_summary_through = 0
                 for intention in snapshot.state.intentions:
                     intention.source_refs = await refs(intention.source_refs)
                 await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
@@ -371,35 +367,6 @@ class SyncStore:
                         }
                     )
                     saved.payload = foreground.model_dump_json()
-            for task in activity.tasks:
-                task.handoff = False
-                if task.status in {"queued", "running", "recovering"}:
-                    task.status, task.error = (
-                        "failed",
-                        f"Execution interrupted on {activity.origin}; inspect its local results.",
-                    )
-                await db.merge(
-                    AgentTaskORM(
-                        id=task.id,
-                        status=task.status,
-                        revision=task.revision,
-                        created_at=task.created_at,
-                        updated_at=task.updated_at,
-                        payload=task.model_dump_json(),
-                    )
-                )
-            for call in activity.calls:
-                if call.status == "pending":
-                    call.status = "completed"
-                    call.completed_at = datetime.now()
-                    call.result = ToolResult(
-                        text=f"Execution interrupted on {activity.origin}. "
-                        "Inspect the original device for side effects.",
-                        is_error=True,
-                    )
-                await db.merge(
-                    AgentCallORM(id=call.id, task_id=call.task_id, status=call.status, payload=call.model_dump_json())
-                )
             for reminder in activity.reminders:
                 saved = await db.get(SyncStateORM, "reminder:" + reminder.id)
                 if saved is not None:
