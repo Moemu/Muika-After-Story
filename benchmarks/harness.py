@@ -13,6 +13,7 @@ from muika.core.agent.task_store import TaskRecord
 from muika.core.events import AgentHandoffEvent, AgentTaskEvent, Event
 from muika.core.loop import Muika
 from muika.core.memory import MemoryManager, RecallResult, SessionTurn, StateUpdate
+from muika.core.restart import RestartController
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest
 from muika.llm._schema import ModelMessage
@@ -266,6 +267,7 @@ async def run_production_loop(
     """
     trace = RunTrace(HarnessMode.LOOP)
     engine: Any = Muika.__new__(Muika)
+    engine.restart = RestartController()
     engine.brain = _TracingBrain(brain, trace, fixed_now)
     engine.agent = _FixtureAgent(
         trace,
