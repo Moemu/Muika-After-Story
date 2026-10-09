@@ -151,6 +151,124 @@ async def test_dream_uses_personal_experiences_without_execution_state(core_app_
     app.recorder.record("personal_dream", runtime_state_injected=False, diary_saved=True)
 
 
+@pytest.mark.parametrize("malformed", [False, True], ids=["numeric_references", "invalid_json"])
+async def test_dream_repairs_original_result_once_before_saving(core_app_factory, malformed):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    ref = await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    result = {
+        "diary": "沐沐回来了。我很想他，也想把这些没说出口的话留住。",
+        "facts": [{"category": "relation", "key": "master.return", "value": "沐沐回来了。", "source_refs": [ref]}],
+        "state_update": {
+            "reason": "His return matters to me.",
+            "intentions": [{"id": "share_poem", "description": "想和沐沐读诗。", "source_refs": [ref]}],
+        },
+        "dissonance_delta": -0.02,
+        "tension_reason": "He came back.",
+        "tension_source_refs": [ref],
+        "relief": "positive_feedback",
+    }
+    invalid = '{"diary":' if malformed else json.dumps(result, ensure_ascii=False)
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream" and "Validation errors:" not in req.prompt,
+        text=invalid,
+        name="invalid_dream",
+    )
+    result["facts"][0]["source_refs"] = [f"experience:{ref}"]
+    result["state_update"]["intentions"][0]["source_refs"] = [f"experience:{ref}"]
+    result["tension_source_refs"] = [f"experience:{ref}"]
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream" and "Validation errors:" in req.prompt,
+        text="Here is the repaired result:\n```json\n" + json.dumps(result, ensure_ascii=False) + "\n```",
+        name="repaired_dream",
+    )
+    session_id = app.muika.memory.snapshot.session.session_id
+    assert await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    calls = [call for call in app.scripted.calls if call["name"] in {"invalid_dream", "repaired_dream"}]
+    assert len(calls) == 2
+    assert invalid in calls[1]["prompt"]
+    assert ("json_invalid" if malformed else "facts.0.source_refs.0") in calls[1]["prompt"]
+    assert app.db_query("SELECT content FROM diary") == [{"content": result["diary"]}]
+    assert json.loads(app.db_query("SELECT source_refs FROM fact")[0]["source_refs"]) == [f"experience:{ref}"]
+    assert app.muika.memory.persistent.intentions[0].source_refs == [f"experience:{ref}"]
+    assert app.muika.memory.snapshot.session.session_id == session_id
+    assert not await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_repaired", attempts=2, diary_saved=True, session_preserved=True)
+
+
+async def test_dream_repeated_format_failure_leaves_memory_unchanged(core_app_factory):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    before = app.muika.memory.snapshot.model_dump()
+    app.scripted.add_route(when=lambda req: req.purpose == "memory_dream", text='{"diary":', name="invalid_dream")
+    with pytest.raises(ValueError):
+        await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    assert len([call for call in app.scripted.calls if call["name"] == "invalid_dream"]) == 2
+    assert not app.db_query("SELECT id FROM diary")
+    assert not app.db_query("SELECT id FROM fact")
+    assert app.muika.memory.snapshot.model_dump() == before
+    assert day in await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_repair_exhausted", attempts=2, diary_saved=False, material_pending=True)
+
+
+async def test_dream_oversized_repair_keeps_material_pending(core_app_factory):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    ref = await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    app.scripted.config.context_window = 32768
+    app.scripted.config.max_tokens = 2048
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream",
+        text=json.dumps(
+            {
+                "diary": "I missed him. " * 10000,
+                "tension_source_refs": [ref],
+            }
+        ),
+        name="oversized_invalid_dream",
+    )
+    before = app.muika.memory.snapshot.model_dump()
+    with pytest.raises(ValueError, match="repair exceeds the context budget"):
+        await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    assert len([call for call in app.scripted.calls if call["name"] == "oversized_invalid_dream"]) == 1
+    assert not app.db_query("SELECT id FROM diary")
+    assert app.muika.memory.snapshot.model_dump() == before
+    assert day in await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_repair_over_budget", attempts=1, diary_saved=False, material_pending=True)
+
+
+@pytest.mark.parametrize("field", ["facts", "intentions"])
+async def test_dream_rejects_unknown_source_without_saving(core_app_factory, field):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    result = {"diary": "我很想他。"}
+    if field == "facts":
+        result["facts"] = [
+            {"category": "relation", "key": "master.return", "value": "回来了。", "source_refs": ["experience:999"]}
+        ]
+    else:
+        result["state_update"] = {
+            "reason": "I want to share a poem.",
+            "intentions": [{"id": "poem", "description": "想读诗。", "source_refs": ["experience:999"]}],
+        }
+    before = app.muika.memory.snapshot.model_dump()
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream", text=json.dumps(result), name="unknown_source"
+    )
+    with pytest.raises(ValueError, match="not supplied"):
+        await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    assert not app.db_query("SELECT id FROM diary")
+    assert not app.db_query("SELECT id FROM fact")
+    assert app.muika.memory.snapshot.model_dump() == before
+    app.recorder.record("dream_unknown_source", field=field, diary_saved=False)
+
+
 async def test_execution_checkpoint_stays_outside_database(core_app_factory):
     app = await core_app_factory()
     await app.start()

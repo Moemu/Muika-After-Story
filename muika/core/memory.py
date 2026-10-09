@@ -527,6 +527,8 @@ class MemoryManager:
         refs |= {ref for item in result.retractions for ref in item.source_refs}
         refs |= {f"fact:{item.fact_id}" for item in result.retractions}
         refs |= {f"fact:{fact_id}" for item in result.facts for fact_id in item.supersedes}
+        if result.state_update is not None:
+            refs |= {ref for intention in result.state_update.intentions for ref in intention.source_refs}
         if not refs <= allowed_refs:
             raise ValueError("Dream references material that was not supplied")
         if result.dissonance_delta and (not result.tension_source_refs or not result.tension_reason):
