@@ -291,19 +291,3 @@ class RecallHit(BaseModel):
     def describe(self) -> str:
         """为检索正文附上可回查的来源引用与发生时间。"""
         return f"[{self.ref} | {self.occurred_at}] {self.content}"
-
-
-class RecallResult(BaseModel):
-    """返回语义筛选结果，或检索失败时保留的关键词候选。"""
-
-    hits: list[RecallHit] = Field(default_factory=list)
-    """本次可供使用和继续回查的记忆候选。"""
-    degraded: bool = False
-    """查询扩写或语义筛选是否失败；为真时保留可用的日期和关键词结果。"""
-    error: str | None = None
-    """降级的具体原因；正常检索时为 None。"""
-
-    def describe(self) -> str:
-        """汇总检索命中，并在降级时说明结果仅来自日期和关键词筛选。"""
-        prefix = "Semantic recall is unavailable; these are date/keyword matches.\n" if self.degraded else ""
-        return prefix + "\n".join(hit.describe() for hit in self.hits)

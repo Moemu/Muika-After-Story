@@ -12,7 +12,7 @@ from typing import Any, Literal, Sequence
 from muika.core.agent.task_store import TaskRecord
 from muika.core.events import AgentHandoffEvent, AgentTaskEvent, Event
 from muika.core.loop import Muika
-from muika.core.memory import MemoryManager, RecallResult, SessionTurn, StateUpdate
+from muika.core.memory import MemoryManager, SessionTurn, StateUpdate
 from muika.core.restart import RestartController
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest
@@ -292,7 +292,7 @@ async def run_production_loop(
 
     if event.type == "user_message":
         await memory.add_context("user", event.payload.message.message)
-    await engine._run_brain_pipeline(event, RecallResult())
+    await engine._run_brain_pipeline(event)
     for _ in range(20):
         if engine._tasks:
             await asyncio.gather(*list(engine._tasks))
@@ -304,7 +304,7 @@ async def run_production_loop(
             engine._god_mode_pending = False
         elif isinstance(result, AgentTaskEvent):
             await memory.add_context("agent", f"[Action result] {result.task_id}: {result.report}")
-        await engine._run_brain_pipeline(result, RecallResult())
+        await engine._run_brain_pipeline(result)
     else:
         trace.add("agent_fixture_error", reason="event_limit_exceeded")
     return trace

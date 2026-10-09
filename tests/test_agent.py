@@ -30,7 +30,7 @@ def _agent(fake_model, fake_summarize=None) -> Agent:
     agent.action_lock = asyncio.Lock()
     agent.model = fake_model
     agent.summarize_model = fake_summarize or fake_model
-    agent.memory_reasoner = MemoryReasoner(agent.model, agent.summarize_model)
+    agent.memory_reasoner = MemoryReasoner(agent.summarize_model)
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: ""))
     return agent
 
@@ -129,6 +129,5 @@ def test_named_models_refresh_at_request_boundary_including_summary_only_changes
         configs["action"] = action.config.model_copy(update={"context_window": 1000000})
         agent.build_request("action changed")
     assert agent.model is not action and action.config.context_window == 131072
-    assert agent.memory_reasoner.model is agent.model
     assert agent.memory_reasoner.summarize_model is agent.summarize_model
     assert agent.model.compactor is agent.memory_reasoner.compactor

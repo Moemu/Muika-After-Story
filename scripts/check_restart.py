@@ -135,7 +135,6 @@ async def check(launcher: Path | None, module: bool, plain_failure: bool) -> Non
 from arclet.alconna import Alconna
 from muika.core.events import TimeTickEvent
 from muika.core.loop import Muika
-from muika.core.memory import RecallResult
 from muika.plugin.command import on_alconna
 
 probe = on_alconna(Alconna("restart_probe"))
@@ -143,7 +142,7 @@ probe = on_alconna(Alconna("restart_probe"))
 @probe.handle()
 async def restart_probe(muika: Muika):
     with patch.object(muika.brain, "generate_reply", AsyncMock(return_value="Restart integration fixture.<restart>")):
-        await muika._run_brain_pipeline(TimeTickEvent(), RecallResult())
+        await muika._run_brain_pipeline(TimeTickEvent())
     return "Autonomous restart requested."
 """,
             encoding="utf-8",

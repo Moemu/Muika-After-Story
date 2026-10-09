@@ -69,9 +69,13 @@ Muika 保存经历，再在空闲时理解这些经历。日记包含她的兴�
 
 ## 检索与回查
 
-自动检索使用现有 Agent 模型扩写关键词并解析日期，SQLite 筛选候选后再进行有限批量的语义判断。
-检索覆盖日记、事实和原文，不需要 embedding 服务或向量数据库。
-模型失败时返回可用的日期／关键词匹配，并明确标记降级。检索失败不表示这段经历没有发生。
+普通消息直接使用近期对话、工作摘要、常驻事实和持续状态，不再先调用模型扩写查询或筛选候选。
+需要旧细节时，Muika 可通过现有行动路径调用 `memory(type="read", terms=[...], start=..., end=...)`。
+她也可以因自己的兴趣或心愿主动回查，无须等玩家提出要求。
+工具用关键词和日期查询 SQLite，覆盖日记、有效事实和经历原文，不需要 embedding 服务或向量数据库。
+取得来源编号后，用 `memory(type="source", source="experience:N")` 查看原文和相邻内容。
+结果通过行动报告返回当前对话。回查仍可能需要额外等待，但普通交流不再承担这项前置开销。
+没有匹配时可以换词或调整日期；检索失败不表示这段经历没有发生。
 
 ```python
 from datetime import date
@@ -100,7 +104,7 @@ if hits:
 达到可用预算的 80% 时，尝试压缩较早完整回合，目标回到 60%。
 本地估算超限时通过 `warnings.warn` 发出 `ContextOverflowWarning`，仍发送完整请求，由模型服务决定能否接受。
 更换模型后重新计算预算；摘要和做梦使用各自模型的窗口。
-行动、检索和日记在下一次调用边界读取当前命名模型配置，包括只修改 `context_window` 或摘要模型的情况。
+行动和日记在下一次调用边界读取当前命名模型配置，包括只修改 `context_window` 或摘要模型的情况。
 已开始的模型请求继续使用原实例；配置更新不削减已选择的思考额度。
 
 工作摘要与日记分开，不进入事实账本，也不增加权重。保存摘要及覆盖范围后才替换工作历史。
@@ -145,15 +149,16 @@ Alembic 创建新表；首次加载在事务内导入旧数据。旧表保留，
 - 没有保存过的旧对话原文无法恢复。
 
 `MemoryLayer`、`MemoryRecord`、`ArchiveEntry`、分类器和会话日记摘要接口已移除。
-用 `Fact`、`Diary`、`Experience`、`StateUpdate`、`RecallResult` 表达各类数据。
+用 `Fact`、`Diary`、`Experience`、`StateUpdate`、`RecallHit` 表达各类数据。
 `add_context()` 和 `new_session()` 必须 `await`。记忆笔记调用 `add_material("note", text)`。
 `forget_memory(category, key)` 撤下事实；它不删除已保存的对话原文。
 
 `MAX_MEMORY_RECORDS`、`AGENT_TOOL_CONTEXT_CHARS`、`REFLECTION_COOLDOWN_HOURS` 已停用。
 上下文长度由每模型的 `context_window` 控制，日记进度由日期和素材范围控制。
 
-用户 `templates/` 文件不会被覆盖。自定义模板请把 `injected_preferences` 改为 `recalled_memories.hits`，
-并参考内置模板加入状态更新和意愿标签说明。持续状态仍由 Brain 和 Agent 注入。
+用户 `templates/` 文件不会被覆盖。自定义模板使用 `memory_context` 展示常驻记忆，移除
+`injected_preferences` 和 `recalled_memories` 的显示段落，并参考内置模板加入按需回查、状态更新和意愿标签说明。
+持续状态仍由 Brain 和 Agent 注入。
 
 回退前先停止 Core 并备份当前数据库与 `data/` 文件。执行 Alembic downgrade 会移除新表；
 旧表仍在，但升级后形成的新记忆只能从当前备份恢复。

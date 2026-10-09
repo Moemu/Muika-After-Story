@@ -80,7 +80,6 @@ class CoreApp:
         self.recorder = recorder
         """供传输层等外部观察者记录 wire 帧；与 ``_recorder`` 同一实例。"""
         self.scripted = ScriptedLLM(turns, recorder=recorder)
-        self._install_plumbing_routes()
         self.sent: list[str] = []
         self.command_replies: list[str] = []
         self._outbox: asyncio.Queue[str] = asyncio.Queue()
@@ -91,19 +90,6 @@ class CoreApp:
         self.muika: Optional[Muika] = None
         self._stopped = False
         self._self_change_attached = False
-
-    def _install_plumbing_routes(self) -> None:
-        """为记忆检索等内部管线安装默认路由，使其不消耗场景剧本。"""
-        self.scripted.add_route(
-            when=lambda req: "Expand a memory query" in (req.system or ""),
-            text='{"terms": []}',
-            name="memory_query_expansion",
-        )
-        self.scripted.add_route(
-            when=lambda req: "Select source references" in (req.system or ""),
-            text='{"refs": []}',
-            name="memory_recall_selection",
-        )
 
     def _apply_patches(self, heart_intensity: str) -> None:
         """在构造 Muika 前替换 LLM 加载与后台监听类副作用。"""

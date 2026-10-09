@@ -41,7 +41,7 @@ from .events import (
     TimeTickEvent,
 )
 from .executor import Executor, SendReceipt
-from .memory import MemoryManager, RecallResult, StateUpdate
+from .memory import MemoryManager, StateUpdate
 from .processes import get_process_manager
 from .reflection import ReflectionAgent
 from .restart import RestartController
@@ -301,8 +301,7 @@ class Muika:
                 await self.after_activity()
             return
 
-        recalled_memories = await self._fetch_memories(event)
-        await self._run_brain_pipeline(event, recalled_memories)
+        await self._run_brain_pipeline(event)
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
         self._save_last_connection_time()
@@ -501,17 +500,9 @@ class Muika:
         self.state.boredom = 0.0
         logger.debug(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
-    async def _fetch_memories(self, event: Event) -> RecallResult:
-        """检索当前消息相关的日记、事实及原文。"""
-        if event.type != "user_message":
-            return RecallResult()
-        self.agent.refresh_models()
-        return await self.agent.memory_reasoner.recall(event.payload.message.message, self.memory)
-
     async def _run_brain_pipeline(
         self,
         event: Event,
-        recalled_memories: RecallResult,
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
         if event.type == "time_tick":
@@ -531,7 +522,6 @@ class Muika:
                 event=event,
                 state=self.state,
                 memory=self.memory,
-                recalled_memories=recalled_memories or None,
                 adapters=self.current_adapters,
                 god_mode=self._god_mode,
                 resources=event.payload.message.resources if event.type == "user_message" else None,

@@ -62,7 +62,6 @@ from .memory_models import (
     MemorySnapshot,
     PersistentState,
     RecallHit,
-    RecallResult,
     SessionState,
     SessionTurn,
     StateUpdate,
@@ -80,7 +79,6 @@ __all__ = [
     "StateUpdate",
     "PersistentState",
     "RecallHit",
-    "RecallResult",
     "MemoryQuery",
 ]
 

@@ -22,8 +22,6 @@ from muika.core.memory import (
     Fact,
     MemoryCategory,
     MemoryManager,
-    RecallHit,
-    RecallResult,
 )
 from muika.core.state import MuikaState
 from muika.core.topic_manager import EventTopic, StaticTopic, TopicSource
@@ -148,7 +146,6 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     memory.session.is_first_session = False
     memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
     memory.facts[1] = Fact(id=1, category=MemoryCategory.USER, key="name", value="Alice")
-    recall = RecallResult(hits=[RecallHit(ref="fact:2", content="tea", occurred_at="2026-09-10")])
     captured = {}
 
     def _tmpl(name, data):
@@ -156,14 +153,13 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
         return "SYSTEM"
 
     with patch("muika.core.brain.generate_prompt_from_template", side_effect=_tmpl):
-        await brain.generate_reply(_user_event(), state, memory, recalled_memories=recall)
+        await brain.generate_reply(_user_event(), state, memory)
 
     data = captured["data"]
     assert data.event_type == "user_message"
     assert data.is_chat is True
     assert data.memory_context == memory.get_memory_prompt()
     assert "Earliest known interaction with Master: 2025-01-01 12:00:00" in data.memory_context
-    assert data.recalled_memories == recall
     assert data.adapters_info is None
 
 

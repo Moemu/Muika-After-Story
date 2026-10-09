@@ -1,4 +1,4 @@
-"""执行 Muika 的行动意图，并连接记忆检索和日记整理。"""
+"""执行 Muika 的行动意图，并连接记忆工具和日记整理。"""
 
 from __future__ import annotations
 
@@ -46,20 +46,19 @@ class Agent:
         summarize_model_cfg = get_model_config(mas_config.session_summarize_model or mas_config.agent_model)
         self.model = load_model(agent_cfg)
         self.summarize_model = load_model(summarize_model_cfg)
-        self.memory_reasoner = MemoryReasoner(self.model, self.summarize_model)
+        self.memory_reasoner = MemoryReasoner(self.summarize_model)
         self.model.compactor = self.memory_reasoner.compactor
 
         # 技能管理器：启动时扫描技能目录并启动热重载监听
         self._skill_manager = get_skill_manager()
 
     def refresh_models(self) -> None:
-        """在调用边界更新行动、检索、日记和工作摘要使用的模型。"""
+        """在调用边界更新行动、日记和工作摘要使用的模型。"""
         model = refresh_model(self.model, get_model_config(mas_config.agent_model))
         summarize_model = refresh_model(
             self.summarize_model, get_model_config(mas_config.session_summarize_model or mas_config.agent_model)
         )
         self.model, self.summarize_model = model, summarize_model
-        self.memory_reasoner.model = model
         self.memory_reasoner.summarize_model = summarize_model
         self.memory_reasoner.compactor.model = summarize_model
         model.compactor = self.memory_reasoner.compactor

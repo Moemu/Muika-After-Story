@@ -17,7 +17,7 @@ from muika.utils.logger import logger
 from muika.utils.utils import format_duration
 
 from .events import Event, SelfChangedPayload
-from .memory import MemoryManager, RecallResult
+from .memory import MemoryManager
 from .state import MuikaState
 from .topic_manager import BaseTopic, EventTopic
 
@@ -257,7 +257,6 @@ class MuikaBrain:
         state: MuikaState,
         memory: MemoryManager,
         resources: Optional[List[Resource]] = None,
-        recalled_memories: RecallResult | None = None,
         adapters: Optional[List[AdapterInfo]] = None,
         god_mode: bool = False,
         now: datetime | None = None,
@@ -283,7 +282,6 @@ class MuikaBrain:
             is_chat=True,
             heartbeat_intensity=get_model_config_manager().heart_intensity,
             memory_context=memory_context,
-            recalled_memories=recalled_memories,
             adapters_info=self.generate_adapters_info(adapters, now=current_time),
         )
 

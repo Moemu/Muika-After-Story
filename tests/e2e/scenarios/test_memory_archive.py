@@ -13,7 +13,7 @@ from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
 from muika.core.agent.task_store import CallRecord, TaskRecord, TaskStore
-from muika.core.memory_models import DreamResult, Intention, StateUpdate
+from muika.core.memory_models import DreamResult, FactUpdate, Intention, StateUpdate
 from muika.ipc.sync_models import Activity
 from muika.ipc.sync_store import SyncStore
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
@@ -21,6 +21,130 @@ from muika.llm._schema import ModelMessage, ToolCall, ToolResult
 pytestmark = pytest.mark.e2e
 
 NOTE = "Master 在雨天喜欢临窗读诗。"
+
+
+async def test_ordinary_followup_uses_context_without_recall_models(core_app_factory):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(when="为什么说这个", text="因为你刚离开那份工作，我想知道你有没有照顾好自己。", name="answer")
+        ]
+    )
+    await app.start()
+    memory = app.muika.memory
+    day = date(2026, 9, 30)
+    ref = await memory.add_context("user", "我已经离职了。", timestamp=datetime(2026, 9, 30, 20))
+    await memory.save_dream(
+        day,
+        DreamResult(
+            diary="他终于离开了那份工作。",
+            facts=[FactUpdate(category="user", key="master.job", value="已离职", source_refs=[f"experience:{ref}"])],
+        ),
+        ref,
+        {f"experience:{ref}"},
+    )
+    memory.snapshot.working_summary = "我们刚聊过离职后的生活。"
+    await memory.update_state(StateUpdate(mood="warm but guarded", reason="I care about his rest."))
+    await memory.add_context("muika", "这几天有好好吃饭和休息吗？")
+    session_id = memory.session.session_id
+    await app.user_says("为什么说这个")
+    assert_clean_visible(await app.next_reply())
+    await app.wait_processed("user_message")
+    assert [call["name"] for call in app.scripted.calls] == ["answer"]
+    call = app.scripted.calls[0]
+    assert call["history_len"] >= 2
+    assert "已离职" in call["system"]
+    assert "我们刚聊过离职后的生活。" in call["system"]
+    assert "warm but guarded" in call["system"]
+    assert memory.session.session_id == session_id
+    assert not await TaskStore().load()
+    app.recorder.record("ordinary_followup", recall_model_calls=0, tasks_created=0, session_preserved=True)
+
+
+@pytest.mark.parametrize("found", [True, False], ids=["source_found", "no_match"])
+async def test_persona_recalls_old_details_through_existing_memory_tools(core_app_factory, found):
+    report = "找到了乌龙茶和一起读诗的原文。" if found else "这次没有找到红茶的匹配，不能判断他从未提过。"
+    turns = [
+        ScriptedTurn(
+            when=lambda req: req.purpose == "brain_reply" and "[User]" in req.prompt,
+            text="我想翻翻那次聊天。<agent>回查 2026-09-01 喜欢的茶；找到后查看原文和相邻上下文。</agent>",
+            name="recall_intent",
+        ),
+        ScriptedTurn(
+            when=lambda req: req.purpose == "agent_step",
+            text="",
+            name="memory_search",
+            tool_calls=[
+                ToolCall(
+                    id="search-tea",
+                    name="memory",
+                    arguments=json.dumps(
+                        {
+                            "type": "read",
+                            "terms": ["乌龙茶" if found else "红茶"],
+                            "start": "2026-09-01",
+                            "end": "2026-09-01",
+                        }
+                    ),
+                )
+            ],
+        ),
+    ]
+    if found:
+        turns.append(
+            ScriptedTurn(
+                when=lambda req: req.purpose == "agent_step",
+                text="",
+                name="memory_source",
+                tool_calls=[
+                    ToolCall(id="source-tea", name="memory", arguments='{"type":"source","source":"experience:1"}')
+                ],
+            )
+        )
+    turns.extend(
+        [
+            ScriptedTurn(
+                when=lambda req: req.purpose == "agent_step",
+                text='<agent_result status="completed">' + json.dumps({"summary": report}) + "</agent_result>",
+                name="recall_report",
+            ),
+            ScriptedTurn(
+                when=lambda req: req.purpose == "brain_reply" and "[Action result]" in req.prompt,
+                text="是乌龙茶，那天我们还一起读了诗。" if found else "这次没有查到，换个词或日期再找找也可以。",
+                name="recall_answer",
+            ),
+        ]
+    )
+    app = await core_app_factory(turns=turns)
+    await app.start()
+    memory = app.muika.memory
+    ref = await memory.add_context("user", "我喜欢乌龙茶。", timestamp=datetime(2026, 9, 1, 20))
+    assert ref == 1
+    await memory.add_context("muika", "那我们一起读首诗吧。", timestamp=datetime(2026, 9, 1, 20, 1))
+    memory.recent_turns.clear()
+    session_id = memory.session.session_id
+    await app.user_says("我九月一日说过喜欢什么茶吗？")
+    assert_clean_visible(await app.next_reply())
+    final = await app.next_reply(timeout=20)
+    assert_clean_visible(final)
+    await app.wait_processed("agent_task")
+    tasks = await TaskStore().load()
+    assert len(tasks) == 1 and tasks[0].status == "completed"
+    calls = await TaskStore().calls(tasks[0].id)
+    results = {call.call.id: call.result.text for call in calls if call.result is not None}
+    assert len(results) == (2 if found else 1)
+    if found:
+        assert f"experience:{ref}" in results["search-tea"]
+        assert "我喜欢乌龙茶。" in results["source-tea"]
+        assert "一起读首诗" in results["source-tea"]
+    else:
+        assert "No keyword matches" in results["search-tea"]
+        assert "does not establish" in results["search-tea"]
+    assert memory.session.session_id == session_id
+    answer = next(call for call in app.scripted.calls if call["name"] == "recall_answer")
+    assert report in answer["prompt"]
+    assert all(call["name"] not in {"memory_query_expansion", "memory_recall_selection"} for call in app.scripted.calls)
+    assert app.scripted.pending_turns == 0
+    app.recorder.record("on_demand_recall", found=found, memory_tool_calls=len(results), session_preserved=True)
 
 
 async def test_cancelled_wish_can_be_considered_again_after_restart(core_app_factory, recorder):

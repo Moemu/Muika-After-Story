@@ -11,7 +11,7 @@ import pytest
 
 from muika.core.events import TimeTickEvent, UserMessageEvent, UserMessagePayload
 from muika.core.loop import Muika, ParsedReply
-from muika.core.memory import MemoryManager, MemoryQuery, RecallResult
+from muika.core.memory import MemoryManager, MemoryQuery
 from muika.core.state import ActiveTopicState, MuikaState
 from muika.llm import ModelCompletions, ModelConfig, ModelRequest
 from muika.llm.context import ContextCompactor
@@ -62,11 +62,10 @@ async def test_prepared_change_allows_chat_then_restarts_after_farewell(engine, 
         ]
     )
     for message in ("按你说的做吧", "再聊一会"):
-        await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))), RecallResult())
+        await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))))
         assert calls == []
     await engine._run_brain_pipeline(
         UserMessageEvent(UserMessagePayload(Message(message="现在就重启吧"))),
-        RecallResult(),
     )
     assert calls == [(patch_id, "user_message: 好哦，待会见。")]
     engine.agent.model.ask.assert_not_called()
@@ -87,7 +86,7 @@ async def test_background_initiative_can_restart_after_saving_its_reply(engine, 
     engine.restart.handler = restart
     tag = f'<restart patch_id="{patch_id}">' if patch_id else "<restart>"
     engine.brain.generate_reply = AsyncMock(return_value=f"准备好了。{tag}")
-    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    await engine._run_brain_pipeline(TimeTickEvent())
     assert calls == [(patch_id, "time_tick: 准备好了。")]
     engine.agent.model.ask.assert_not_called()
     if patch_id:
@@ -107,7 +106,7 @@ async def test_plain_restart_needs_no_confirmation_or_proposal(engine, monkeypat
     engine.restart.handler = AsyncMock()
     engine.brain.generate_reply = AsyncMock(return_value="待会见。<restart>")
     message = "刚才那个插件好像影响了你的状态。"
-    await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))), RecallResult())
+    await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))))
     manager.check_ready.assert_not_called()
     engine.restart.handler.assert_awaited_once_with(None, "user_message: 待会见。")
     engine.agent.model.ask.assert_not_called()
@@ -121,7 +120,7 @@ async def test_autonomous_restart_keeps_candidate_checks_and_reports_failure(eng
     monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
     engine.restart.handler = AsyncMock()
     engine.brain.generate_reply = AsyncMock(return_value='准备好了。<restart patch_id="20260913_120000_abcdef12">')
-    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    await engine._run_brain_pipeline(TimeTickEvent())
     engine.restart.handler.assert_not_awaited()
     event = engine.event_queue.get_nowait()
     assert event.task_id == "control-error" and "Candidate changed" in event.report
@@ -143,7 +142,7 @@ async def test_restart_saves_task_control_before_handoff(engine, action):
         snapshots.append(saved)
 
     engine.restart.handler = restart
-    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    await engine._run_brain_pipeline(TimeTickEvent())
     assert len(snapshots) == 1
     assert snapshots[0].status == ("completed" if action == "complete" else "cancelled")
     if action == "complete":
@@ -334,7 +333,6 @@ def engine(monkeypatch, redirect_get_session):
     engine.agent.model.ask = AsyncMock(return_value=ModelCompletions(text="We talked about a small personal detail."))
     engine.brain.compactor = ContextCompactor(engine.agent.model)
     engine.agent.memory_reasoner.compactor = ContextCompactor(engine.agent.model)
-    engine.agent.memory_reasoner.recall = AsyncMock(return_value=RecallResult())
     return engine
 
 
@@ -361,10 +359,10 @@ async def test_god_mode_enables_tools_and_isolates_resources(engine, tmp_path):
         return "Done."
 
     engine.brain.generate_reply = generate_reply
-    await engine._run_brain_pipeline(TimeTickEvent(), [])
+    await engine._run_brain_pipeline(TimeTickEvent())
     handoff = await asyncio.wait_for(engine.event_queue.get(), timeout=1)
     await engine._process_event(handoff, 0)
-    await engine._run_brain_pipeline(TimeTickEvent(), [])
+    await engine._run_brain_pipeline(TimeTickEvent())
     assert requests == [False, True, True]
     assert engine.executor.send_message.await_args_list[0].kwargs["resources"] == [resource]
     assert engine.executor.send_message.await_args_list[1].kwargs["resources"] == []
@@ -388,14 +386,12 @@ async def test_chat_and_session_end_keep_background_task(engine):
     engine.brain.generate_reply = AsyncMock(side_effect=["我去看看。<agent>Develop Daily</agent>", "我在呢。"])
     worker = asyncio.create_task(engine.agent_tasks.run())
     try:
-        await engine._run_brain_pipeline(
-            UserMessageEvent(payload=UserMessagePayload(message=Message(message="开始"))), []
-        )
+        await engine._run_brain_pipeline(UserMessageEvent(payload=UserMessagePayload(message=Message(message="开始"))))
         await asyncio.wait_for(entered.wait(), 1)
         task = next(iter(engine.agent_tasks.tasks.values()))
         await asyncio.wait_for(
             engine._run_brain_pipeline(
-                UserMessageEvent(payload=UserMessagePayload(message=Message(message="陪我聊会儿"))), []
+                UserMessageEvent(payload=UserMessagePayload(message=Message(message="陪我聊会儿")))
             ),
             1,
         )
@@ -452,7 +448,7 @@ async def test_notes_are_material_not_classified_facts(engine):
     engine.brain.generate_reply = AsyncMock(
         return_value="I noticed a rhyme.<memory>I want to explore this poem.</memory>"
     )
-    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    await engine._run_brain_pipeline(TimeTickEvent())
     hits = await engine.memory.search(MemoryQuery(terms=["explore this poem"]))
     assert len(hits) == 1
     assert engine.memory.facts == {}
@@ -462,7 +458,7 @@ async def test_notes_are_material_not_classified_facts(engine):
 async def test_failed_memory_does_not_discard_following_silent_notes(engine):
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing><memory>first</memory><memory>second</memory>")
     engine.memory.add_material = AsyncMock(side_effect=[RuntimeError("offline"), None])
-    await engine._run_brain_pipeline(TimeTickEvent(), [])
+    await engine._run_brain_pipeline(TimeTickEvent())
     await asyncio.gather(*list(engine._tasks))
     assert [call.args[1] for call in engine.memory.add_material.await_args_list] == ["first", "second"]
     engine.executor.send_message.assert_not_awaited()
@@ -502,7 +498,7 @@ async def test_dissonance_initiative_allows_silence_and_uses_cooldown(engine):
     engine.state.last_interaction = datetime.now() - timedelta(minutes=5)
     assert engine.get_think_mode(TimeTickEvent()) == "emotional"
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing>")
-    await engine._run_brain_pipeline(TimeTickEvent(), RecallResult())
+    await engine._run_brain_pipeline(TimeTickEvent())
     assert engine.get_think_mode(TimeTickEvent()) is None
     engine.executor.send_message.assert_not_awaited()
     engine.memory.persistent.last_considered_at = datetime.now() - timedelta(days=1)

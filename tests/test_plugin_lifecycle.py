@@ -718,7 +718,7 @@ async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monk
     agent.action_lock = asyncio.Lock()
     agent.model = fake
     agent.summarize_model = fake
-    agent.memory_reasoner = MemoryReasoner(fake, fake)
+    agent.memory_reasoner = MemoryReasoner(fake)
     monkeypatch.setattr("muika.core.agent.agent.get_model_config", lambda name: fake.config)
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""

@@ -258,7 +258,7 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fak
     agent.action_lock = asyncio.Lock()
     agent.model = fake_model
     agent.summarize_model = fake_model
-    agent.memory_reasoner = MemoryReasoner(fake_model, fake_model)
+    agent.memory_reasoner = MemoryReasoner(fake_model)
     monkeypatch.setattr("muika.core.agent.agent.get_model_config", lambda name: fake_model.config)
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""
