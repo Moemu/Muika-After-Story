@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 from .memory_models import (
     Diary,
     DreamResult,
+    DreamValidationError,
     Experience,
     Fact,
     MemoryCategory,
@@ -520,20 +521,30 @@ class MemoryManager:
 
     async def save_dream(self, day: date, result: DreamResult, through: int, allowed_refs: set[str]) -> bool:
         """在同一事务提交日记、事实强化、状态和素材进度。"""
-        refs = {ref for fact in result.facts for ref in fact.source_refs} | set(result.tension_source_refs)
-        refs |= {f"fact:{fact_id}" for fact_id in result.recalled_fact_ids}
-        refs |= {ref for item in result.retractions for ref in item.source_refs}
-        refs |= {f"fact:{item.fact_id}" for item in result.retractions}
-        refs |= {f"fact:{fact_id}" for item in result.facts for fact_id in item.supersedes}
+        references = {f"tension_source_refs[{i}]": ref for i, ref in enumerate(result.tension_source_refs)}
+        references.update({f"recalled_fact_ids[{i}]": f"fact:{ref}" for i, ref in enumerate(result.recalled_fact_ids)})
+        for i, fact in enumerate(result.facts):
+            references.update({f"facts[{i}].source_refs[{j}]": ref for j, ref in enumerate(fact.source_refs)})
+            references.update({f"facts[{i}].supersedes[{j}]": f"fact:{ref}" for j, ref in enumerate(fact.supersedes)})
+        for i, item in enumerate(result.retractions):
+            references[f"retractions[{i}].fact_id"] = f"fact:{item.fact_id}"
+            references.update({f"retractions[{i}].source_refs[{j}]": ref for j, ref in enumerate(item.source_refs)})
         if result.state_update is not None:
-            refs |= {ref for intention in result.state_update.intentions for ref in intention.source_refs}
-        if not refs <= allowed_refs:
-            raise ValueError("Dream references material that was not supplied")
+            for i, intention in enumerate(result.state_update.intentions):
+                references.update(
+                    {
+                        f"state_update.intentions[{i}].source_refs[{j}]": ref
+                        for j, ref in enumerate(intention.source_refs)
+                    }
+                )
+        unsupported = {path: ref for path, ref in references.items() if ref not in allowed_refs}
+        if unsupported:
+            raise DreamValidationError(f"Dream references material that was not supplied: {unsupported}")
         if result.dissonance_delta and (not result.tension_source_refs or not result.tension_reason):
-            raise ValueError("A tension change requires source material and a reason")
+            raise DreamValidationError("A tension change requires source material and a reason")
         keys = [(item.category, item.key) for item in result.facts]
         if len(keys) != len(set(keys)):
-            raise ValueError("The dream contains conflicting updates for the same fact key")
+            raise DreamValidationError("The dream contains conflicting updates for the same fact key")
         async with self._lock:
             snapshot = self.snapshot.model_copy(deep=True)
             now, day_end = datetime.now(), datetime.combine(day, time.max)
@@ -547,7 +558,7 @@ class MemoryManager:
                     db.add(diary)
                 diary.content, diary.covered_through = public_text(result.diary), through
                 if not diary.content:
-                    raise ValueError("The dream contained no diary text")
+                    raise DreamValidationError("The dream contained no diary text")
                 diary.source_refs = json.dumps(sorted(allowed_refs))
                 evidence = list(
                     await db.scalars(
@@ -562,14 +573,14 @@ class MemoryManager:
                 evidence_dates = {f"experience:{item.id}": local_time(item.occurred_at) for item in evidence}
                 new_refs = {f"experience:{item.id}" for item in evidence if item.id > previous_through}
                 if result.dissonance_delta and not set(result.tension_source_refs) & new_refs:
-                    raise ValueError("A tension change needs new evidence from this diary day")
+                    raise DreamValidationError("A tension change needs new evidence from this diary day")
                 if result.relief == "positive_feedback" and not any(
                     item.kind == "user" and f"experience:{item.id}" in result.tension_source_refs for item in evidence
                 ):
-                    raise ValueError("Positive feedback requires a user experience reference")
+                    raise DreamValidationError("Positive feedback requires a user experience reference")
                 for item in result.retractions:
                     if not set(item.source_refs) & day_refs:
-                        raise ValueError("Fact retraction requires new source evidence")
+                        raise DreamValidationError("Fact retraction requires new source evidence")
                     retired = await db.get(FactORM, item.fact_id)
                     observed = max(evidence_dates[ref] for ref in item.source_refs if ref in evidence_dates)
                     if retired is not None and local_time(retired.observed_at) <= observed:
@@ -590,7 +601,7 @@ class MemoryManager:
                             and f"fact:{item.id}" in change.source_refs
                             for item in equivalents
                         ):
-                            raise ValueError(
+                            raise DreamValidationError(
                                 "Fact updates require new evidence or equivalent source facts to consolidate"
                             )
                     rows = list(

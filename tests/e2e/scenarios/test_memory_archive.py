@@ -390,7 +390,135 @@ async def test_dream_rejects_unknown_source_without_saving(core_app_factory, fie
     assert not app.db_query("SELECT id FROM diary")
     assert not app.db_query("SELECT id FROM fact")
     assert app.muika.memory.snapshot.model_dump() == before
-    app.recorder.record("dream_unknown_source", field=field, diary_saved=False)
+    calls = [call for call in app.scripted.calls if call["name"] == "unknown_source"]
+    assert len(calls) == 2
+    assert "experience:999" in calls[1]["prompt"]
+    assert day in await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_unknown_source", field=field, attempts=2, diary_saved=False)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "facts",
+        "intentions",
+        "tension_source_refs",
+        "recalled_fact_ids",
+        "supersedes",
+        "retraction_target",
+        "retraction_source",
+    ],
+)
+async def test_dream_repairs_unknown_reference_fields(core_app_factory, field):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    ref = await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    source = f"experience:{ref}"
+    result = {"diary": "沐沐回来了。我很想他。"}
+    paths = {
+        "facts": "facts[0].source_refs[0]",
+        "intentions": "state_update.intentions[0].source_refs[0]",
+        "tension_source_refs": "tension_source_refs[0]",
+        "recalled_fact_ids": "recalled_fact_ids[0]",
+        "supersedes": "facts[0].supersedes[0]",
+        "retraction_target": "retractions[0].fact_id",
+        "retraction_source": "retractions[0].source_refs[0]",
+    }
+    if field in {"facts", "supersedes"}:
+        result["facts"] = [
+            {"category": "relation", "key": "master.return", "value": "回来了。", "source_refs": [source]}
+        ]
+        if field == "facts":
+            result["facts"][0]["source_refs"] = ["experience:999"]
+        else:
+            result["facts"][0]["supersedes"] = [999]
+    elif field == "intentions":
+        result["state_update"] = {
+            "reason": "I want to share a poem.",
+            "intentions": [{"id": "poem", "description": "想读诗。", "source_refs": ["experience:999"]}],
+        }
+    elif field in {"retraction_target", "retraction_source"}:
+        result["retractions"] = [{"fact_id": 999, "source_refs": ["experience:999"], "reason": "Correcting a memory."}]
+    else:
+        result[field] = [999] if field == "recalled_fact_ids" else ["experience:999"]
+    invalid = json.dumps(result, ensure_ascii=False)
+    repaired = {"diary": result["diary"]}
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream" and "Validation errors:" not in req.prompt,
+        text=invalid,
+        name="unsupported_reference",
+    )
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream" and "Validation errors:" in req.prompt,
+        text=json.dumps(repaired, ensure_ascii=False),
+        name="supported_dream",
+    )
+    assert await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    calls = [call for call in app.scripted.calls if call["name"] in {"unsupported_reference", "supported_dream"}]
+    assert len(calls) == 2
+    assert paths[field] in calls[1]["prompt"]
+    assert "Allowed source IDs:" in calls[1]["prompt"]
+    assert app.db_query("SELECT content FROM diary") == [{"content": repaired["diary"]}]
+    assert not await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_reference_repaired", field=field, attempts=2, diary_saved=True)
+
+
+async def test_dream_semantic_repair_rolls_back_partial_writes(core_app_factory):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    ref = await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    result = {
+        "diary": "我很想他。",
+        "facts": [
+            {"category": "relation", "key": "master.return", "value": "回来了。", "source_refs": [f"experience:{ref}"]}
+        ],
+        "relief": "positive_feedback",
+    }
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream" and "Validation errors:" not in req.prompt,
+        text=json.dumps(result),
+        name="unsupported_feedback",
+    )
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream" and "Validation errors:" in req.prompt,
+        text=json.dumps({"diary": result["diary"]}),
+        name="supported_reflection",
+    )
+    before = app.muika.memory.snapshot.model_copy(deep=True)
+    assert await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    assert not app.db_query("SELECT id FROM fact")
+    assert not app.db_query("SELECT id FROM fact_recall")
+    assert len(app.db_query("SELECT id FROM diary")) == 1
+    assert app.muika.memory.snapshot.state == before.state
+    app.recorder.record("dream_semantic_repair", attempts=2, partial_writes_rolled_back=True)
+
+
+@pytest.mark.parametrize("failure", ["value_error", "validation_error"])
+async def test_dream_database_failure_does_not_request_model_repair(core_app_factory, monkeypatch, failure):
+    app = await core_app_factory()
+    await app.start()
+    day = date(2026, 10, 6)
+    await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    before = app.muika.memory.snapshot.model_dump()
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream", text='{"diary":"我很想他。"}', name="valid_dream"
+    )
+
+    async def fail_snapshot_save(db, snapshot):
+        if failure == "validation_error":
+            DreamResult.model_validate_json('{"diary":12}')
+        raise ValueError("storage failure")
+
+    monkeypatch.setattr(app.muika.memory, "_save_snapshot", fail_snapshot_save)
+    with pytest.raises(ValueError, match="diary" if failure == "validation_error" else "storage failure"):
+        await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+    assert len([call for call in app.scripted.calls if call["name"] == "valid_dream"]) == 1
+    assert not app.db_query("SELECT id FROM diary")
+    assert app.muika.memory.snapshot.model_dump() == before
+    assert day in await app.muika.memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_storage_failure", attempts=1, material_pending=True)
 
 
 async def test_execution_checkpoint_stays_outside_database(core_app_factory):

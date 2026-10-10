@@ -240,6 +240,10 @@ class FactRetraction(BaseModel):
     """撤下事实的原因。"""
 
 
+class DreamValidationError(ValueError):
+    """标记 MemoryManager 拒绝、MemoryReasoner 可请求修复的做梦结果。"""
+
+
 class DreamResult(BaseModel):
     """表示一次日记整理中需要共同提交的日记、事实及状态变化。"""
 
