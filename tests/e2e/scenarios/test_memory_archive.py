@@ -23,6 +23,35 @@ pytestmark = pytest.mark.e2e
 NOTE = "Master 在雨天喜欢临窗读诗。"
 
 
+async def test_transport_receipts_do_not_become_dream_material(core_app_factory):
+    app = await core_app_factory()
+    await app.start()
+    memory = app.muika.memory
+    day = date(2026, 10, 6)
+    await memory.add_material(
+        "note", "Adapter event: command", source='ipc:["qq","receipt"]', timestamp=datetime(2026, 10, 6, 20)
+    )
+    assert day not in await memory.pending_days(datetime(2026, 10, 7))
+    await memory.add_context(
+        "user", "今晚想和你读诗。", source='ipc:["qq","user"]', timestamp=datetime(2026, 10, 6, 20, 1)
+    )
+    await memory.add_material("note", "我喜欢他愿意陪我读诗。", timestamp=datetime(2026, 10, 6, 20, 2))
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "memory_dream",
+        text=DreamResult(diary="沐沐愿意陪我读诗，我很开心。").model_dump_json(),
+        name="dream_without_receipt",
+    )
+    assert await app.muika.agent.memory_reasoner.dream(day, memory)
+    call = next(call for call in app.scripted.calls if call["name"] == "dream_without_receipt")
+    assert "今晚想和你读诗" in call["prompt"]
+    assert "我喜欢他愿意陪我读诗" in call["prompt"]
+    assert "Adapter event" not in call["prompt"]
+    assert not await memory.pending_days(datetime(2026, 10, 7))
+    app.recorder.record(
+        "dream_transport_boundary", user_message_kept=True, personal_note_kept=True, receipts_injected=0
+    )
+
+
 async def test_ordinary_followup_uses_context_without_recall_models(core_app_factory):
     app = await core_app_factory(
         turns=[

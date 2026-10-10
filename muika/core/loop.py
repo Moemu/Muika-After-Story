@@ -231,7 +231,7 @@ class Muika:
                 return
             await self.memory.add_context(
                 "agent",
-                f"[Action result] {event.task_id}: {event.report}",
+                f"[Action result] {event.report}",
                 source=f"task:{event.task_id}:{event.revision}:{event.status}",
                 timestamp=event.timestamp,
             )
@@ -285,6 +285,19 @@ class Muika:
             return
 
         if event.type == "adapter_online":
+            existing = next(
+                (
+                    i
+                    for i, adapter in enumerate(self.current_adapters)
+                    if adapter.client_name == event.adapter.client_name
+                ),
+                None,
+            )
+            if existing is not None:
+                self.current_adapters[existing] = event.adapter
+                if self.self_change:
+                    self.self_change.on_adapter_online()
+                return
             self.current_adapters.append(event.adapter)
             logger.debug(f"[Loop] Adapter online: {event.adapter!r} — status updated")
             if self.self_change is not None:
@@ -536,7 +549,7 @@ class Muika:
                     adapters=self.current_adapters,
                     god_mode=self._god_mode,
                     resources=event.payload.message.resources if event.type == "user_message" else None,
-                    task_context=self.agent_tasks.describe() + "\n" + self.restart.describe(),
+                    task_context="\n".join(filter(None, (self.agent_tasks.describe(), self.restart.describe()))),
                 )
                 resources = context.resources
             parsed = self._parse_reply_tags(reply)
@@ -596,11 +609,15 @@ class Muika:
                     self._god_mode = False
                     await self.agent_tasks.release_persona()
                 original = (
-                    event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
+                    event.payload.message.message
+                    if event.type == "user_message"
+                    else intention.description if intention else parsed.clean_reply or command
                 )
                 task = await self.agent_tasks.submit(command, original, intention_id=intention_id)
                 await self.memory.add_context(
-                    "agent", f"Task {task.id} queued. Intent: {command}", source=f"task:{task.id}:intent"
+                    "agent",
+                    parsed.clean_reply or "I chose to act; the outcome is not yet known.",
+                    source=f"task:{task.id}:intent",
                 )
             if parsed.god_mode and not self._god_mode and not self._god_mode_pending:
                 self._god_mode_pending = True

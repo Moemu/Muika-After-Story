@@ -188,7 +188,12 @@ class _FixtureTasks:
         self.tasks: dict[str, TaskRecord] = {}
 
     def describe(self) -> str:
-        return "\n".join(f"Task {t.id} status={t.status}: {t.instruction}" for t in self.tasks.values())
+        active = [t for t in self.tasks.values() if t.status in {"queued", "running", "recovering", "blocked"}]
+        recent = [t for t in self.tasks.values() if t.status in {"completed", "cancelled", "failed"}][-3:]
+        return "\n".join(
+            f"Private control reference: {t.id}; status={t.status}; conversation goal: {t.original_request[:500]}"
+            for t in active + recent
+        )
 
     def persona_task(self) -> None:
         return None
@@ -281,6 +286,7 @@ async def run_production_loop(
         memory.fixed_now = fixed_now
     engine.state = state
     engine.current_adapters = []
+    engine.self_change = None
     engine._god_mode = False
     engine._god_mode_pending = False
     engine._tasks = set()
@@ -303,7 +309,7 @@ async def run_production_loop(
             engine._god_mode = True
             engine._god_mode_pending = False
         elif isinstance(result, AgentTaskEvent):
-            await memory.add_context("agent", f"[Action result] {result.task_id}: {result.report}")
+            await memory.add_context("agent", f"[Action result] {result.report}")
         await engine._run_brain_pipeline(result)
     else:
         trace.add("agent_fixture_error", reason="event_limit_exceeded")

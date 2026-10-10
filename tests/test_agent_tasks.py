@@ -541,20 +541,6 @@ async def test_same_intention_does_not_submit_duplicate_task_after_restart(facto
     assert len(restored.tasks) == 1
 
 
-def test_describe_includes_progress_summary(factory):
-    manager = factory([])
-    task = TaskRecord(
-        original_request="Write the poem",
-        instruction="Write the poem",
-        status="running",
-        progress_summary="Executing: write_file",
-    )
-    manager.tasks[task.id] = task
-    assert "(progress: Executing: write_file)" in manager.describe()
-    task.progress_summary = ""
-    assert "(progress:" not in manager.describe()
-
-
 async def test_cleanup_expired_scratch_keeps_active_task_dir(factory):
     manager = factory([])
     tasks_root = mas_config.scratch_dir / "tasks"

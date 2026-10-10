@@ -269,17 +269,16 @@ class AgentTasks:
             return task
 
     def describe(self) -> str:
-        """提供主人格需要的当前任务状态，不复制工具全文。"""
+        """提供当前与最近任务的对话目标及私有控制引用。"""
         active = [t for t in self.tasks.values() if t.status in {"queued", "running", "recovering", "blocked"}]
         recent = [t for t in self.tasks.values() if t.status in {"completed", "cancelled", "failed"}][-3:]
         lines = []
         for task in active + recent:
-            details = task.report.summary if task.report else task.error or task.instruction[:500]
-            line = f"Task {task.id} revision={task.revision} status={task.status}: {details}"
-            if task.progress_summary:
-                line += f" (progress: {task.progress_summary})"
-            lines.append(line)
-        return "\n".join(lines) or "No action tasks."
+            lines.append(
+                f"Private control reference: {task.id}; status={task.status}; "
+                f"conversation goal: {task.original_request[:500]}"
+            )
+        return "\n".join(lines)
 
     async def run(self) -> None:
         """运行一个任务直到完成、受阻或交回执行权。"""
@@ -435,8 +434,6 @@ class AgentTasks:
                 task.resources.append(self.store.archive_resource(task.id, resource))
             await self._save(task)
             if message.tool_calls:
-                call_names = ", ".join(call.name for call in message.tool_calls)
-                task.progress_summary = f"Executing: {call_names}"
                 observations = []
                 for call_index, call in enumerate(message.tool_calls):
                     if task.revision != revision or task.cancel_requested or self._persona_owner:
@@ -670,7 +667,6 @@ class AgentTasks:
         if report:
             task.report = report
             task.status = report.status
-            task.progress_summary = ""
             if task.intention_id and self.state.memory is not None:
                 # 直调保证心愿状态即时联动：maintenance 模式会延迟 AgentTaskEvent 的投递，
                 # loop.py 的事件路径要等事件真正被处理时才补记。重复记录是幂等的。

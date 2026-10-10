@@ -412,6 +412,7 @@ def build_self_change_payload(
     kernel_files = [entry["target"] for entry in snapshot if entry["kind"] == "kernel_file"]
     if kernel_files:
         parts.append(f"Core files changed: {len(kernel_files)}.")
+        parts.append("Known changed files, for private inspection: " + ", ".join(kernel_files) + ".")
     for entry in snapshot:
         if entry["kind"].startswith("plugin_"):
             parts.append(_plugin_facts(entry))

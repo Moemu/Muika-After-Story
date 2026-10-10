@@ -8,13 +8,14 @@ from functools import partial
 from uuid import uuid4
 
 import aiohttp
+from sqlalchemy import select
 
 from muika.config import mas_config
 from muika.core.events import ScheduledTriggerPayload
 from muika.core.executor import SendReceipt
 from muika.core.state import MuikaState
 from muika.database.db import get_session, observe_commits
-from muika.database.orm_models import SyncStateORM
+from muika.database.orm_models import SyncEventORM, SyncStateORM
 from muika.models import Resource
 from muika.utils.logger import logger
 
@@ -239,7 +240,7 @@ class CoreLink:
                     self._captured = False
                     self.connected, self._joining = True, True
                     self._sent.clear()
-                    await self._set_role(False, "Synchronizing saved histories")
+                    await self._set_role(False, "")
                     workers = [asyncio.create_task(self._pulse()), asyncio.create_task(self._flush())]
                     for worker in workers:
                         worker.add_done_callback(partial(self._worker_finished, ws=self.ws))
@@ -251,14 +252,32 @@ class CoreLink:
                         if packet["kind"] == "history":
                             await self._history(packet)
                         elif packet["kind"] == "role":
+                            known_devices = bool(self.nodes)
                             self.epoch, self.nodes = packet["epoch"], packet["nodes"]
                             if not self._joining:
                                 self.sync_error = None
                                 retry_delay = 2.0
-                                await self._set_role(
-                                    packet["active"] == self.name,
-                                    f"Active device: {packet['active']}; available: {self.nodes}",
-                                )
+                                active = packet["active"] == self.name
+                                if active != self.active:
+                                    inherited_history = False
+                                    if active and not known_devices and self.memory.has_history:
+                                        async with get_session(record_activity=False) as db:
+                                            inherited_history = (
+                                                await db.scalar(
+                                                    select(SyncEventORM.id)
+                                                    .where(SyncEventORM.origin != self.store.origin)
+                                                    .limit(1)
+                                                )
+                                                is not None
+                                            )
+                                    await self._set_role(
+                                        active,
+                                        (
+                                            "Your companionship is now continuing on this device."
+                                            if known_devices or inherited_history
+                                            else ""
+                                        ),
+                                    )
                         elif packet["kind"] == "input" and self.active and packet["epoch"] == self.epoch:
                             await self.receive(packet["message"], packet["adapter"])
                         elif packet["kind"] == "error":
@@ -291,13 +310,17 @@ class CoreLink:
                 await self._set_role(
                     mas_config.local_fallback and not invalid and self.sync_error is None and not self._closing,
                     (
-                        f"History synchronization failed: {self.sync_error}"
-                        if self.sync_error
-                        else (
-                            "Gateway unavailable; local companionship continues"
-                            if mas_config.local_fallback
-                            else "Gateway unavailable; waiting for reconnection"
+                        (
+                            f"History synchronization failed: {self.sync_error}"
+                            if self.sync_error
+                            else (
+                                "Gateway unavailable; local companionship continues"
+                                if mas_config.local_fallback
+                                else "Gateway unavailable; waiting for reconnection"
+                            )
                         )
+                        if self.nodes or self.sync_error
+                        else ""
                     ),
                 )
             if self.sync_error:

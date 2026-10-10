@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from muika.config import mas_config
 from muika.database.crud import (
@@ -86,6 +87,15 @@ __all__ = [
 DIALOGUE_SUMMARY_INTERVAL = timedelta(minutes=5)
 DIALOGUE_SUMMARY_MIN_TURNS = 6
 NON_REFLECTION_KINDS = ("legacy", "state")
+
+
+def _reflection_material_filter() -> ColumnElement[bool]:
+    """筛选个人素材，同时保留使用 IPC 来源的玩家消息。"""
+    return and_(
+        ExperienceORM.kind.not_in(NON_REFLECTION_KINDS),
+        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+        or_(ExperienceORM.kind != "note", ExperienceORM.source.is_(None), ~ExperienceORM.source.like("ipc:%")),
+    )
 
 
 class MemoryManager:
@@ -478,8 +488,7 @@ class MemoryManager:
                 await db.execute(
                     select(func.substr(ExperienceORM.occurred_at, 1, 10), func.max(ExperienceORM.id))
                     .where(
-                        ExperienceORM.kind.not_in(NON_REFLECTION_KINDS),
-                        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+                        _reflection_material_filter(),
                     )
                     .group_by(func.substr(ExperienceORM.occurred_at, 1, 10))
                 )
@@ -502,8 +511,7 @@ class MemoryManager:
                 .where(
                     ExperienceORM.occurred_at >= day.isoformat(),
                     ExperienceORM.occurred_at < (day + timedelta(days=1)).isoformat(),
-                    ExperienceORM.kind.not_in(NON_REFLECTION_KINDS),
-                    or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+                    _reflection_material_filter(),
                 )
                 .order_by(ExperienceORM.occurred_at, ExperienceORM.id)
             )

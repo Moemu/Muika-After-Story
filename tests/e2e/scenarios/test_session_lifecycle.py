@@ -6,9 +6,35 @@ from datetime import datetime, timedelta
 import pytest
 from harness import ScriptedTurn, assert_clean_visible
 
+from muika.core.events import AdapterOfflineEvent
 from muika.database.db import get_session
+from muika.ipc.bootstrap import CoreBootstrap
+from muika.models import AdapterInfo
 
 pytestmark = pytest.mark.e2e
+
+
+async def test_repeated_adapter_bootstrap_preserves_one_greeting(core_app_factory):
+    app = await core_app_factory(turns=[ScriptedTurn(when="new session", text="沐沐，我在。", name="greeting")])
+    await app.start()
+    core = CoreBootstrap(port=0)
+    core._muika = app.muika
+    adapter = AdapterInfo(client_name="qq")
+    for index in range(3):
+        await core._handle_event({"type": "session_bootstrap", "id": str(index)}, adapter)
+    for _ in range(3):
+        await app.wait_processed("adapter_online")
+    assert await app.next_reply() == "沐沐，我在。"
+    assert len(app.scripted.calls) == 1
+    assert len(app.muika.current_adapters) == 1
+    await app.muika.create_event(AdapterOfflineEvent(adapter=adapter))
+    await app.wait_processed("adapter_offline")
+    refreshed = AdapterInfo(client_name="qq")
+    await core._handle_event({"type": "session_bootstrap", "id": "reconnected"}, refreshed)
+    await app.wait_processed("adapter_online")
+    assert app.muika.current_adapters == [refreshed]
+    assert len(app.scripted.calls) == 1
+    app.recorder.record("adapter_reconnect", greetings=1, adapters=1, repeated_platform_dialogue=0)
 
 
 async def test_sync_refresh_keeps_current_compacted_context(core_app_factory):

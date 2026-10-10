@@ -205,7 +205,7 @@ async def test_boot_changes_join_greeting_without_technical_memory(
     assert len(app.scripted.calls) == 1
     prompt = app.scripted.calls[0]["prompt"]
     assert ("detected at startup" in prompt) is enabled
-    assert "pre_boot_only.py" not in prompt
+    assert ("pre_boot_only.py" in prompt) is enabled
     assert "moments ago" not in prompt and "perception #" not in prompt
     assert self_change_notes(app) == []
     assert app.db_query("SELECT content FROM experience WHERE kind='muika'")[0]["content"] == app.sent[0]
@@ -843,7 +843,7 @@ async def test_builtin_plugins_excluded_from_plugin_baseline(core_app_factory, f
 
 
 async def test_report_distinguishes_kernel_files_from_plugins(core_app_factory, fast_self_change, tmp_plugin):
-    """kernel_file 不得被描述成插件，内核清单折叠后不再逐项展开。"""
+    """内核变化提供已知文件，供私下探索，不得被描述成插件。"""
     _, plugin_file = tmp_plugin
     app = await core_app_factory(turns=[ScriptedTurn(text="Core and plugin, both changed.", when=SELF_CHANGED_WHEN)])
     await app.start()
@@ -900,7 +900,7 @@ async def test_report_distinguishes_kernel_files_from_plugins(core_app_factory, 
     assert_clean_visible(reply)
     call = next(item for item in app.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
     assert "Core files changed: 1." in call["prompt"]
-    assert "core/brain.py" not in call["prompt"]
+    assert "core/brain.py" in call["prompt"]
     assert 'Your plugin "e2e-selfchg" was modified.' in call["prompt"]
     assert 'plugin "py"' not in call["prompt"]
     # 语域：既有内核（boot）又有插件（runtime），无版本变化 → 被实时修改

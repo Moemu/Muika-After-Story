@@ -144,6 +144,7 @@ class CoreBootstrap:
 
     async def _set_role(self, active: bool, reason: str) -> None:
         if not active:
+            self._last_role = ""
             await self._executor.scheduler.activate(False)
             if self._muika.is_alive:
                 await self._muika.stop()
@@ -156,9 +157,8 @@ class CoreBootstrap:
                 await self.node.store.capture_snapshot()
             self._muika.start()
             await self._executor.scheduler.activate(True)
-        if reason != self._last_role:
+        if reason and reason != self._last_role:
             self._last_role = reason
-            await self._muika.memory.add_material("agent", reason)
             await self._muika.create_event(CoreChangeEvent(reason))
 
     def _advance_standby(self, seconds: float) -> None:

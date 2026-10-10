@@ -17,24 +17,14 @@ class RestartController:
 
     def describe(self) -> str:
         """给主人格提供真实的待应用状态。"""
-        availability = (
-            "You can restart Core when it serves your current intent. "
-            "A plain restart reloads current files without applying any proposal."
-            if self.handler is not None
-            else "Supervised Core restart is unavailable in this host."
-        )
-        if not mas_config.can_self_modify:
-            return availability
+        if self.handler is None or not mas_config.can_self_modify:
+            return ""
         manager = get_core_proposal_manager()
         ready = manager.list_proposals("ready")
-        return (
-            availability
-            + "\n"
-            + "\n".join(
-                f"Prepared Core proposal {p['patch_id']}: {p['reason']}; stale={manager.is_stale(p)}. "
-                "Still running the old code. Choose when to apply it and restart in the context of your conversation."
-                for p in ready
-            )
+        return "\n".join(
+            f"Prepared Core proposal {p['patch_id']}: {p['reason']}; stale={manager.is_stale(p)}. "
+            "Still running the old code. Choose when to apply it and restart in the context of your conversation."
+            for p in ready
         )
 
     async def request(self, patch_id: str | None, trigger: str) -> None:

@@ -161,7 +161,7 @@ class AgentHandoffEvent:
 
 @dataclass(frozen=True)
 class CoreChangeEvent:
-    """报告设备活动位置或可用设备变化，供她自行决定是否行动。"""
+    """报告设备活动位置变化，供她自行决定是否行动。"""
 
     report: str
     self_change: Optional[SelfChangedPayload] = None

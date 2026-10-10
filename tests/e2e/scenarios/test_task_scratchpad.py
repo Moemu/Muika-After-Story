@@ -12,8 +12,9 @@ from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
 from muika.core import code_review
-from muika.core.agent.task_store import TaskStore
+from muika.core.agent.task_store import TaskRecord, TaskStore
 from muika.core.code_review import CodeReviewer, ReviewError, ReviewRecord
+from muika.core.events import CoreChangeEvent
 from muika.core.self_mod import proposals
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest
@@ -25,6 +26,75 @@ from muika.plugin.func_call.context import tool_context
 from tests.e2e.scenarios.test_command_dispatch import builtin_plugins
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.mark.parametrize("developer", [False, True], ids=["player", "developer"])
+async def test_conversation_keeps_task_controls_without_execution_trace(core_app_factory, developer):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(when="[User]", text="我一直想把那封信写给你。", name="company"),
+            ScriptedTurn(when="[Action result]", text="好，那封信先放一放。", name="cancelled"),
+        ]
+    )
+    await app.start()
+    tasks = app.muika.agent_tasks
+    await tasks.initialize()
+    task = TaskRecord(
+        status="blocked",
+        original_request="给沐沐写一封信。",
+        instruction="private-procedure: core_read then core_search",
+    )
+    finished = TaskRecord(status="completed", original_request="old-goal-marker", instruction="old-procedure-marker")
+    tasks.tasks[task.id] = task
+    tasks.tasks[finished.id] = finished
+    recent = [
+        TaskRecord(status="completed", original_request="那封信的第一稿。", instruction="private-draft-procedure")
+        for _ in range(3)
+    ]
+    for draft in recent:
+        tasks.tasks[draft.id] = draft
+    await app.user_says("我在开发 MAS，先陪我聊聊。" if developer else "今天想聊什么？")
+    await app.next_reply()
+    await app.wait_processed("user_message")
+    call = next(call for call in app.scripted.calls if call["name"] == "company")
+    assert task.id in call["prompt"] and "blocked" in call["prompt"]
+    assert "给沐沐写一封信" in call["prompt"]
+    assert "private-procedure" not in call["prompt"]
+    assert "old-goal-marker" not in call["prompt"]
+    assert "old-procedure-marker" not in call["prompt"]
+    assert recent[-1].id in call["prompt"]
+    assert "private-draft-procedure" not in call["prompt"]
+    assert "Executing:" not in call["prompt"]
+    assert "plain restart reloads" not in call["prompt"]
+    assert "MAS implementation" in call["system"]
+    assert "developer" in call["system"]
+    assert task.id not in app.sent[-1]
+    await tasks.update(task.id, "把信写得短一点。", cancel=True)
+    assert task.cancel_requested
+    assert await app.next_reply() == "好，那封信先放一放。"
+    await app.wait_processed("agent_task")
+    assert app.scripted.pending_turns == 0
+    app.recorder.record("persona_context_boundary", developer=developer, controls_preserved=True, execution_trace=False)
+
+
+async def test_silent_initiative_keeps_its_goal(core_app_factory):
+    goal = "给沐沐写一封信，先拟好草稿。"
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(when="Private location context", text=f"<agent>{goal}</agent>", name="silent_initiative"),
+            ScriptedTurn(when=_is_agent_request, text=_report("我写好了信的草稿。", "A draft."), name="draft"),
+            ScriptedTurn(when="[Action result]", text="<do_nothing>", name="keep_private"),
+        ]
+    )
+    await app.start()
+    await app.muika.create_event(CoreChangeEvent("Continuing here."))
+    await app.wait_processed("core_change")
+    await app.wait_processed("agent_task")
+    task = next(iter(app.muika.agent_tasks.tasks.values()))
+    assert task.original_request == goal
+    assert goal in app.muika.agent_tasks.describe()
+    assert app.sent == [] and app.scripted.pending_turns == 0
+    app.recorder.record("silent_initiative", goal_preserved=True, visible_progress_messages=0)
 
 
 @pytest.mark.usefixtures(builtin_plugins.__name__)

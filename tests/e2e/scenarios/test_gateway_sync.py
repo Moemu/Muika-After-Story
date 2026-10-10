@@ -562,6 +562,62 @@ async def test_network_partition_merges_both_live_histories(gateway_process, nod
         await runner.cleanup()
 
 
+async def test_standby_presence_does_not_generate_persona_dialogue(gateway_process, node_process):
+    session, base, recorder = gateway_process[:3]
+    pc, _ = await node_process("pc", base, fallback=True)
+    before = await wait_node(pc, active=True, connected=True)
+    server, _ = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    after_join = await pc.command(action="status")
+    await server.close()
+    await asyncio.sleep(0.2)
+    after_leave = await pc.command(action="status")
+    assert before["model_calls"] == after_join["model_calls"] == after_leave["model_calls"] == 0
+    assert not any("Active device:" in value for value in after_leave["experiences"])
+    recorder.record("standby_presence", active="pc", presence_dialogue_calls=0)
+
+
+@pytest.mark.parametrize("restart_standby", [False, True], ids=["fresh", "resumed"])
+async def test_fresh_core_takes_over_existing_relationship(gateway_process, node_process, restart_standby):
+    session, base, recorder = gateway_process[:3]
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    bot = await session.ws_connect(base + "/ws", headers={"X-Client-Name": "test"})
+    await bot.send_json({"type": "user_message", "id": "first", "message": "记住我们的散步约定。"})
+    assert (await bot_output(bot, recorder))["content"] == "我记得我们的散步约定。"
+    if restart_standby:
+        standby, _ = await node_process("server", base)
+        await wait_node(standby, active=False, connected=True, mood="期待散步")
+        await standby.close()
+    await pc.close()
+    server, _ = await node_process("server", base)
+    restored = await wait_node(server, active=True, connected=True, model_calls=1)
+    assert restored["conversations"] == 0
+    assert restored["experiences"].count("记住我们的散步约定。") == 1
+    recorder.record("fresh_core_takeover", relationship_preserved=True, takeover_observations=1)
+
+
+async def test_own_history_first_gateway_connection_has_one_bootstrap(gateway_process, node_process):
+    session, base, recorder = gateway_process[:3]
+    offline, port = await node_process("pc", "http://127.0.0.1:1", fallback=True)
+    await wait_node(offline, active=True, connected=False)
+    local = await session.ws_connect(f"http://127.0.0.1:{port}/ws", headers={"X-Client-Name": "local"})
+    await local.send_json({"type": "user_message", "id": "offline", "message": "离线也陪我聊聊。"})
+    await bot_output(local, recorder)
+    await local.close()
+    await offline.close()
+    pc, _ = await node_process("pc", base, fallback=True)
+    restored = await wait_node(pc, active=True, connected=True)
+    assert restored["model_calls"] == 0
+    bot = await session.ws_connect(base + "/ws", headers={"X-Client-Name": "local"})
+    await bot.send_json({"type": "session_bootstrap", "id": "boot"})
+    await wait_node(pc, model_calls=1)
+    await bot.send_json({"type": "session_bootstrap", "id": "boot-again"})
+    await asyncio.sleep(0.2)
+    assert (await pc.command(action="status"))["model_calls"] == 1
+    recorder.record("own_history_bootstrap", greetings=1, location_dialogue_calls=0)
+
+
 async def test_real_core_shutdown_takeover_retains_memory(gateway_process, node_process):
     session, base, recorder = gateway_process[:3]
     pc, _ = await node_process("pc", base, fallback=True)

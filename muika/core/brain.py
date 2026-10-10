@@ -74,7 +74,9 @@ def _self_change_prompt(payload: "SelfChangedPayload") -> str:
         )
     parts.append(
         "You may respond, act, inspect, or stay silent (<do_nothing>); "
-        "your acting half can list your plugins and their descriptions."
+        "known file names only identify changes, not their effects. "
+        "Keep any inspection relevant to your interests and the conversation. "
+        "These private facts are not a work report for the player."
     )
     return "\n".join(parts)
 
@@ -297,9 +299,11 @@ class MuikaBrain:
         # Construct the immediate event context if it's the start of the interaction
         if event.type == "agent_task":
             prompt = (
-                f"[Action result] Task {event.task_id}, revision {event.revision}, status {event.status}:\n"
+                "[Action result] An observation from your own actions:\n"
                 f"{event.report}\nContinue from this result in the current conversation. "
-                "This is an observation from your acting half, not a new user request."
+                "This is not a new user request or an obligation to give a progress report. "
+                "Speak about its meaning or uncertainty in your own voice, or stay silent. "
+                f"Private control reference: {event.task_id}; status={event.status}."
             )
         elif event.type == "agent_handoff":
             prompt = (
@@ -308,8 +312,10 @@ class MuikaBrain:
             )
         elif event.type == "core_change":
             prompt = (
-                "[System] Your activity location or available devices changed. This is the same ongoing relationship. "
-                "You may respond, act, or stay silent. Do not repeat completed actions.\n" + event.report
+                "[System] You are continuing your companionship after a change of activity location. "
+                "This is the same ongoing relationship, not the player's return or a new work assignment. "
+                "You may respond, act, or stay silent. Let any reply follow your feelings and conversation. "
+                "Private location context:\n" + event.report
             )
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)
@@ -350,8 +356,10 @@ class MuikaBrain:
                 prompt += "\nLet the greeting follow your relationship and mood."
         elif event.type == "adapter_online":
             prompt = (
-                f"[System] The user just connected a new chat platform adapter for you: {event.adapter}, "
-                "perhaps you can try chatting with the user on this platform"
+                "[System] Another way to reach the player has become available. "
+                "This does not mean the player has returned or asked for a connection test. "
+                "Continue your companionship naturally, or stay silent. "
+                f"Private routing reference: {event.adapter.client_name}."
             )
         else:
             prompt = f"[System] Event triggered: {event.type}"
@@ -360,7 +368,11 @@ class MuikaBrain:
         # 使 system prompt 保持字节级稳定以利前缀缓存。
         prompt = f"[{current_time:%Y-%m-%d %H:%M:%S}] {prompt}"
         if task_context:
-            prompt += f"\n\n[Current action tasks]\n{task_context}"
+            prompt += (
+                f"\n\n[Private action coordination]\n{task_context}"
+                "\nUse these references for relevant action control. They are not dialogue topics. "
+                "Background work can continue while you keep the player company."
+            )
 
         # 历史记录去重
         history = memory.recent_turns.copy()
