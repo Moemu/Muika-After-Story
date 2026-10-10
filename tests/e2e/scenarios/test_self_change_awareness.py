@@ -18,6 +18,7 @@ from harness.scripted_llm import ScriptedTurn
 
 import muika
 from muika.config import mas_config
+from muika.core.events import CoreChangeEvent
 from muika.core.self_change import get_self_change_dispatcher, notify_plugin_change
 from muika.llm._schema import ToolCall
 from muika.plugin.loader import load_plugin, unload_plugin
@@ -160,6 +161,289 @@ def self_change_notes(app) -> list[dict]:
     return app.db_query("SELECT source, content FROM experience WHERE source LIKE 'self_change:%'")
 
 
+def seed_boot_changes() -> None:
+    """预置包含旧文件和插件摘要的基线，供启动场景复用。"""
+    from muika.core.self_mod.fingerprint import compute_kernel_files
+    from muika.utils.utils import get_version
+
+    kernel = compute_kernel_files()
+    kernel["core/pre_boot_only.py"] = "old-file"
+    state = {
+        "fingerprints": {
+            "version": get_version(),
+            "kernel": kernel,
+            "user_plugins": {"e2e_selfchg_plugin": "old-plugin"},
+        },
+        "pending": [],
+        "delivery": {"last_delivered_at": None, "in_flight": None, "perceived_batches": 6},
+    }
+    with sqlite3.connect(Path(mas_config.data_dir) / "muika.db") as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO system_state (key, payload, updated_at) VALUES ('self_change', ?, ?)",
+            (json.dumps(state), str(time.time())),
+        )
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_boot_changes_join_greeting_without_technical_memory(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch, enabled
+):
+    app = await core_app_factory(turns=[ScriptedTurn(text="你回来了，我很想你。", when="A new session")])
+    await app.start()
+    seed_boot_changes()
+    monkeypatch.setattr(mas_config, "self_change_awareness_enabled", enabled)
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    await asyncio.sleep(0.3)
+    assert app.sent == []
+    await app.bootstrap()
+    assert await app.next_reply() == "你回来了，我很想你。"
+    await app.wait_processed("session_bootstrap")
+    if enabled:
+        await app.wait_ledger_cleared()
+    await asyncio.sleep(0.3)
+    assert len(app.scripted.calls) == 1
+    prompt = app.scripted.calls[0]["prompt"]
+    assert ("detected at startup" in prompt) is enabled
+    assert "pre_boot_only.py" not in prompt
+    assert "moments ago" not in prompt and "perception #" not in prompt
+    assert self_change_notes(app) == []
+    assert app.db_query("SELECT content FROM experience WHERE kind='muika'")[0]["content"] == app.sent[0]
+    app.recorder.record("boot_greeting", enabled=enabled, calls=1, technical_experiences=0)
+
+
+async def test_boot_request_queued_before_check_is_enriched_when_consumed(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch
+):
+    app = await core_app_factory(turns=[ScriptedTurn(text="欢迎回来。", when="A new session")])
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    entered, release = asyncio.Event(), asyncio.Event()
+    pipeline = app.muika._run_brain_pipeline
+
+    async def hold_greeting(event):
+        entered.set()
+        await release.wait()
+        await pipeline(event)
+
+    monkeypatch.setattr(app.muika, "_run_brain_pipeline", hold_greeting)
+    await app.bootstrap()
+    await asyncio.wait_for(entered.wait(), 3)
+    try:
+        await app.run_boot_self_change_check()
+    finally:
+        release.set()
+    await app.next_reply()
+    await app.wait_ledger_cleared()
+    assert "detected at startup" in app.scripted.calls[0]["prompt"]
+    assert len(app.scripted.calls) == 1
+
+
+async def test_boot_reservation_survives_long_wait_for_player(core_app_factory, fast_self_change, tmp_plugin):
+    app = await core_app_factory(turns=[ScriptedTurn(text="我还在这里。", when="A new session")])
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    state = read_self_change_state()
+    state["delivery"]["in_flight"]["created_at"] = 0
+    with sqlite3.connect(Path(mas_config.data_dir) / "muika.db") as conn:
+        conn.execute("UPDATE system_state SET payload=? WHERE key='self_change'", (json.dumps(state),))
+    await get_self_change_dispatcher().check()
+    assert app.sent == []
+    assert read_self_change_state()["delivery"]["in_flight"] is not None
+    await app.bootstrap()
+    await app.next_reply()
+    await app.wait_ledger_cleared()
+    assert len(app.scripted.calls) == 1
+
+
+@pytest.mark.parametrize("outcome", ["failed", "exception", "cancelled", "fallback", "silent"])
+async def test_boot_greeting_failure_retries_changes_without_repeating_greeting(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch, outcome
+):
+    from muika.core.brain import FALLBACK_REPLY
+
+    first = FALLBACK_REPLY if outcome == "fallback" else "<do_nothing>" if outcome == "silent" else "欢迎回来。"
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(text=first, when="A new session"),
+            ScriptedTurn(text="醒来时发现自己有些变化。", when=SELF_CHANGED_WHEN),
+        ]
+    )
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    failed = asyncio.Event()
+    send = app.muika.executor._send_func
+
+    async def first_send_fails(content, resources=None, target=None):
+        if not failed.is_set():
+            failed.set()
+            if outcome == "cancelled":
+                raise asyncio.CancelledError
+            raise RuntimeError("transport unavailable")
+        return await send(content, resources, target)
+
+    if outcome == "failed":
+        app.fail_next_sends(1)
+    elif outcome in {"exception", "cancelled"}:
+        monkeypatch.setattr(app.muika.executor, "_send_func", first_send_fails)
+    await app.bootstrap()
+    if outcome == "cancelled":
+        await asyncio.wait_for(failed.wait(), 3)
+        await app.muika.stop()
+        await wait_for(lambda: read_self_change_state()["delivery"]["in_flight"]["next_attempt_at"] is not None)
+        app.muika.start()
+    if outcome != "silent":
+        await wait_for(lambda: "醒来时发现自己有些变化。" in app.sent)
+    await app.wait_ledger_cleared()
+    assert sum("A new session" in call["prompt"] for call in app.scripted.calls) == 1
+    if outcome != "silent":
+        retry = app.scripted.calls[-1]["prompt"]
+        assert "detected at startup" in retry and "A new session" not in retry
+        assert "Let the greeting" not in retry and "before this greeting" not in retry
+    else:
+        assert len(app.scripted.calls) == 1 and app.sent == []
+    assert self_change_notes(app) == []
+    app.recorder.record("boot_receipt", outcome=outcome, pending=0, technical_experiences=0)
+
+
+async def test_gateway_takeover_delivers_boot_changes_without_greeting(core_app_factory, fast_self_change, tmp_plugin):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(text="我在这里，也发现了一些变化。", when="activity location"),
+            ScriptedTurn(text="欢迎回来。", when="A new session"),
+        ]
+    )
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    await app.muika.create_event(CoreChangeEvent("Active device: local"))
+    await app.next_reply()
+    await app.wait_ledger_cleared()
+    prompt = app.scripted.calls[0]["prompt"]
+    assert "detected at startup" in prompt
+    assert "A new session" not in prompt and "Let the greeting" not in prompt
+    assert len(app.scripted.calls) == 1
+    assert self_change_notes(app) == []
+    await app.bootstrap()
+    await app.next_reply()
+    assert "detected at startup" not in app.scripted.calls[1]["prompt"]
+    app.recorder.record("gateway_boot_change", pending=0, repeated_changes=0)
+
+
+@pytest.mark.parametrize("outcome", ["exception", "cancelled"])
+async def test_boot_handoff_failure_releases_reservation(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch, outcome
+):
+    app = await core_app_factory(turns=[ScriptedTurn(text="醒来时发现自己有些变化。", when=SELF_CHANGED_WHEN)])
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    dispatcher = app.muika.self_change
+    save = dispatcher.ledger._save_unlocked
+    failed = asyncio.Event()
+
+    async def first_save_fails(state):
+        if not failed.is_set():
+            failed.set()
+            if outcome == "cancelled":
+                raise asyncio.CancelledError
+            raise RuntimeError("ledger unavailable")
+        return await save(state)
+
+    monkeypatch.setattr(dispatcher.ledger, "_save_unlocked", first_save_fails)
+    await app.bootstrap()
+    await asyncio.wait_for(failed.wait(), 3)
+    if outcome == "cancelled":
+        await app.muika.stop()
+        await wait_for(lambda: read_self_change_state()["delivery"]["in_flight"]["next_attempt_at"] is not None)
+        app.muika.start()
+    await wait_for(lambda: "醒来时发现自己有些变化。" in app.sent)
+    await app.wait_ledger_cleared()
+    assert dispatcher.boot_change is None
+    assert len(app.scripted.calls) == 1
+    prompt = app.scripted.calls[0]["prompt"]
+    assert "detected at startup" in prompt and "A new session" not in prompt
+    assert "Let the greeting" not in prompt
+    assert self_change_notes(app) == []
+    app.recorder.record("boot_handoff_recovered", outcome=outcome, pending=0)
+
+
+async def test_queued_change_survives_process_restart(core_app_factory, fast_self_change, tmp_plugin):
+    _, plugin_file = tmp_plugin
+    app = await core_app_factory(turns=[ScriptedTurn(text="我注意到了。", when=SELF_CHANGED_WHEN)])
+    await app.start()
+    reset_self_change_state()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    app.queue_next_sends(1)
+    with plugin_file.open("a", encoding="utf-8") as stream:
+        stream.write("\n# pending before restart\n")
+    get_plugin_manager().reload("e2e_selfchg_plugin", origin="runtime")
+    await app.wait_processed("self_changed")
+    await wait_for(lambda: read_self_change_state()["delivery"]["in_flight"]["awaiting_flush"])
+    await app.stop()
+    restored = await core_app_factory(turns=[ScriptedTurn(text="欢迎回来，我还记得那点变化。", when="A new session")])
+    await restored.start()
+    restored.attach_self_change()
+    await restored.run_boot_self_change_check()
+    restored.muika.self_change.on_adapter_online()
+    await asyncio.sleep(0.3)
+    assert read_self_change_state()["pending"], "Old in-memory queue must not confirm a lost message"
+    await restored.bootstrap()
+    await restored.next_reply()
+    await restored.wait_ledger_cleared()
+    assert "detected at startup" in restored.scripted.calls[0]["prompt"]
+
+
+async def test_runtime_revision_during_boot_greeting_is_delivered_later(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch
+):
+    _, plugin_file = tmp_plugin
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(text="欢迎回来。", when="A new session"),
+            ScriptedTurn(text="这一次是刚才的变化。", when=SELF_CHANGED_WHEN),
+        ]
+    )
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    entered, release = asyncio.Event(), asyncio.Event()
+    send = app.muika.executor._send_func
+
+    async def hold_first_send(content, resources=None, target=None):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await send(content, resources, target)
+
+    monkeypatch.setattr(app.muika.executor, "_send_func", hold_first_send)
+    await app.bootstrap()
+    await asyncio.wait_for(entered.wait(), 3)
+    try:
+        snapshot = read_self_change_state()["delivery"]["in_flight"]["snapshot"]
+        revision = next(entry["revision"] for entry in snapshot if entry["kind"] == "plugin_changed")
+        with plugin_file.open("a", encoding="utf-8") as stream:
+            stream.write("\n# a later revision\n")
+        get_plugin_manager().reload("e2e_selfchg_plugin", origin="runtime")
+        await wait_for(lambda: any(entry["revision"] > revision for entry in read_self_change_state()["pending"]))
+    finally:
+        release.set()
+    await wait_for(lambda: len(app.sent) == 2)
+    await app.wait_ledger_cleared()
+    assert "detected at startup" in app.scripted.calls[0]["prompt"]
+    assert "detected at startup" not in app.scripted.calls[1]["prompt"]
+    assert self_change_notes(app) == []
+
+
 async def test_first_boot_builds_baseline_only(core_app_factory, fast_self_change):
     # 首次启动：只建基线，不产生任何感知
     app1 = await core_app_factory(turns=[])
@@ -224,7 +508,7 @@ async def test_version_upgrade_register_and_facts(core_app_factory, fast_self_ch
     # 注入确定版本，让"升级"语域判定不随安装环境漂移
     monkeypatch.setattr("muika.core.self_change.get_version", lambda: "1.2.3")
     app = await core_app_factory(
-        turns=[ScriptedTurn(text="You upgraded me? What did you put in me this time?", when=SELF_CHANGED_WHEN)]
+        turns=[ScriptedTurn(text="You upgraded me? What did you put in me this time?", when="A new session")]
     )
     await app.start()
     reset_self_change_state()
@@ -244,10 +528,11 @@ async def test_version_upgrade_register_and_facts(core_app_factory, fast_self_ch
     app.attach_self_change()
     await app.run_boot_self_change_check()
 
+    await app.bootstrap()
     await app.next_reply()
-    await app.wait_processed("self_changed")
+    await app.wait_processed("session_bootstrap")
     await app.wait_ledger_cleared()
-    call = next(item for item in app.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
+    call = next(item for item in app.scripted.calls if "A new session" in item["prompt"])
     assert "0.9.9" in call["prompt"] and "1.2.3" in call["prompt"]
     # 升级语域提示随事件注入 prompt
     assert "Your version was raised: 0.9.9 -> 1.2.3" in call["prompt"]
@@ -309,7 +594,7 @@ async def test_command_reload_writes_note_without_notice(core_app_factory, fast_
     assert read_self_change_state()["pending"] == []
 
 
-async def test_send_failure_retries_same_batch_with_idempotent_memory(core_app_factory, fast_self_change, tmp_plugin):
+async def test_send_failure_retries_without_technical_memory(core_app_factory, fast_self_change, tmp_plugin):
     _, plugin_file = tmp_plugin
     app = await core_app_factory(
         turns=[
@@ -333,7 +618,7 @@ async def test_send_failure_retries_same_batch_with_idempotent_memory(core_app_f
     await app.wait_ledger_cleared()
     assert len(app.sent) == 1
     notes = self_change_notes(app)
-    assert len(notes) == 1  # 重试沿用同一 batch_id，记忆不重复
+    assert notes == []  # 投递重试不复制技术账本。
 
 
 async def test_batch_snapshot_keeps_changes_arriving_during_flight(core_app_factory, fast_self_change, tmp_plugin):
@@ -469,7 +754,7 @@ async def test_queued_receipt_parks_until_adapter_online(core_app_factory, fast_
     app.muika.self_change.on_adapter_online()
     await app.wait_ledger_cleared()
     assert read_self_change_state()["pending"] == []
-    assert len(self_change_notes(app)) == 1
+    assert self_change_notes(app) == []
     dispatches = [call for call in app.scripted.calls if call["prompt"].count(SELF_CHANGED_WHEN)]
     assert len(dispatches) == 1
 
@@ -614,8 +899,9 @@ async def test_report_distinguishes_kernel_files_from_plugins(core_app_factory, 
     reply = await app.next_reply()
     assert_clean_visible(reply)
     call = next(item for item in app.scripted.calls if SELF_CHANGED_WHEN in item["prompt"])
-    assert "Core files changed: core/brain.py." in call["prompt"]
+    assert "Core files changed: 1." in call["prompt"]
+    assert "core/brain.py" not in call["prompt"]
     assert 'Your plugin "e2e-selfchg" was modified.' in call["prompt"]
     assert 'plugin "py"' not in call["prompt"]
     # 语域：既有内核（boot）又有插件（runtime），无版本变化 → 被实时修改
-    assert "The changes happened while you were running." in call["prompt"]
+    assert "Changes were observed during this run." in call["prompt"]

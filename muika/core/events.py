@@ -82,6 +82,7 @@ class SessionBootstrapEvent:
     timestamp: datetime = field(default_factory=datetime.now)
     last_chat_time: Optional[datetime] = field(default_factory=_get_last_connection_time)
     type: Literal["session_bootstrap"] = "session_bootstrap"
+    self_change: Optional[SelfChangedPayload] = None
 
     @property
     def absence_bucket(self) -> str:
@@ -163,6 +164,7 @@ class CoreChangeEvent:
     """报告设备活动位置或可用设备变化，供她自行决定是否行动。"""
 
     report: str
+    self_change: Optional[SelfChangedPayload] = None
     timestamp: datetime = field(default_factory=datetime.now)
     type: Literal["core_change"] = "core_change"
 
@@ -172,15 +174,15 @@ class SelfChangedPayload:
     """自我变更感知批次的事实集合。"""
 
     batch_id: str
-    """投递批次标识；重试沿用同一 ID，记忆写入据此幂等。"""
+    """投递批次标识；重试沿用同一 ID。"""
     register: Literal["edited", "updated", "upgraded", "downgraded"]
     """语域：被实时修改 / 无版本变化更新 / 版本提升 / 版本回退。"""
     report: str
     """[System] 事实行：改了什么、版本前后值、新插件的名称与描述。"""
     version_from: Optional[str] = None
     version_to: Optional[str] = None
-    times_noticed: int = 0
-    """已确认的感知批次数（含沉默感知），供模板收敛重复反应。"""
+    observed_at_startup: bool = False
+    """该批次在启动时已被发现，不代表变更刚刚发生。"""
 
 
 @dataclass(frozen=True)

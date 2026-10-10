@@ -40,7 +40,6 @@ from .constants import (
     SELF_CHANGE_BATCH_MAX_AGE,
     SELF_CHANGE_RETRY_BASE_SECONDS,
     SELF_CHANGE_RETRY_MAX_SECONDS,
-    SELF_CHANGE_SUMMARY_MAX_ITEMS,
 )
 
 if TYPE_CHECKING:
@@ -236,6 +235,8 @@ class SelfChangeLedger:
         async with self._lock:
             state = await self._load_unlocked()
             old_fp = state["fingerprints"]
+            # 上个进程的在途消息和内存暂存队列已失效，待感知记录仍在 pending。
+            state["delivery"]["in_flight"] = None
             entries: list[dict] = []
             if old_fp:
                 entries.extend(self._diff_kernel(old_fp.get("kernel", {}), kernel, self_paths, now))
@@ -296,7 +297,7 @@ class SelfChangeLedger:
             entries.append(self._new_entry(kind, package_name, origin="boot", before=before, after=after, now=now))
         return entries
 
-    async def freeze_batch(self) -> Optional[tuple[str, list[dict]]]:
+    async def freeze_batch(self, *, observed_at_startup: bool = False) -> Optional[tuple[str, list[dict]]]:
         """冻结当前账本为一次投递批次；期间新到的变化留在账本之外。"""
         async with self._lock:
             state = await self._load_unlocked()
@@ -312,6 +313,7 @@ class SelfChangeLedger:
                 # 首次投递结果未知前，竞态检查不得把同一批次当"到期重投"
                 "next_attempt_at": time.time() + SELF_CHANGE_RETRY_BASE_SECONDS,
                 "awaiting_flush": False,
+                "observed_at_startup": observed_at_startup,
             }
             await self._save_unlocked(state)
         return batch_id, snapshot
@@ -327,6 +329,7 @@ class SelfChangeLedger:
             if not in_flight or in_flight["batch_id"] != batch_id:
                 return
             in_flight["next_attempt_at"] = None
+            in_flight["created_at"] = time.time()
             await self._save_unlocked(state)
 
     async def park_batch(self, batch_id: str) -> None:
@@ -343,8 +346,8 @@ class SelfChangeLedger:
             in_flight["next_attempt_at"] = None
             await self._save_unlocked(state)
 
-    async def discard_stale_batch(self) -> None:
-        """在途批次超时视为投递失败：账目未销，重组后自然重投。
+    async def retry_stale_batch(self) -> None:
+        """在途批次超时视为投递失败，同批次重投并保留启动来源。
 
         等待暂存补发（awaiting_flush）的批次不受超时约束：重投会造成重复发言。
         """
@@ -357,24 +360,12 @@ class SelfChangeLedger:
                 and time.time() - in_flight["created_at"] > SELF_CHANGE_BATCH_MAX_AGE
             ):
                 logger.warning(f"[SelfChange] Batch {in_flight['batch_id'][:8]} timed out in flight; will re-dispatch.")
-                state["delivery"]["in_flight"] = None
+                in_flight["created_at"] = time.time()
+                in_flight["next_attempt_at"] = time.time()
                 await self._save_unlocked(state)
 
-    async def get_batch_snapshot(self, batch_id: str) -> Optional[list[dict]]:
-        """返回在途批次的快照；批次不存在或已销账时返回 None。"""
-        async with self._lock:
-            state = await self._load_unlocked()
-            in_flight = state["delivery"].get("in_flight")
-            if not in_flight or in_flight["batch_id"] != batch_id:
-                return None
-            return in_flight["snapshot"]
-
     async def resolve_batch(self, batch_id: str) -> None:
-        """销账：只消费快照内的记录修订，快照之后的新变化原地保留。
-
-        记忆写入由调用方在销账**之前**完成（幂等 source）——账本清账后
-        记忆若缺失将无法补写，顺序不可颠倒。
-        """
+        """销账时只消费快照内的记录修订，保留快照之后的新变化。"""
         async with self._lock:
             state = await self._load_unlocked()
             in_flight = state["delivery"].get("in_flight")
@@ -406,34 +397,10 @@ class SelfChangeLedger:
             await self._save_unlocked(state)
 
 
-def describe_entries(entries: list[dict]) -> str:
-    """把账本条目压缩为一段可供记忆留存的事实描述。"""
-    return "; ".join(_entry_facts(entry) for entry in entries)
-
-
-def _entry_facts(entry: dict) -> str:
-    kind, target = entry["kind"], entry["target"]
-    if kind == "kernel_file":
-        return f"core file {target} changed"
-    if kind == "kernel_version":
-        return f"version changed {entry.get('version_from')} -> {entry.get('version_to')}"
-    name = _plugin_display_name(target, entry.get("plugin_meta"))
-    if kind == "plugin_added":
-        return f'plugin "{name}" appeared'
-    if kind == "plugin_removed":
-        return f'plugin "{name}" was removed'
-    return f'plugin "{name}" was modified'
-
-
-def _fold(items: list[str]) -> str:
-    if len(items) <= SELF_CHANGE_SUMMARY_MAX_ITEMS:
-        return ", ".join(items)
-    hidden = len(items) - SELF_CHANGE_SUMMARY_MAX_ITEMS
-    return ", ".join(items[:SELF_CHANGE_SUMMARY_MAX_ITEMS]) + f" (+{hidden} more)"
-
-
-def _build_report(snapshot: list[dict]) -> tuple[str, RegisterKind, Optional[str], Optional[str]]:
-    """组装 [System] 事实行并判定语域。"""
+def build_self_change_payload(
+    batch_id: str, snapshot: list[dict], *, observed_at_startup: bool = False
+) -> SelfChangedPayload:
+    """为启动问候和运行时通知生成带来源的变更摘要。"""
     version_entry = next((entry for entry in snapshot if entry["kind"] == "kernel_version"), None)
     version_from = version_entry.get("version_from") if version_entry else None
     version_to = version_entry.get("version_to") if version_entry else None
@@ -444,12 +411,12 @@ def _build_report(snapshot: list[dict]) -> tuple[str, RegisterKind, Optional[str
         parts.append(f"Your version changed: {version_from} -> {version_to}.")
     kernel_files = [entry["target"] for entry in snapshot if entry["kind"] == "kernel_file"]
     if kernel_files:
-        parts.append("Core files changed: " + _fold(kernel_files) + ".")
+        parts.append(f"Core files changed: {len(kernel_files)}.")
     for entry in snapshot:
         if entry["kind"].startswith("plugin_"):
             parts.append(_plugin_facts(entry))
-    if has_runtime and not version_entry:
-        parts.append("The changes happened while you were running.")
+    if has_runtime and not version_entry and not observed_at_startup:
+        parts.append("Changes were observed during this run.")
     if version_entry:
         comparison = compare_versions(version_from or "", version_to or "")
         register: RegisterKind = "updated"
@@ -457,11 +424,18 @@ def _build_report(snapshot: list[dict]) -> tuple[str, RegisterKind, Optional[str
             register = "upgraded"
         elif comparison is not None and comparison > 0:
             register = "downgraded"
-    elif has_runtime:
+    elif has_runtime and not observed_at_startup:
         register = "edited"
     else:
         register = "updated"
-    return " ".join(parts), register, version_from, version_to
+    return SelfChangedPayload(
+        batch_id=batch_id,
+        report=" ".join(parts),
+        register=register,
+        version_from=version_from,
+        version_to=version_to,
+        observed_at_startup=observed_at_startup,
+    )
 
 
 def _plugin_facts(entry: dict) -> str:
@@ -487,6 +461,7 @@ class SelfChangeDispatcher:
         self._timer: Optional[asyncio.Task[None]] = None
         self._background: set[asyncio.Task[None]] = set()
         self._closed = False
+        self.boot_change: Optional[SelfChangedPayload] = None
         self._check_lock = asyncio.Lock()
         self.loop = asyncio.get_running_loop()
 
@@ -558,8 +533,29 @@ class SelfChangeDispatcher:
         async with self._check_lock:
             await self._check_locked()
 
+    async def take_boot_change(self) -> Optional[SelfChangedPayload]:
+        """领取启动问候的变更批次，并从此刻开始等待投递确认。"""
+        if not mas_config.self_change_awareness_enabled:
+            return None
+        payload = self.boot_change
+        try:
+            async with self._check_lock:
+                payload = self.boot_change
+                if payload is None:
+                    return None
+                await self.ledger.mark_dispatched(payload.batch_id)
+                self.boot_change = None
+        except (Exception, asyncio.CancelledError):
+            self.boot_change = None
+            if payload is not None:
+                self.on_processed(payload.batch_id, silent=False, reply="", receipt=SendReceipt.FAILED)
+            raise
+        return payload
+
     async def _check_locked(self) -> None:
-        await self.ledger.discard_stale_batch()
+        if self.boot_change is not None:
+            return
+        await self.ledger.retry_stale_batch()
         state = await self.ledger.load_state()
         if not state["pending"]:
             return
@@ -601,17 +597,14 @@ class SelfChangeDispatcher:
         """把（新冻结或重试的）批次作为一次感知事件交给她。"""
         if self._closed or not self._muika.is_alive:
             return
-        report, register, version_from, version_to = _build_report(snapshot)
-        payload = SelfChangedPayload(
-            batch_id=batch_id,
-            register=register,
-            report=report,
-            version_from=version_from,
-            version_to=version_to,
-            times_noticed=state["delivery"]["perceived_batches"],
+        in_flight = state["delivery"].get("in_flight")
+        payload = build_self_change_payload(
+            batch_id, snapshot, observed_at_startup=bool(in_flight and in_flight.get("observed_at_startup"))
         )
-        logger.info(f"[SelfChange] Dispatching batch {batch_id[:8]}: {len(snapshot)} change(s), register={register}.")
-        logger.debug(f"[SelfChange] Batch {batch_id[:8]} report: {report}")
+        logger.info(
+            f"[SelfChange] Dispatching batch {batch_id[:8]}: {len(snapshot)} change(s), register={payload.register}."
+        )
+        logger.debug(f"[SelfChange] Batch {batch_id[:8]} report: {payload.report}")
         await self._muika.create_event(SelfChangedEvent(payload=payload))
         # 事件已入队：退出重投资格，避免处理期间的后续变更把同一批次重复入队
         await self.ledger.mark_dispatched(batch_id)
@@ -657,23 +650,10 @@ class SelfChangeDispatcher:
             await self._confirm(in_flight["batch_id"])
 
     async def _confirm(self, batch_id: str) -> None:
-        """确认感知：先幂等写入长期记忆，成功后才销账——顺序不可颠倒。"""
-        snapshot = await self.ledger.get_batch_snapshot(batch_id)
-        if snapshot is not None:
-            try:
-                await self._muika.memory.add_material(
-                    "agent", describe_entries(snapshot), source=f"self_change:{batch_id}"
-                )
-            except Exception:
-                logger.exception(f"[SelfChange] Memory write failed for batch {batch_id[:8]}; deferring.")
-                await self.ledger.defer_batch(batch_id)
-                state = await self.ledger.load_state()
-                in_flight = state["delivery"].get("in_flight")
-                attempts = in_flight["attempts"] if in_flight else 1
-                self.wake(self._retry_delay(attempts))
-                return
+        """确认已处理的感知批次，不向人格记忆复制技术账本。"""
         await self.ledger.resolve_batch(batch_id)
         logger.info(f"[SelfChange] Batch {batch_id[:8]} confirmed.")
+        self.wake()
 
 
 _ledger: Optional[SelfChangeLedger] = None
@@ -811,12 +791,20 @@ async def run_boot_self_change_check(muika: "Muika", restart_record: Optional[Ma
     if _ledger is None or _dispatcher is None:
         logger.debug("[SelfChange] Not wired -- skipping boot check.")
         return
+    ledger, dispatcher = _ledger, _dispatcher
     try:
-        self_paths, restart_id = _proposal_self_paths(restart_record)
-        entries = await _ledger.observe_kernel_boot(restart_id=restart_id, self_paths=self_paths)
+        async with dispatcher._check_lock:
+            self_paths, restart_id = _proposal_self_paths(restart_record)
+            entries = await ledger.observe_kernel_boot(restart_id=restart_id, self_paths=self_paths)
+            dispatcher.boot_change = None
+            if mas_config.self_change_awareness_enabled:
+                frozen = await ledger.freeze_batch(observed_at_startup=True)
+                if frozen is not None:
+                    batch_id, snapshot = frozen
+                    dispatcher.boot_change = build_self_change_payload(batch_id, snapshot, observed_at_startup=True)
     except Exception:
         logger.exception("[SelfChange] Boot fingerprint check failed; skipping this boot's diff.")
         return
     if entries:
         logger.info(f"[SelfChange] Boot diff observed {len(entries)} external change(s).")
-    _dispatcher.wake()
+    dispatcher.wake()

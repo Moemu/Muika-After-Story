@@ -5,7 +5,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from random import random
 from typing import Coroutine, Literal, Optional, TypeVar
@@ -34,8 +34,10 @@ from .digest_agent import DigestAgent
 from .events import (
     AgentHandoffEvent,
     AgentTaskEvent,
+    CoreChangeEvent,
     Event,
     SelfChangedEvent,
+    SessionBootstrapEvent,
     SessionEndEvent,
     TimeoutEvent,
     TimeTickEvent,
@@ -505,51 +507,62 @@ class Muika:
         event: Event,
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
-        if event.type == "time_tick":
-            await self.memory.mark_considered()
-        persona_task = self.agent_tasks.persona_task() if self._god_mode else None
-        with tool_context(
-            self.state,
-            self.executor,
-            task_id=persona_task.id if persona_task else None,
-            file_versions=persona_task.file_versions if persona_task else None,
-            execute_tool=self.agent_tasks.execute_persona_call if persona_task else None,
-            review_context=(
-                event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
-            ),
-        ) as context:
-            reply = await self.brain.generate_reply(
-                event=event,
-                state=self.state,
-                memory=self.memory,
-                adapters=self.current_adapters,
-                god_mode=self._god_mode,
-                resources=event.payload.message.resources if event.type == "user_message" else None,
-                task_context=self.agent_tasks.describe() + "\n" + self.restart.describe(),
-            )
-            resources = context.resources
-        parsed = self._parse_reply_tags(reply)
-        for update in parsed.state_updates:
-            await self.memory.update_state(update)
-        silent_turn = parsed.do_nothing
-        if silent_turn:
-            logger.info("[Turn] silent (do_nothing)")
-        receipt: Optional[SendReceipt] = None
-        if not silent_turn:
-            if parsed.clean_reply:
-                logger.info(f"Muika: {parsed.clean_reply}")
-                receipt = await self.executor.send_message(
-                    parsed.clean_reply, resources=resources, target=parsed.target
+        dispatcher = self.self_change
+        if isinstance(event, (SessionBootstrapEvent, CoreChangeEvent)) and dispatcher is not None:
+            event = replace(event, self_change=await dispatcher.take_boot_change())
+        change = (
+            event.payload
+            if isinstance(event, SelfChangedEvent)
+            else event.self_change if isinstance(event, (SessionBootstrapEvent, CoreChangeEvent)) else None
+        )
+        try:
+            if event.type == "time_tick":
+                await self.memory.mark_considered()
+            persona_task = self.agent_tasks.persona_task() if self._god_mode else None
+            with tool_context(
+                self.state,
+                self.executor,
+                task_id=persona_task.id if persona_task else None,
+                file_versions=persona_task.file_versions if persona_task else None,
+                execute_tool=self.agent_tasks.execute_persona_call if persona_task else None,
+                review_context=(
+                    event.payload.message.message if event.type == "user_message" else f"Initiative: {event.type}"
+                ),
+            ) as context:
+                reply = await self.brain.generate_reply(
+                    event=event,
+                    state=self.state,
+                    memory=self.memory,
+                    adapters=self.current_adapters,
+                    god_mode=self._god_mode,
+                    resources=event.payload.message.resources if event.type == "user_message" else None,
+                    task_context=self.agent_tasks.describe() + "\n" + self.restart.describe(),
                 )
-            else:
-                logger.info("[Turn] empty reply (tags only)")
-            await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
-            if parsed.timeout is not None:
-                self._arm_timeout(parsed.timeout)
-        if isinstance(event, SelfChangedEvent) and self.self_change is not None:
-            self.self_change.on_processed(
-                event.payload.batch_id, silent=silent_turn, reply=parsed.clean_reply, receipt=receipt
-            )
+                resources = context.resources
+            parsed = self._parse_reply_tags(reply)
+            for update in parsed.state_updates:
+                await self.memory.update_state(update)
+            silent_turn = parsed.do_nothing
+            if silent_turn:
+                logger.info("[Turn] silent (do_nothing)")
+            receipt: Optional[SendReceipt] = None
+            if not silent_turn:
+                if parsed.clean_reply:
+                    logger.info(f"Muika: {parsed.clean_reply}")
+                    receipt = await self.executor.send_message(
+                        parsed.clean_reply, resources=resources, target=parsed.target
+                    )
+                else:
+                    logger.info("[Turn] empty reply (tags only)")
+                await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
+                if parsed.timeout is not None:
+                    self._arm_timeout(parsed.timeout)
+        except (Exception, asyncio.CancelledError):
+            if change is not None and dispatcher is not None:
+                dispatcher.on_processed(change.batch_id, silent=False, reply="", receipt=SendReceipt.FAILED)
+            raise
+        if change is not None and dispatcher is not None:
+            dispatcher.on_processed(change.batch_id, silent=silent_turn, reply=parsed.clean_reply, receipt=receipt)
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if not silent_turn:

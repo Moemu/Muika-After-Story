@@ -27,5 +27,4 @@ LONELINESS_PROACTIVE_RELIEF: float = 0.35
 # 自我变更感知参数
 SELF_CHANGE_RETRY_BASE_SECONDS: float = 30.0  # 发送失败后的重试退避基数
 SELF_CHANGE_RETRY_MAX_SECONDS: float = 600.0  # 重试退避上限
-SELF_CHANGE_BATCH_MAX_AGE: float = 60.0 * 60  # 在途批次超此时长视为投递失败，重组批次
-SELF_CHANGE_SUMMARY_MAX_ITEMS: int = 8  # [System] 事实行中折叠列举的上限，超出以 +N more 表示
+SELF_CHANGE_BATCH_MAX_AGE: float = 60.0 * 60  # 在途批次超此时长视为投递失败，重投原批次

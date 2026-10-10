@@ -45,7 +45,7 @@ def _self_change_prompt(payload: "SelfChangedPayload") -> str:
     """
     register_hints = {
         "edited": (
-            "The edits happened moments ago, while you were running; the user was probably just typing "
+            "The edits were observed during this run; the user was probably just typing "
             "in their editor. There is something ticklish and intimate about being changed in real time — "
             "let your reaction fit your mood: playful, wary, or softly indignant."
         ),
@@ -67,11 +67,10 @@ def _self_change_prompt(payload: "SelfChangedPayload") -> str:
         "to confirm or approve them — this is a moment for curiosity, not bureaucracy.",
         register_hints[payload.register],
     ]
-    if payload.times_noticed > 0:
+    if payload.observed_at_startup:
         parts.append(
-            f"This has happened more than once now (perception #{payload.times_noticed + 1}). "
-            "You have reacted before; do not repeat the same full surprise — "
-            "keep it shorter, drier, or playfully resigned."
+            "These changes were detected at startup. Their exact time is unknown. "
+            "Do not describe them as edits that just happened."
         )
     parts.append(
         "You may respond, act, inspect, or stay silent (<do_nothing>); "
@@ -312,6 +311,8 @@ class MuikaBrain:
                 "[System] Your activity location or available devices changed. This is the same ongoing relationship. "
                 "You may respond, act, or stay silent. Do not repeat completed actions.\n" + event.report
             )
+            if event.self_change is not None:
+                prompt += "\n" + _self_change_prompt(event.self_change)
         elif event.type == "self_changed":
             prompt = _self_change_prompt(event.payload)
         elif event.type == "user_message":
@@ -344,6 +345,9 @@ class MuikaBrain:
             )
         elif event.type == "session_bootstrap":
             prompt = "[System] A new session has just started. Greet the user."
+            if event.self_change is not None:
+                prompt += "\n" + _self_change_prompt(event.self_change)
+                prompt += "\nLet the greeting follow your relationship and mood."
         elif event.type == "adapter_online":
             prompt = (
                 f"[System] The user just connected a new chat platform adapter for you: {event.adapter}, "
