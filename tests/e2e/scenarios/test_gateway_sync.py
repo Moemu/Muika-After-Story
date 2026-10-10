@@ -750,7 +750,11 @@ async def test_watch_retries_after_a_transient_election_failure(live_gateway, mo
 
     monkeypatch.setattr(gateway, "_elect", flaky_elect)
     gateway.nodes["pc"].last_seen = 0
-    await asyncio.sleep(2.2)
+    deadline = time.monotonic() + 10
+    while gateway.active is not None or attempts < 2:
+        assert not gateway._clock.done()
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.05)
     assert gateway.active is None
     assert attempts >= 2 and not gateway._clock.done()
     recorder.record("watch_retry", attempts=attempts)
