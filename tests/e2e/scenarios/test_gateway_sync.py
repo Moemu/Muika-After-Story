@@ -1229,3 +1229,235 @@ async def test_reminder_created_during_handoff_reaches_the_new_active_core(live_
     recorder.record("reminder_forwarded_after_handoff", pc=status, active=gateway.active)
     assert switched and gateway.active == "server"
     assert status["sync_error"] is None and status["active"] is False
+
+
+@pytest.mark.parametrize("busy", ["joining", "role", "input"])
+@pytest.mark.parametrize("shutdown", ["close", "disconnect", "disconnect_then_close"])
+async def test_core_link_reads_ping_while_business_waits(live_gateway, core_app_factory, monkeypatch, busy, shutdown):
+    from aiohttp import WSMsgType, web
+
+    from muika.config import mas_config
+    from muika.ipc.core_link import CoreLink
+    from muika.models import AdapterInfo
+
+    gateway, session, base, recorder = live_gateway
+    app = await core_app_factory(turns=[])
+    await app.start()
+    monkeypatch.setattr(mas_config, "gateway_url", base + "/cores")
+    monkeypatch.setattr(mas_config, "core_node_name", "pc")
+    monkeypatch.setattr(mas_config, "local_fallback", False)
+    entered, release, active, pong, finished = [asyncio.Event() for _ in range(5)]
+    roles = []
+    original_receive = web.WebSocketResponse.receive
+    original_summary = app.muika.memory.summarize_dialogue
+
+    async def slow_summary(model, *, force=False):
+        entered.set()
+        await release.wait()
+        result = await original_summary(model, force=force)
+        finished.set()
+        return result
+
+    async def role(is_active, reason):
+        roles.append(is_active)
+        if is_active:
+            active.set()
+        elif busy == "joining" and not active.is_set():
+            entered.set()
+            await release.wait()
+            finished.set()
+        elif busy == "role" and active.is_set():
+            await app.muika.stop()
+
+    async def receive(message, adapter):
+        entered.set()
+        await release.wait()
+        finished.set()
+
+    async def observe_pong(ws, *args, **kwargs):
+        message = await original_receive(ws, *args, **kwargs)
+        if message.type == WSMsgType.PONG:
+            pong.set()
+        return message
+
+    monkeypatch.setattr(app.muika.memory, "summarize_dialogue", slow_summary)
+    monkeypatch.setattr(web.WebSocketResponse, "receive", observe_pong)
+    link = CoreLink(app.muika.state, role, receive, lambda seconds: None)
+    closing = None
+    try:
+        await link.start()
+        if busy != "joining":
+            await asyncio.wait_for(active.wait(), 5)
+            if busy == "role":
+                server = await connect_core(session, base, "server")
+                await ready(server, recorder)
+                async with gateway._lock:
+                    await gateway._elect("server")
+            else:
+                await gateway._input({"type": "command", "id": "slow", "raw": ".slow"}, AdapterInfo("bot"))
+        await asyncio.wait_for(entered.wait(), 5)
+        connection = gateway.nodes["pc"].ws
+        connection._autoping = False
+        await connection.ping(b"during-business")
+        await asyncio.wait_for(pong.wait(), 1)
+        assert not finished.is_set()
+        assert link.connected and not connection.closed
+        if shutdown == "close":
+            closing = asyncio.create_task(link.close())
+            await asyncio.sleep(0.05)
+            assert not closing.done()
+            release.set()
+        else:
+            await connection.close()
+            deadline = time.monotonic() + 3
+            while link.connected:
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.01)
+            assert not finished.is_set()
+            if shutdown == "disconnect_then_close":
+                closing = asyncio.create_task(link.close())
+                await asyncio.sleep(0.05)
+                assert not closing.done()
+            release.set()
+            if closing is None:
+                deadline = time.monotonic() + 7
+                while not link.connected or "pc" not in gateway.nodes or gateway.nodes["pc"].ws is connection:
+                    assert time.monotonic() < deadline
+                    await asyncio.sleep(0.02)
+                closing = asyncio.create_task(link.close())
+        await asyncio.wait_for(closing, 5)
+        assert not link.connected and link._task.done()
+        assert finished.is_set()
+        recorder.record(
+            "transport_during_business", busy=busy, shutdown=shutdown, pong=True, cleanup_complete=True, roles=roles
+        )
+    finally:
+        release.set()
+        if closing is not None:
+            await closing
+        else:
+            await link.close()
+
+
+async def test_core_link_drains_persisted_input_backlog(live_gateway, core_app_factory, monkeypatch):
+    from muika.config import mas_config
+    from muika.ipc.core_link import CoreLink
+    from muika.models import AdapterInfo
+
+    gateway, session, base, recorder = live_gateway
+    app = await core_app_factory(turns=[])
+    await app.start()
+    monkeypatch.setattr(mas_config, "gateway_url", base + "/cores")
+    monkeypatch.setattr(mas_config, "core_node_name", "pc")
+    monkeypatch.setattr(mas_config, "local_fallback", False)
+    expected = [str(i) for i in range(20)]
+    received = []
+    roles = []
+    for identifier in expected:
+        await gateway._input({"type": "user_message", "id": identifier, "message": identifier}, AdapterInfo("bot"))
+
+    async def role(active, reason):
+        roles.append(active)
+
+    async def receive(message, adapter):
+        await asyncio.sleep(0.01)
+        await app.muika.memory.add_material(
+            "note", message["message"], source="ipc:" + json.dumps([adapter, message["id"]])
+        )
+        received.append(message["id"])
+
+    link = CoreLink(app.muika.state, role, receive, lambda seconds: None)
+    try:
+        await link.start()
+        deadline = time.monotonic() + 10
+        while received != expected:
+            assert time.monotonic() < deadline, received
+            await asyncio.sleep(0.02)
+        assert link.connected and link.sync_error is None
+        recorder.record("input_backlog_drained", received=received, roles=roles)
+    finally:
+        await link.close()
+
+
+async def test_rejected_core_cannot_activate_local_fallback(live_gateway, core_app_factory, monkeypatch):
+    from muika.config import mas_config
+    from muika.ipc.core_link import CoreLink
+
+    gateway, session, base, recorder = live_gateway
+    occupied = await connect_core(session, base, "pc")
+    app = await core_app_factory(turns=[])
+    await app.start()
+    monkeypatch.setattr(mas_config, "gateway_url", base + "/cores")
+    monkeypatch.setattr(mas_config, "core_node_name", "pc")
+    monkeypatch.setattr(mas_config, "local_fallback", True)
+    roles = []
+
+    async def role(active, reason):
+        roles.append(active)
+
+    async def receive(message, adapter):
+        raise AssertionError("Rejected Core received input")
+
+    link = CoreLink(app.muika.state, role, receive, lambda seconds: None)
+    try:
+        await link.start()
+        deadline = time.monotonic() + 3
+        while link.sync_error is None:
+            assert time.monotonic() < deadline, roles
+            await asyncio.sleep(0.01)
+        assert not link.active and True not in roles
+        recorder.record("rejected_core", error=link.sync_error, roles=roles)
+    finally:
+        await link.close()
+        await occupied.close()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, ConnectionResetError])
+async def test_disconnected_callback_failure_classifies_fallback(live_gateway, core_app_factory, monkeypatch, failure):
+    from muika.config import mas_config
+    from muika.ipc.core_link import CoreLink
+    from muika.models import AdapterInfo
+
+    gateway, session, base, recorder = live_gateway
+    app = await core_app_factory(turns=[])
+    await app.start()
+    monkeypatch.setattr(mas_config, "gateway_url", base + "/cores")
+    monkeypatch.setattr(mas_config, "core_node_name", "pc")
+    monkeypatch.setattr(mas_config, "local_fallback", True)
+    active, entered, release = [asyncio.Event() for _ in range(3)]
+    roles = []
+
+    async def role(is_active, reason):
+        roles.append(is_active)
+        if is_active:
+            active.set()
+
+    async def receive(message, adapter):
+        entered.set()
+        await release.wait()
+        raise failure("Business cleanup failed")
+
+    link = CoreLink(app.muika.state, role, receive, lambda seconds: None)
+    try:
+        await link.start()
+        await asyncio.wait_for(active.wait(), 5)
+        await gateway._input({"type": "command", "id": "failure", "raw": ".fail"}, AdapterInfo("bot"))
+        await asyncio.wait_for(entered.wait(), 3)
+        await gateway.nodes["pc"].ws.close()
+        deadline = time.monotonic() + 3
+        while link.connected:
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+        release.set()
+        while len(roles) < 3:
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+        assert link.active == (failure is ConnectionResetError)
+        if failure is RuntimeError:
+            assert "Business cleanup failed" in link.sync_error
+        else:
+            assert link.sync_error is None
+        recorder.record("callback_failed_after_disconnect", error=link.sync_error, active=link.active)
+    finally:
+        release.set()
+        await link.close()

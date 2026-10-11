@@ -70,15 +70,27 @@ class CoreLink:
         self._task = asyncio.create_task(self._run())
 
     async def close(self) -> None:
+        already_closing = self._closing
         self._closing = True
         if self._task is not None:
-            self._task.cancel()
+            if not already_closing and (self.connected or self.ws is None):
+                self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
         observe_commits(None)
 
     async def _set_role(self, active: bool, reason: str) -> None:
         self.active = active
-        await self.role(active, reason)
+        await self._await_business_completion(self.role(active, reason))
+
+    @staticmethod
+    async def _await_business_completion(callback: Awaitable[None]) -> None:
+        """连接关闭时等待已开始的角色切换或输入处理完成。"""
+        transition = asyncio.ensure_future(callback)
+        try:
+            await asyncio.shield(transition)
+        except asyncio.CancelledError:
+            await transition
+            raise
 
     async def send(self, message: CoreToBotMessage, target: str | None = None) -> SendReceipt:
         """在线输出带任期；此发送不等待平台确认，写入网关连接即算 ``written``。"""
@@ -216,9 +228,52 @@ class CoreLink:
             logger.error(f"[CoreLink] Synchronization stopped: {error}")
             asyncio.create_task(ws.close())
 
+    async def _consume_packets(self, packets: asyncio.Queue[dict]) -> None:
+        """按连接内顺序应用历史、切换角色并处理输入。"""
+        await self._set_role(False, "")
+        while True:
+            packet = await packets.get()
+            if packet["kind"] == "history":
+                await self._history(packet)
+            elif packet["kind"] == "role":
+                # 只认“我以外”的设备：单机隧道抖动后重连不是活动位置变化。
+                known_other = any(node != self.name for node in self.nodes)
+                self.epoch, self.nodes = packet["epoch"], packet["nodes"]
+                if not self._joining:
+                    self.sync_error = None
+                    active = packet["active"] == self.name
+                    if active != self.active:
+                        inherited_history = False
+                        if active and not known_other and self.memory.has_history:
+                            async with get_session(record_activity=False) as db:
+                                inherited_history = (
+                                    await db.scalar(
+                                        select(SyncEventORM.id).where(SyncEventORM.origin != self.store.origin).limit(1)
+                                    )
+                                    is not None
+                                )
+                        await self._set_role(
+                            active,
+                            (
+                                "Your companionship is now continuing on this device."
+                                if known_other or inherited_history
+                                else ""
+                            ),
+                        )
+            elif packet["kind"] == "input" and self.active and packet["epoch"] == self.epoch:
+                await self._await_business_completion(self.receive(packet["message"], packet["adapter"]))
+            elif packet["kind"] == "error":
+                if packet.get("operation") == "output":
+                    logger.error(f"[CoreLink] {packet['detail']}")
+                    continue
+                if packet.get("operation") == "handoff":
+                    logger.warning(f"[CoreLink] Core handoff failed: {packet['detail']}")
+                    await self._set_role(self.active, "")
+                    continue
+
     async def _run(self) -> None:
         retry_delay = 2.0
-        while True:
+        while not self._closing:
             workers: list[asyncio.Task[None]] = []
             invalid = False
             try:
@@ -236,12 +291,14 @@ class CoreLink:
                         max_msg_size=MAX_SYNC_BYTES,
                     )
                     self._foreground = self.active and mas_config.local_fallback
+                    self.active = False
                     self._preserve = self._foreground
                     self._captured = False
                     self.connected, self._joining = True, True
                     self._sent.clear()
-                    await self._set_role(False, "")
-                    workers = [asyncio.create_task(self._pulse()), asyncio.create_task(self._flush())]
+                    packets: asyncio.Queue[dict] = asyncio.Queue()
+                    consumer = asyncio.create_task(self._consume_packets(packets))
+                    workers = [consumer, asyncio.create_task(self._pulse()), asyncio.create_task(self._flush())]
                     for worker in workers:
                         worker.add_done_callback(partial(self._worker_finished, ws=self.ws))
                     await self.ws.send_json({"kind": "history", "after": await self.store.cursor()})
@@ -249,51 +306,11 @@ class CoreLink:
                         if message.type != aiohttp.WSMsgType.TEXT:
                             break
                         packet = message.json()
-                        if packet["kind"] == "history":
-                            await self._history(packet)
-                        elif packet["kind"] == "role":
-                            # 只认“我以外”的设备：单机隧道抖动后重连不是活动位置变化。
-                            known_other = any(node != self.name for node in self.nodes)
-                            self.epoch, self.nodes = packet["epoch"], packet["nodes"]
-                            if not self._joining:
-                                self.sync_error = None
-                                retry_delay = 2.0
-                                active = packet["active"] == self.name
-                                if active != self.active:
-                                    inherited_history = False
-                                    if active and not known_other and self.memory.has_history:
-                                        async with get_session(record_activity=False) as db:
-                                            inherited_history = (
-                                                await db.scalar(
-                                                    select(SyncEventORM.id)
-                                                    .where(SyncEventORM.origin != self.store.origin)
-                                                    .limit(1)
-                                                )
-                                                is not None
-                                            )
-                                    await self._set_role(
-                                        active,
-                                        (
-                                            "Your companionship is now continuing on this device."
-                                            if known_other or inherited_history
-                                            else ""
-                                        ),
-                                    )
-                        elif packet["kind"] == "input" and self.active and packet["epoch"] == self.epoch:
-                            await self.receive(packet["message"], packet["adapter"])
-                        elif packet["kind"] == "error":
-                            if packet.get("operation") == "output":
-                                logger.error(f"[CoreLink] {packet['detail']}")
-                                continue
-                            if packet.get("operation") == "handoff":
-                                logger.warning(f"[CoreLink] Core handoff failed: {packet['detail']}")
-                                await self._set_role(self.active, "")
-                                continue
-                            if self.sync_error != packet["detail"]:
-                                logger.error(f"[CoreLink] {packet['detail']}")
-                            self.sync_error = packet["detail"]
-                            invalid = True
-                            break
+                        if packet["kind"] == "error" and packet.get("operation") not in {"output", "handoff"}:
+                            raise ValueError(packet["detail"])
+                        packets.put_nowait(packet)
+                    if consumer.done():
+                        await consumer
             except (aiohttp.ClientError, OSError, TimeoutError) as exc:
                 logger.warning(f"[CoreLink] Gateway unavailable: {exc}")
             except Exception as exc:
@@ -305,18 +322,28 @@ class CoreLink:
                     logger.debug(f"[CoreLink] Local history still needs repair: {error}")
                 self.sync_error = error
             finally:
+                self.connected = False
                 for worker in workers:
                     worker.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
+                results = await asyncio.gather(*workers, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception) and not isinstance(
+                        result, (aiohttp.ClientError, OSError, TimeoutError)
+                    ):
+                        invalid = True
+                        self.sync_error = f"{type(result).__name__}: {result}"
                 self.connected, self.ws = False, None
                 # 断线与同步失败只改变传输状态，不是活动位置变化：不产生人格事件，
                 # 否则隧道每次抖动都会让她播报一遍通道。
                 await self._set_role(
                     mas_config.local_fallback and not invalid and self.sync_error is None and not self._closing, ""
                 )
+            if self._closing:
+                return
             if self.sync_error:
                 logger.debug(f"[CoreLink] Retrying synchronization in {retry_delay:g} seconds.")
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(30.0, retry_delay * 2)
             else:
+                retry_delay = 2.0
                 await asyncio.sleep(2)
