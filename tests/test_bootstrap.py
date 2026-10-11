@@ -5,12 +5,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from muika.core.memory import Fact, MemoryCategory
 from muika.ipc.bootstrap import CoreBootstrap
 
 
-async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkeypatch):
+async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkeypatch, db_session):
+    monkeypatch.setattr("muika.ipc.bootstrap.mas_config.gateway_url", "")
+    monkeypatch.setattr(
+        "muika.database.db._session_factory", async_sessionmaker(db_session.bind, expire_on_commit=False)
+    )
     for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
     server = MagicMock()
