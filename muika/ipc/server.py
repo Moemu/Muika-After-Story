@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections import deque
@@ -64,6 +65,7 @@ class CoreWsServer:
 
         # 适配器连接注册表: client_name → AdapterConnection
         self._connections: Dict[str, AdapterConnection] = {}
+        self._connection_tasks: set[asyncio.Task[web.WebSocketResponse]] = set()
 
         # Bot 未连接时暂存的消息及其原始目标适配器
         self._pending: deque[tuple[CoreToBotMessage, Optional[str]]] = deque(maxlen=_MAX_PENDING_MESSAGES)
@@ -120,15 +122,15 @@ class CoreWsServer:
         for connection in list(self._connections.values()):
             if not connection.ws.closed:
                 await connection.ws.close(code=1001, message=b"Server shutting down")
-        self._connections.clear()
-
-        # 清空待发送队列
-        self._pending.clear()
 
         # 停止 aiohttp
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
+
+        await asyncio.gather(*self._connection_tasks, return_exceptions=True)
+        self._connections.clear()
+        self._pending.clear()
 
         logger.debug("[CoreWsServer] Server stopped")
 
@@ -278,23 +280,19 @@ class CoreWsServer:
             ws=ws,
         )
         self._connections[client_name] = connection
+        task = asyncio.current_task()
+        assert task is not None
+        self._connection_tasks.add(task)
         logger.success(f"Chat connected: {client_name}")
 
-        # 通知回调
-        if self._on_adapter_connected:
-            try:
-                await self._on_adapter_connected(connection.info)
-            except Exception:
-                logger.exception("[CoreWsServer] on_adapter_connected callback raised")
-
-        # 连接建立后立即发送暂存的消息
-        await self.flush_pending()
+        messages: asyncio.Queue[str | None] = asyncio.Queue()
+        consumer = asyncio.create_task(self._consume_messages(messages, connection))
 
         # 消息接收循环
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
-                    await self._dispatch(msg.data, connection.info)
+                    messages.put_nowait(msg.data)
                 elif msg.type == WSMsgType.ERROR:
                     logger.error(f"[CoreWsServer] WebSocket error on {client_name!r}: {ws.exception()}")
                     break
@@ -304,20 +302,41 @@ class CoreWsServer:
         except Exception as e:
             logger.error(f"[CoreWsServer] Unexpected error in WS handler for {client_name!r}: {e}")
         finally:
-            # 注销连接
-            self._connections.pop(client_name, None)
-            if self._last_triggering_adapter == client_name:
-                self._last_triggering_adapter = None
-            logger.info(f"Chat disconnected: {client_name}")
+            messages.put_nowait(None)
+            try:
+                await asyncio.shield(consumer)
+            except asyncio.CancelledError:
+                await consumer
+                raise
+            finally:
+                self._connections.pop(client_name, None)
+                if self._last_triggering_adapter == client_name:
+                    self._last_triggering_adapter = None
+                logger.info(f"Chat disconnected: {client_name}")
 
-            # 通知回调
-            if self._on_adapter_disconnected:
                 try:
-                    await self._on_adapter_disconnected(connection.info)
+                    if self._on_adapter_disconnected:
+                        await self._on_adapter_disconnected(connection.info)
                 except Exception:
                     logger.exception("[CoreWsServer] on_adapter_disconnected callback raised")
+                finally:
+                    self._connection_tasks.discard(task)
 
         return ws
+
+    async def _consume_messages(self, messages: asyncio.Queue[str | None], connection: AdapterConnection) -> None:
+        """按连接顺序完成回调、补发和已接收消息。"""
+        try:
+            if self._on_adapter_connected:
+                try:
+                    await self._on_adapter_connected(connection.info)
+                except Exception:
+                    logger.exception("[CoreWsServer] on_adapter_connected callback raised")
+            await self.flush_pending()
+            while (raw := await messages.get()) is not None:
+                await self._dispatch(raw, connection.info)
+        finally:
+            await connection.ws.close()
 
     async def _dispatch(self, raw: str, adapter: AdapterInfo) -> None:
         """解析 JSON 并分发给注册的处理器。"""

@@ -1,10 +1,11 @@
 """指令派发：命令直达 handler 并作用于真实核心状态，全程不经过认知管线与 LLM。"""
 
 import asyncio
+from functools import partial
 from pathlib import Path
 
 import pytest
-from aiohttp import web
+from aiohttp import ClientSession, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 from arclet.alconna import Alconna
 
@@ -101,5 +102,115 @@ async def test_delayed_command_keeps_origin_after_disconnect(core_app_factory, m
         finally:
             release.set()
             await task
+            await control.close()
+            await qq.close()
+
+
+async def test_direct_stop_waits_past_aiohttp_shutdown_timeout(core_app_factory, monkeypatch):
+    app = await core_app_factory(turns=[])
+    await app.start()
+    core = CoreBootstrap(port=0, ipc_secret="stop-test")
+    core._muika = app.muika
+    core._register_handlers()
+    entered, release, disconnected = [asyncio.Event() for _ in range(3)]
+    monkeypatch.setattr("muika.plugin.command._commands", [])
+    registry = on_alconna(Alconna("stop-test"))
+
+    @registry.handle()
+    async def delayed_reply():
+        entered.set()
+        await release.wait()
+        return "finished-before-stop"
+
+    async def offline(adapter):
+        disconnected.set()
+
+    server = core._ws_server
+    server.on_adapter_disconnected(offline)
+    monkeypatch.setattr(web, "AppRunner", partial(web.AppRunner, shutdown_timeout=0.01))
+    await server.start()
+    port = server._runner.addresses[0][1]
+    async with ClientSession() as client:
+        ws = await client.ws_connect(
+            f"http://127.0.0.1:{port}/ws",
+            headers={"X-Auth-Token": "stop-test", "X-Client-Name": "control"},
+        )
+        stopping = None
+        try:
+            await ws.send_json({"type": "command", "raw": ".stop-test"})
+            await asyncio.wait_for(entered.wait(), 2)
+            stopping = asyncio.create_task(server.stop())
+            await asyncio.sleep(0.1)
+            assert not stopping.done()
+            release.set()
+            await asyncio.wait_for(stopping, 2)
+            assert disconnected.is_set()
+            assert not server._pending and not server.has_connection
+            app.recorder.record("direct_stop_drained", timeout=0.01, disconnected=True)
+        finally:
+            release.set()
+            if stopping is not None:
+                await stopping
+            await ws.close()
+            await server.stop()
+
+
+@pytest.mark.parametrize("blocked_by", ["command", "connect"])
+async def test_direct_socket_reads_while_business_waits(core_app_factory, monkeypatch, blocked_by):
+    app = await core_app_factory(turns=[])
+    await app.start()
+    core = CoreBootstrap(port=0, ipc_secret="receive-test")
+    core._muika = app.muika
+    core._register_handlers()
+    entered, release, disconnected = [asyncio.Event() for _ in range(3)]
+    monkeypatch.setattr("muika.plugin.command._commands", [])
+    registry = on_alconna(Alconna("receive-test"))
+
+    @registry.handle()
+    async def delayed_reply():
+        if blocked_by == "command":
+            entered.set()
+            await release.wait()
+        return "origin-only"
+
+    async def connected(adapter):
+        if blocked_by == "connect" and adapter.client_name == "control":
+            entered.set()
+            await release.wait()
+
+    async def offline(adapter):
+        if adapter.client_name == "control":
+            disconnected.set()
+
+    server = core._ws_server
+    server.on_adapter_connected(connected)
+    server.on_adapter_disconnected(offline)
+    application = web.Application()
+    application.router.add_get("/ws", server._handle_ws)
+    async with TestClient(TestServer(application)) as client:
+        headers = {"X-Auth-Token": "receive-test", "X-Client-Name": "control"}
+        control = await client.ws_connect("/ws", headers=headers, autoping=False)
+        qq = await client.ws_connect("/ws", headers={**headers, "X-Client-Name": "qq"})
+        try:
+            await control.send_json({"type": "command", "raw": ".receive-test"})
+            await asyncio.wait_for(entered.wait(), 2)
+            await qq.send_json({"type": "command", "raw": ".unknown"})
+            assert (await asyncio.wait_for(qq.receive_json(), 2))["content"] == "未知的指令"
+            await asyncio.wait_for(qq.receive_json(), 2)
+            await control.ping(b"slow-business")
+            assert (await asyncio.wait_for(control.receive(), 1)).type == WSMsgType.PONG
+            await control.close()
+            assert not disconnected.is_set()
+            release.set()
+            await asyncio.wait_for(disconnected.wait(), 2)
+            control = await client.ws_connect("/ws", headers=headers)
+            result = await asyncio.wait_for(control.receive_json(), 2)
+            assert result["type"] == "command_result" and result["content"] == "origin-only"
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(qq.receive_json(), 0.1)
+            assert app.scripted.calls == []
+            app.recorder.record("direct_receive_drained", blocked_by=blocked_by, pong=True, result=result)
+        finally:
+            release.set()
             await control.close()
             await qq.close()
