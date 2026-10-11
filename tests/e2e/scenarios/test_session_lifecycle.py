@@ -6,12 +6,209 @@ from datetime import datetime, timedelta
 import pytest
 from harness import ScriptedTurn, assert_clean_visible
 
+from muika.core.constants import SESSION_IDLE_TIMEOUT
 from muika.core.events import AdapterOfflineEvent
+from muika.core.memory_models import Intention
+from muika.core.topic_manager import EventTopic, TopicSource
 from muika.database.db import get_session
 from muika.ipc.bootstrap import CoreBootstrap
+from muika.ipc.sync_models import SyncEntry
+from muika.ipc.sync_store import SyncStore
 from muika.models import AdapterInfo
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.mark.parametrize("drive", ["boredom", "curiosity", "loneliness", "dissonance"])
+async def test_active_dialogue_keeps_reading_topic_until_session_end(core_app_factory, monkeypatch, drive):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(when="今晚想先陪你说说话", text="我在听，慢慢说。", name="ongoing_dialogue"),
+            ScriptedTurn(when="阅读种子", text="刚才读到一段诗，想和你分享。", name="idle_reading_topic"),
+            ScriptedTurn(text="<do_nothing>", name="unexpected_initiative"),
+        ]
+    )
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "dialogue_summary", text="我们安静地聊了彼此的心情。", name="summary"
+    )
+    await app.start()
+    await app.user_says("今晚想先陪你说说话")
+    await app.next_reply()
+    await app.wait_processed("user_message")
+    topic = EventTopic(id="reading-waits", source=TopicSource.EVENT, category="literature", content="阅读种子")
+    app.muika.topic_manager.enqueue_event(topic)
+    monkeypatch.setattr("muika.core.loop.random", lambda: 0.0)
+    if drive == "dissonance":
+        app.muika.memory.persistent.dissonance = 0.7
+        app.muika.memory.persistent.intentions = [Intention(id="reading", description="Share a poem")]
+        app.muika.state.last_interaction -= timedelta(minutes=2)
+    else:
+        setattr(app.muika.state, drive, 0.9)
+    before = len(app.scripted.calls)
+    await app.advance_time()
+    await app.wait_processed("time_tick")
+    assert len(app.scripted.calls) == before
+    assert len(app.sent) == 1
+    assert list(app.muika.topic_manager._event_queue) == [topic]
+    await app.end_session()
+    await app.wait_processed("session_end")
+    app.muika.state.loneliness = 0.0
+    app.muika.memory.persistent.dissonance = 0.0
+    app.muika.state.boredom = 0.9
+    await app.advance_time()
+    assert await app.next_reply() == "刚才读到一段诗，想和你分享。"
+    await app.wait_processed("time_tick")
+    assert app.muika.state.active_topic.topic_id == topic.id
+    app.recorder.record("initiative_after_session_end", drive=drive, active_session_interruptions=0, topic=topic.id)
+
+
+@pytest.mark.parametrize("local_dialogue", [False, True])
+async def test_merged_active_dialogue_defers_reading(core_app_factory, memory_process, local_dialogue):
+    app = await core_app_factory(turns=[ScriptedTurn(text="不应插话。")])
+    await app.start()
+    memory = app.muika.memory
+    if local_dialogue:
+        await memory.add_context(
+            "user", "先前的对话。", timestamp=datetime.now() - timedelta(seconds=SESSION_IDLE_TIMEOUT + 1)
+        )
+    store = SyncStore("pc")
+    await store.initialize()
+    remote = await memory_process("server")
+    branch = await remote.command(action="material", kind="user", text="另一设备上正在聊的话。")
+    session_id = memory.session.session_id
+    for entry in branch["entries"]:
+        await store.apply(SyncEntry.model_validate(entry), preserve_state=True)
+    await memory.load(record_activity=False)
+    assert memory.last_dialogue_at >= datetime.now() - timedelta(seconds=5)
+    topic = EventTopic(id="merged-reading", source=TopicSource.EVENT, category="literature", content="阅读种子")
+    app.muika.topic_manager.enqueue_event(topic)
+    app.muika.state.boredom = 0.9
+    await app.advance_time()
+    await app.wait_processed("time_tick")
+    assert app.sent == []
+    assert app.scripted.calls == []
+    assert memory.session.session_id == session_id
+    assert not app.muika._session_end_triggered
+    assert list(app.muika.topic_manager._event_queue) == [topic]
+    app.recorder.record("merged_active_dialogue", local_dialogue=local_dialogue, interruptions=0)
+
+
+async def test_compacted_restart_expires_session_before_starting_reading(core_app_factory):
+    first = await core_app_factory()
+    first.scripted.add_route(
+        when=lambda req: req.purpose == "dialogue_summary", text="我们还在聊今晚的心情。", name="summary"
+    )
+    await first.start()
+    memory = first.muika.memory
+    old_time = datetime.now() - timedelta(seconds=SESSION_IDLE_TIMEOUT + 1)
+    await memory.add_context("user", "我晚些时候回来。", timestamp=old_time)
+    memory.snapshot.working_summary = "我们还在聊今晚的心情。"
+    memory.snapshot.summary_through = memory.recent_turns[-1].id
+    async with get_session() as db:
+        await memory._save_snapshot(db, memory.snapshot)
+    memory.recent_turns.clear()
+    await first.stop()
+    returned = await core_app_factory(turns=[ScriptedTurn(when="重启后的阅读种子", text="我读到了一段诗。")])
+    await returned.start()
+    assert not returned.muika.memory.recent_turns
+    previous_session = returned.muika.memory.session.session_id
+    topic = EventTopic(
+        id="reading-restored", source=TopicSource.EVENT, category="literature", content="重启后的阅读种子"
+    )
+    returned.muika.topic_manager.enqueue_event(topic)
+    returned.muika.state.boredom = 0.9
+    await returned.advance_time()
+    await returned.wait_processed("time_tick")
+    await returned.wait_processed("session_end", timeout=2)
+    assert returned.muika.memory.session.session_id != previous_session
+    assert returned.sent == []
+    await returned.advance_time()
+    assert await returned.next_reply(timeout=2) == "我读到了一段诗。"
+    returned.recorder.record("compacted_session_expired", context_preserved=True, topic=topic.id)
+
+
+@pytest.mark.parametrize("pipeline", ["topic", "emotional"])
+@pytest.mark.parametrize("arrival", ["player", "sync"])
+async def test_player_arrival_defers_inflight_initiative(
+    core_app_factory, memory_process, monkeypatch, pipeline, arrival
+):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(when="你还在吗", text="我在，先听你说。", name="player_first"),
+            ScriptedTurn(text="我刚读到一段诗。", name="deferred_initiative"),
+            ScriptedTurn(text="我刚读到一段诗。", name="resumed_initiative"),
+        ]
+    )
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "dialogue_summary", text="沐沐回来找我说话。", name="summary"
+    )
+    await app.start()
+    if arrival == "sync":
+        store = SyncStore("pc")
+        await store.initialize()
+        remote = await memory_process("server")
+        branch = await remote.command(action="material", kind="user", text="另一设备上正在聊的话。")
+    topic = EventTopic(id="reading-race", source=TopicSource.EVENT, category="literature", content="阅读种子")
+    app.muika.topic_manager.enqueue_event(topic)
+    setattr(app.muika.state, "boredom" if pipeline == "topic" else "loneliness", 0.9)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_ask = app.scripted.ask
+
+    async def waiting_model(request, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await original_ask(request, **kwargs)
+
+    monkeypatch.setattr(app.scripted, "ask", waiting_model)
+    try:
+        await app.advance_time()
+        await asyncio.wait_for(entered.wait(), 2)
+        if arrival == "player":
+            await app.user_says("你还在吗")
+        else:
+            for entry in branch["entries"]:
+                await store.apply(SyncEntry.model_validate(entry), preserve_state=True)
+            await app.muika.memory.load(record_activity=False)
+        release.set()
+        await app.wait_processed("time_tick")
+        if arrival == "player":
+            assert await app.next_reply(timeout=2) == "我在，先听你说。"
+            await app.wait_processed("user_message")
+            assert app.sent == ["我在，先听你说。"]
+        else:
+            assert app.sent == []
+        assert list(app.muika.topic_manager._event_queue) == [topic]
+        await app.end_session()
+        await app.wait_processed("session_end")
+        app.muika.state.loneliness = 0.0
+        app.muika.state.boredom = 0.9
+        await app.advance_time()
+        assert await app.next_reply(timeout=2) == "我刚读到一段诗。"
+        app.recorder.record("player_preempts_initiative", pipeline=pipeline, unsolicited_replies=0, seed_preserved=True)
+    finally:
+        release.set()
+
+
+async def test_finished_reply_wait_does_not_prevent_idle_session_end(core_app_factory):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(when="我稍后回来", text="那我等你。<timeout: 1s>"),
+            ScriptedTurn(text="<do_nothing>"),
+        ]
+    )
+    app.scripted.add_route(when=lambda req: req.purpose == "dialogue_summary", text="我在等沐沐回来。", name="summary")
+    await app.start()
+    await app.user_says("我稍后回来")
+    await app.next_reply()
+    await app.wait_processed("timeout", timeout=3)
+    old_time = datetime.now() - timedelta(seconds=SESSION_IDLE_TIMEOUT + 1)
+    app.muika.state.last_interaction = old_time
+    app.muika.memory.last_dialogue_at = old_time
+    await app.advance_time()
+    await app.wait_processed("time_tick")
+    await app.wait_processed("session_end", timeout=2)
+    app.recorder.record("finished_reply_wait_released", idle_session_ended=True)
 
 
 async def test_repeated_adapter_bootstrap_preserves_one_greeting(core_app_factory):

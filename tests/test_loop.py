@@ -255,6 +255,7 @@ def _engine() -> Muika:
     m = Muika.__new__(Muika)
     m.state = MuikaState()
     m.memory = MemoryManager()
+    m._timeout_task = None
     return m
 
 
@@ -470,7 +471,7 @@ async def test_idle_session_end_does_not_depend_on_summary_service(engine):
     engine.agent.model.ask = AsyncMock(side_effect=RuntimeError("Summary service unavailable"))
     engine.state.last_interaction = datetime.now() - timedelta(seconds=SESSION_IDLE_TIMEOUT + 1)
     engine._last_digest_time = datetime.now().timestamp()
-    await engine.memory.add_context("user", "I will return.")
+    await engine.memory.add_context("user", "I will return.", timestamp=engine.state.last_interaction)
     await engine._tick_idle(TimeTickEvent(), 0)
     event = engine.event_queue.get_nowait()
     assert event.type == "session_end"

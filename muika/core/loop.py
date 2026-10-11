@@ -48,7 +48,7 @@ from .restart import RestartController
 from .self_change import SelfChangeDispatcher
 from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
-from .topic_manager import TopicManager
+from .topic_manager import EventTopic, TopicManager
 
 TaskResult = TypeVar("TaskResult")
 
@@ -137,6 +137,15 @@ class Muika:
         """将事件放入处理队列。"""
         await self.event_queue.put(event)
 
+    @property
+    def has_active_session(self) -> bool:
+        """检查当前会话是否有对话、主动话题或待完成的回复等待。"""
+        return (
+            self.memory.last_dialogue_at is not None
+            or self.state.active_topic is not None
+            or (self._timeout_task is not None and not self._timeout_task.done())
+        )
+
     def get_think_mode(self, event: Event) -> Optional[Literal["emotional", "topic"]]:
         """
         根据当前 tick 决定走哪条认知管线。
@@ -146,12 +155,12 @@ class Muika:
         - None：空闲 tick，仅更新状态，不调用 LLM。
 
         非 time_tick 事件（user_message、scheduled_trigger 等）始终返回 "emotional"。
-        话题活跃期间，所有 time_tick 均返回 None，防止情绪管线打断正在进行的话题。
+        会话活跃期间，所有 time_tick 均返回 None，防止主动对话打断当前交流。
         """
         if event.type != "time_tick":
             return "emotional"
 
-        if self.state.active_topic is not None:
+        if self.has_active_session:
             return None
 
         persistent = self.memory.persistent
@@ -345,12 +354,13 @@ class Muika:
             self._last_digest_time = current_time
             self.start_background_task(self.digest_agent.fetch_and_digest())
 
-        if not self._session_end_triggered and self.memory.recent_turns:
-            last_activity = self.state.last_interaction
+        if not self._session_end_triggered and self.has_active_session:
+            last_activity = self.memory.last_dialogue_at or self.state.last_interaction
             if self.state.active_topic is not None:
                 last_activity = max(last_activity, self.state.active_topic.started_at)
             idle_seconds = (datetime.now() - last_activity).total_seconds()
-            if idle_seconds >= SESSION_IDLE_TIMEOUT and not self._timeout_task:
+            waiting = self._timeout_task is not None and not self._timeout_task.done()
+            if idle_seconds >= SESSION_IDLE_TIMEOUT and not waiting:
                 logger.debug(f"[Loop] Session idle for {idle_seconds / 60:.1f} min -- triggering session end.")
                 self._session_end_triggered = True
                 await self.create_event(SessionEndEvent())
@@ -482,11 +492,16 @@ class Muika:
 
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
+        last_dialogue_at = self.memory.last_dialogue_at
         topic = await self.topic_manager.get_next_topic(self.state)
         if not topic:
             logger.debug("[Topic] No available seed -- skipping topic pipeline this tick.")
             return
         expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
+        if not self.event_queue.empty() or self.memory.last_dialogue_at != last_dialogue_at:
+            if isinstance(topic, EventTopic):
+                self.topic_manager.enqueue_event(topic)
+            return
         if not expanded:
             return
         parsed = self._parse_reply_tags(expanded)
@@ -499,6 +514,10 @@ class Muika:
             return
         if parsed.target:
             logger.debug(f"[Topic] Routing to target={parsed.target!r}")
+        if not self.event_queue.empty() or self.memory.last_dialogue_at != last_dialogue_at:
+            if isinstance(topic, EventTopic):
+                self.topic_manager.enqueue_event(topic)
+            return
         if parsed.timeout is not None:
             self._arm_timeout(parsed.timeout)
         await self.executor.send_message(parsed.clean_reply, target=parsed.target)
@@ -549,9 +568,13 @@ class Muika:
                     task_context="\n".join(filter(None, (self.agent_tasks.describe(), self.restart.describe()))),
                 )
                 resources = context.resources
+            if event.type == "time_tick" and (self.has_active_session or not self.event_queue.empty()):
+                return
             parsed = self._parse_reply_tags(reply)
             for update in parsed.state_updates:
                 await self.memory.update_state(update)
+            if event.type == "time_tick" and (self.has_active_session or not self.event_queue.empty()):
+                return
             silent_turn = parsed.do_nothing
             if silent_turn:
                 logger.info("[Turn] silent (do_nothing)")

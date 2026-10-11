@@ -111,6 +111,7 @@ class MemoryManager:
 
     def __init__(self) -> None:
         self.recent_turns: deque[SessionTurn] = deque()
+        self.last_dialogue_at: datetime | None = None
         self.facts: dict[int, Fact] = {}
         self.snapshot = MemorySnapshot()
         self._lock = asyncio.Lock()
@@ -148,8 +149,15 @@ class MemoryManager:
                 if previous_session != snapshot.session.session_id:
                     snapshot.working_summary = snapshot.latest_dialogue_summary
                 snapshot.session.is_first_session = snapshot.first_interaction_at is None and not facts
+                last_dialogue_at = await db.scalar(
+                    select(func.max(ExperienceORM.occurred_at)).where(
+                        ExperienceORM.session_id.in_([snapshot.session.session_id, *snapshot.resume_sessions]),
+                        ExperienceORM.kind.in_(DIALOGUE_KINDS),
+                    )
+                )
                 await self._save_snapshot(db, snapshot)
             self.snapshot, self.facts = snapshot, facts
+            self.last_dialogue_at = local_time(last_dialogue_at) if last_dialogue_at else None
             if previous_session != snapshot.session.session_id:
                 self.recent_turns.clear()
 
@@ -300,6 +308,8 @@ class MemoryManager:
                 turn = self._turn(row) if kind in {"user", "muika", "agent"} else None
                 row_id = row.id
             self.snapshot = snapshot
+            if kind in DIALOGUE_KINDS:
+                self.last_dialogue_at = max(self.last_dialogue_at, now) if self.last_dialogue_at else now
             if turn is not None:
                 self.recent_turns.append(turn)
             return row_id
@@ -315,6 +325,7 @@ class MemoryManager:
                 await self._save_snapshot(db, snapshot)
             self.snapshot = snapshot
             self.recent_turns.clear()
+            self.last_dialogue_at = None
 
     async def summarize_dialogue(self, model: "BaseLLM", *, force: bool = False) -> bool:
         """定期或在结束前保存关系摘要，失败时保留已有摘要及原文。"""
