@@ -618,6 +618,21 @@ async def test_own_history_first_gateway_connection_has_one_bootstrap(gateway_pr
     recorder.record("own_history_bootstrap", greetings=1, location_dialogue_calls=0)
 
 
+async def test_gateway_flap_does_not_generate_persona_dialogue(gateway_process, node_process):
+    """入口断线只改传输状态：她不会因为隧道抖动播报一遍通道和设备。"""
+    session, base, recorder, _process, restart = gateway_process
+    pc, _ = await node_process("pc", base, fallback=True)
+    before = await wait_node(pc, active=True, connected=True)
+    assert before["model_calls"] == 0
+    await restart()
+    await wait_node(pc, active=True, connected=True)
+    await asyncio.sleep(0.5)
+    after = await pc.command(action="status")
+    assert after["model_calls"] == 0
+    assert not any("continuing on this device" in value or "companionship" in value for value in after["experiences"])
+    recorder.record("gateway_flap", persona_dialogue_calls=0, transmission_only=True)
+
+
 async def test_real_core_shutdown_takeover_retains_memory(gateway_process, node_process):
     session, base, recorder = gateway_process[:3]
     pc, _ = await node_process("pc", base, fallback=True)

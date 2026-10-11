@@ -86,14 +86,22 @@ __all__ = [
 
 DIALOGUE_SUMMARY_INTERVAL = timedelta(minutes=5)
 DIALOGUE_SUMMARY_MIN_TURNS = 6
-NON_REFLECTION_KINDS = ("legacy", "state")
+REFLECTION_KINDS = ("user", "muika", "note")
+"""可进入个人素材的经历类型：玩家消息、可见回复和她自己写下的笔记。"""
+
+DIALOGUE_KINDS = ("user", "muika")
+"""可进入对话摘要的经历类型；行动回执属于运行记录，不参与关系摘要。"""
 
 
-def _reflection_material_filter() -> ColumnElement[bool]:
-    """筛选个人素材，同时保留使用 IPC 来源的玩家消息。"""
+def _reflection_material_filter(kinds: tuple[str, ...] = REFLECTION_KINDS) -> ColumnElement[bool]:
+    """按 *kinds* 筛选个人素材，并排除 IPC 传输回执。
+
+    ``agent`` 类经历保存工具结果、任务报告、节点协调和重启回执，属于运行记录：
+    进入日记或对话摘要会把内部执行细节变成她的记忆。ipc 来源的 ``note`` 是适配器
+    事件回执，同样排除；但玩家消息本身也带 ipc 来源，必须保留。
+    """
     return and_(
-        ExperienceORM.kind.not_in(NON_REFLECTION_KINDS),
-        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+        ExperienceORM.kind.in_(kinds),
         or_(ExperienceORM.kind != "note", ExperienceORM.source.is_(None), ~ExperienceORM.source.like("ipc:%")),
     )
 
@@ -322,8 +330,7 @@ class MemoryManager:
                     .where(
                         ExperienceORM.session_id.in_([session_id, *self.snapshot.resume_sessions]),
                         ExperienceORM.id > self.snapshot.dialogue_summary_through,
-                        ExperienceORM.kind.in_(["user", "muika", "agent"]),
-                        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.like("task_call:%")),
+                        _reflection_material_filter(DIALOGUE_KINDS),
                     )
                     .order_by(ExperienceORM.id)
                 )

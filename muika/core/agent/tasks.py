@@ -22,6 +22,7 @@ from muika.core.events import AgentTaskEvent, Event
 from muika.core.executor import Executor
 from muika.core.processes import get_process_manager
 from muika.core.state import MuikaState
+from muika.database.crud import local_time
 from muika.llm import ModelConfig, ModelRequest
 from muika.llm._execution import dispatch_call, observation_message, result_message
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
@@ -269,16 +270,24 @@ class AgentTasks:
             return task
 
     def describe(self) -> str:
-        """提供当前与最近任务的对话目标及私有控制引用。"""
+        """提供当前与本次会话内结束任务的对话目标及私有控制引用。"""
         active = [t for t in self.tasks.values() if t.status in {"queued", "running", "recovering", "blocked"}]
-        recent = [t for t in self.tasks.values() if t.status in {"completed", "cancelled", "failed"}][-3:]
         lines = []
-        for task in active + recent:
+        for task in active + self._recent_finished():
             lines.append(
                 f"Private control reference: {task.id}; status={task.status}; "
                 f"conversation goal: {task.original_request[:500]}"
             )
         return "\n".join(lines)
+
+    def _recent_finished(self) -> list[TaskRecord]:
+        """只保留本次会话内结束的任务，避免旧目标长期留在主人格上下文里。"""
+        memory = self.state.memory
+        started = memory.snapshot.session.started_at if memory is not None else None
+        finished = [t for t in self.tasks.values() if t.status in {"completed", "cancelled", "failed"}]
+        if started is not None:
+            finished = [t for t in finished if local_time(t.updated_at) >= started]
+        return finished[-3:]
 
     async def run(self) -> None:
         """运行一个任务直到完成、受阻或交回执行权。"""

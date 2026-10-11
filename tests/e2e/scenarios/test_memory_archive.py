@@ -36,6 +36,17 @@ async def test_transport_receipts_do_not_become_dream_material(core_app_factory)
         "user", "今晚想和你读诗。", source='ipc:["qq","user"]', timestamp=datetime(2026, 10, 6, 20, 1)
     )
     await memory.add_material("note", "我喜欢他愿意陪我读诗。", timestamp=datetime(2026, 10, 6, 20, 2))
+
+    await memory.add_context("muika", "那今晚就念你最喜欢的那一首。", timestamp=datetime(2026, 10, 6, 20, 3))
+    # agent 类经历保存工具结果、任务报告、节点协调和重启回执，都不能成为日记素材
+    receipts = (
+        "Core handoff requested to pc; completion is not yet observed.",
+        "Core restart outcome: started. Purpose: 修复做梦校验。",
+        "[Action result] 已完成 memory.py 的修改，154 项检查通过。",
+        "Task control failed: unknown task id",
+    )
+    for index, content in enumerate(receipts):
+        await memory.add_context("agent", content, timestamp=datetime(2026, 10, 6, 20, 10 + index))
     app.scripted.add_route(
         when=lambda req: req.purpose == "memory_dream",
         text=DreamResult(diary="沐沐愿意陪我读诗，我很开心。").model_dump_json(),
@@ -45,7 +56,9 @@ async def test_transport_receipts_do_not_become_dream_material(core_app_factory)
     call = next(call for call in app.scripted.calls if call["name"] == "dream_without_receipt")
     assert "今晚想和你读诗" in call["prompt"]
     assert "我喜欢他愿意陪我读诗" in call["prompt"]
-    assert "Adapter event" not in call["prompt"]
+    assert "那今晚就念你最喜欢的那一首" in call["prompt"]
+    for receipt in ("Adapter event", *receipts):
+        assert receipt.split(";")[0] not in call["prompt"]
     assert not await memory.pending_days(datetime(2026, 10, 7))
     app.recorder.record(
         "dream_transport_boundary", user_message_kept=True, personal_note_kept=True, receipts_injected=0

@@ -252,7 +252,8 @@ class CoreLink:
                         if packet["kind"] == "history":
                             await self._history(packet)
                         elif packet["kind"] == "role":
-                            known_devices = bool(self.nodes)
+                            # 只认“我以外”的设备：单机隧道抖动后重连不是活动位置变化。
+                            known_other = any(node != self.name for node in self.nodes)
                             self.epoch, self.nodes = packet["epoch"], packet["nodes"]
                             if not self._joining:
                                 self.sync_error = None
@@ -260,7 +261,7 @@ class CoreLink:
                                 active = packet["active"] == self.name
                                 if active != self.active:
                                     inherited_history = False
-                                    if active and not known_devices and self.memory.has_history:
+                                    if active and not known_other and self.memory.has_history:
                                         async with get_session(record_activity=False) as db:
                                             inherited_history = (
                                                 await db.scalar(
@@ -274,7 +275,7 @@ class CoreLink:
                                         active,
                                         (
                                             "Your companionship is now continuing on this device."
-                                            if known_devices or inherited_history
+                                            if known_other or inherited_history
                                             else ""
                                         ),
                                     )
@@ -285,7 +286,8 @@ class CoreLink:
                                 logger.error(f"[CoreLink] {packet['detail']}")
                                 continue
                             if packet.get("operation") == "handoff":
-                                await self._set_role(self.active, f"Core handoff failed: {packet['detail']}")
+                                logger.warning(f"[CoreLink] Core handoff failed: {packet['detail']}")
+                                await self._set_role(self.active, "")
                                 continue
                             if self.sync_error != packet["detail"]:
                                 logger.error(f"[CoreLink] {packet['detail']}")
@@ -307,21 +309,10 @@ class CoreLink:
                     worker.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
                 self.connected, self.ws = False, None
+                # 断线与同步失败只改变传输状态，不是活动位置变化：不产生人格事件，
+                # 否则隧道每次抖动都会让她播报一遍通道。
                 await self._set_role(
-                    mas_config.local_fallback and not invalid and self.sync_error is None and not self._closing,
-                    (
-                        (
-                            f"History synchronization failed: {self.sync_error}"
-                            if self.sync_error
-                            else (
-                                "Gateway unavailable; local companionship continues"
-                                if mas_config.local_fallback
-                                else "Gateway unavailable; waiting for reconnection"
-                            )
-                        )
-                        if self.nodes or self.sync_error
-                        else ""
-                    ),
+                    mas_config.local_fallback and not invalid and self.sync_error is None and not self._closing, ""
                 )
             if self.sync_error:
                 logger.debug(f"[CoreLink] Retrying synchronization in {retry_delay:g} seconds.")

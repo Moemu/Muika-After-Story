@@ -65,8 +65,8 @@ class CoreWsServer:
         # 适配器连接注册表: client_name → AdapterConnection
         self._connections: Dict[str, AdapterConnection] = {}
 
-        # Bot 未连接时暂存的消息
-        self._pending: deque[CoreToBotMessage] = deque(maxlen=_MAX_PENDING_MESSAGES)
+        # Bot 未连接时暂存的消息及其原始目标适配器
+        self._pending: deque[tuple[CoreToBotMessage, Optional[str]]] = deque(maxlen=_MAX_PENDING_MESSAGES)
 
         # 消息处理器注册表: type → handler
         self._handlers: Dict[str, EVENT_HANDLER] = {}
@@ -148,70 +148,66 @@ class CoreWsServer:
         """
         if not self.has_connection:
             logger.warning(f"[CoreWsServer] No adapter connected — queueing message: {message}")
-            return self._queue_or_drop(message)
+            return self._queue_or_drop(message, target)
 
         ws = self._resolve_target(target)
         if ws is None:
-            logger.warning("[CoreWsServer] Failed to resolve target adapter — falling back to queue")
-            return self._queue_or_drop(message)
+            logger.warning(f"[CoreWsServer] Target adapter {target!r} unavailable — queueing message")
+            return self._queue_or_drop(message, target)
 
         try:
             await ws.send_str(message.model_dump_json())
             return SendReceipt.WRITTEN
         except Exception as e:
             logger.warning(f"[CoreWsServer] Failed to send message: {e}")
-            return self._queue_or_drop(message)
+            return self._queue_or_drop(message, target)
 
     def _resolve_target(self, target: Optional[str]) -> Optional[web.WebSocketResponse]:
         """
         解析目标适配器的 WebSocket 连接。
 
-        target 为 None 时按以下优先级：
+        指定 *target* 时只使用该适配器；结果不得改投到其他已连接客户端，
+        否则命令回执会串进玩家对话。target 为 None 时按以下优先级：
         - 最近触发消息的适配器（``_last_triggering_adapter``）
         - 最近活跃的适配器
         - 任一已连接的适配器
         """
-        if target and target in self._connections:
-            return self._connections[target].ws
+        if target:
+            connection = self._connections.get(target)
+            return connection.ws if connection is not None else None
 
-        # target 不存在或为 None：fallback 到最近触发适配器
         if self._last_triggering_adapter and self._last_triggering_adapter in self._connections:
             return self._connections[self._last_triggering_adapter].ws
 
-        # 再 fallback 到最近活跃的适配器
         if self._connections:
             most_active = max(self._connections.values(), key=lambda connection: connection.info.last_active_at)
             return most_active.ws
 
         return None
 
-    def _queue_or_drop(self, message: CoreToBotMessage) -> SendReceipt:
+    def _queue_or_drop(self, message: CoreToBotMessage, target: Optional[str] = None) -> SendReceipt:
         if len(self._pending) >= _MAX_PENDING_MESSAGES:
             logger.warning(f"[CoreWsServer] Pending queue full ({_MAX_PENDING_MESSAGES}) — dropping message")
             return SendReceipt.FAILED
-        self._pending.append(message)
+        self._pending.append((message, target))
         logger.debug(f"[CoreWsServer] Queued message (pending={len(self._pending)})")
         return SendReceipt.QUEUED
 
     async def flush_pending(self) -> int:
-        """将暂存的消息全部发送给最近活跃的 Bot。"""
-        if not self.has_connection:
-            return 0
-
-        ws = self._resolve_target(None)
-        if ws is None:
-            return 0
-
+        """按各自的目标补发暂存消息；目标仍不可用时保留原序等待。"""
         sent = 0
-        while self._pending:
-            msg = self._pending.popleft()
+        for _ in range(len(self._pending)):
+            message, target = self._pending.popleft()
+            ws = self._resolve_target(target)
+            if ws is None:
+                self._pending.append((message, target))
+                continue
             try:
-                await ws.send_str(msg.model_dump_json())
+                await ws.send_str(message.model_dump_json())
                 sent += 1
             except Exception as e:
                 logger.warning(f"[CoreWsServer] Failed to flush pending message: {e}")
-                self._pending.appendleft(msg)
-                break
+                self._pending.append((message, target))
         if sent:
             logger.debug(f"[CoreWsServer] Flushed {sent} pending message(s)")
         return sent

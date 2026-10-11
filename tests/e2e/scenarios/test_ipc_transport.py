@@ -10,6 +10,9 @@ import pytest
 from aiohttp import WSMsgType
 from harness import IpcWire, ScriptedTurn, assert_clean_visible
 
+from muika.core.executor import SendReceipt
+from muika.ipc.protocol import CommandResult
+
 pytestmark = pytest.mark.e2e
 
 GREETING_REPLY = "收到，我在听。"
@@ -72,6 +75,22 @@ async def test_command_round_trip_returns_command_result(core_app_factory, built
         assert app.scripted.calls == []
     finally:
         await wire.close()
+
+
+async def test_command_result_never_reroutes_to_another_adapter(core_app_factory):
+    """命令回执绑定原适配器；原适配器离线时暂存等待，不得改投到玩家所在的 QQ。"""
+    app, qq = await _open_ipc(core_app_factory, [], client_name="qq")
+    server = qq._server
+    try:
+        receipt = await server.send_to_bot(CommandResult(content="正在活动：server"), target="acceptance-control")
+        assert receipt is SendReceipt.QUEUED
+        await asyncio.sleep(0.2)
+        assert qq.by_type("command_result") == []
+        assert await server.flush_pending() == 0
+        assert qq.by_type("command_result") == []
+        app.recorder.record("command_target_bound", rerouted=0, queued=1)
+    finally:
+        await qq.close()
 
 
 async def test_ipc_negative_paths(core_app_factory):
