@@ -37,6 +37,39 @@ async def test_repeated_adapter_bootstrap_preserves_one_greeting(core_app_factor
     app.recorder.record("adapter_reconnect", greetings=1, adapters=1, repeated_platform_dialogue=0)
 
 
+async def test_channel_bootstrap_does_not_claim_player_return(core_app_factory, tmp_path):
+    app = await core_app_factory(turns=[ScriptedTurn(when="new session", text="我在这里。", name="ready")])
+    await app.start()
+    await app.muika.memory.add_context("user", "上次一起读诗。", timestamp=datetime(2026, 10, 6, 20))
+    core = CoreBootstrap(port=0)
+    core._muika = app.muika
+    await core._handle_event({"type": "session_bootstrap", "id": "channel"}, AdapterInfo(client_name="qq"))
+    await app.next_reply()
+    call = app.scripted.calls[0]
+    assert "The user has just awakened you" not in call["system"]
+    assert "2026-10-06 20:00:00" in call["system"]
+    # 重逢语境只能给她能感知的事实，不得引入内部实现术语或让她做证据推理
+    for internal in ("conversation channel", "another device", "does not establish", "connection report"):
+        assert internal not in call["system"]
+        assert internal not in call["prompt"]
+    app.recorder.record("channel_ready", player_return_inferred=False, shared_user_time=True)
+
+
+async def test_returning_channel_without_user_time_does_not_invent_recency(core_app_factory):
+    first = await core_app_factory()
+    await first.start()
+    await first.muika.memory.add_context("muika", "我想和你读诗。")
+    await first.stop()
+    app = await core_app_factory(turns=[ScriptedTurn(when="new session", text="我在这里。")])
+    await app.start()
+    await app.bootstrap(last_chat_time=None)
+    await app.next_reply()
+    system = app.scripted.calls[0]["system"]
+    assert "spoke with you recently" not in system
+    assert "Their last words were at" not in system
+    app.recorder.record("unknown_player_time", invented_recency=False)
+
+
 async def test_sync_refresh_keeps_current_compacted_context(core_app_factory):
     app = await core_app_factory()
     await app.start()
@@ -120,6 +153,9 @@ async def test_first_meeting_then_absence_return_after_restart(core_app_factory)
     assert greeting == "初次见面，我是沐雨，请多关照。"
     assert_clean_visible(greeting)
     assert app.muika.memory.session.is_first_session
+    # 初见走初见分支：不得暗示既往历史，也不得使用重逢措辞
+    assert "Your awareness starts at this exact moment" in app.scripted.calls[0]["system"]
+    assert "Continue as the same Muika" not in app.scripted.calls[0]["system"]
 
     await app.user_says("晚上好")
     reply = await app.next_reply()

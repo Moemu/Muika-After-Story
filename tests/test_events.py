@@ -1,6 +1,6 @@
 """``SessionBootstrapEvent.absence_bucket`` 缺席时间段计算测试。
 
-显式传入 ``last_chat_time``，避免触发 ``_get_last_connection_time()`` 的文件 IO。
+显式传入真实玩家消息时间或未知时间，验证时间段边界。
 """
 
 from datetime import datetime, timedelta

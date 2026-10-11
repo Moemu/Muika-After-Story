@@ -311,6 +311,84 @@ async def test_boot_greeting_failure_retries_changes_without_repeating_greeting(
     app.recorder.record("boot_receipt", outcome=outcome, pending=0, technical_experiences=0)
 
 
+async def test_repeated_channel_does_not_steal_queued_boot_change(
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch
+):
+    from muika.ipc.bootstrap import CoreBootstrap
+    from muika.ipc.core_link import CoreLink
+    from muika.models import AdapterInfo
+
+    app = await core_app_factory(turns=[ScriptedTurn(text="我在这里。", when="A new session")])
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    await app.run_boot_self_change_check()
+    core = CoreBootstrap(port=0)
+    core._muika = app.muika
+    core.node = CoreLink(app.muika.state, core._set_role, core._from_gateway, core._advance_standby)
+    core.node.active = True
+    entered, release = asyncio.Event(), asyncio.Event()
+    pipeline = app.muika._run_brain_pipeline
+
+    async def hold_greeting(event):
+        if event.type == "session_bootstrap":
+            entered.set()
+            await release.wait()
+        await pipeline(event)
+
+    monkeypatch.setattr(app.muika, "_run_brain_pipeline", hold_greeting)
+    await core._handle_event({"type": "session_bootstrap", "id": "first"}, AdapterInfo(client_name="qq"))
+    await asyncio.wait_for(entered.wait(), 3)
+    try:
+        await core._handle_event({"type": "session_bootstrap", "id": "second"}, AdapterInfo(client_name="qq"))
+        await asyncio.sleep(0.3)
+    finally:
+        release.set()
+    await app.next_reply()
+    await app.wait_ledger_cleared()
+    await asyncio.sleep(0.1)
+    assert len(app.scripted.calls) == 1
+    assert "detected at startup" in app.scripted.calls[0]["prompt"]
+    app.recorder.record("queued_boot_change", greetings=1, separate_change_turns=0)
+
+
+@pytest.mark.parametrize("boot_check_first", [True, False])
+async def test_shared_bootstrap_restart_delivers_boot_changes(
+    core_app_factory, fast_self_change, tmp_plugin, boot_check_first
+):
+    from muika.ipc.bootstrap import CoreBootstrap
+    from muika.ipc.core_link import CoreLink
+    from muika.models import AdapterInfo
+
+    first = await core_app_factory()
+    await first.start()
+    await first.muika.memory.add_material(
+        "note", "Adapter event: session_bootstrap", source='ipc:["qq","previous-boot"]'
+    )
+    await first.stop()
+    app = await core_app_factory(turns=[ScriptedTurn(text="我发现自己有些变化。", when=SELF_CHANGED_WHEN)])
+    await app.start()
+    seed_boot_changes()
+    app.attach_self_change()
+    core = CoreBootstrap(port=0)
+    core._muika = app.muika
+    core.node = CoreLink(app.muika.state, core._set_role, core._from_gateway, core._advance_standby)
+    core.node.active = True
+    if boot_check_first:
+        await app.run_boot_self_change_check()
+    await core._handle_event({"type": "session_bootstrap", "id": "new-boot"}, AdapterInfo(client_name="qq"))
+    await app.wait_processed("adapter_online")
+    if not boot_check_first:
+        await app.run_boot_self_change_check()
+    await app.next_reply()
+    await app.wait_ledger_cleared()
+    assert app.muika.self_change.boot_change is None
+    assert len(app.scripted.calls) == 1
+    assert "detected at startup" in app.scripted.calls[0]["prompt"]
+    assert "A new session" not in app.scripted.calls[0]["prompt"]
+    app.recorder.record("shared_boot_restart", boot_check_first=boot_check_first, greetings=0, changes=1)
+
+
 async def test_gateway_takeover_delivers_boot_changes_without_greeting(core_app_factory, fast_self_change, tmp_plugin):
     app = await core_app_factory(
         turns=[
@@ -337,8 +415,9 @@ async def test_gateway_takeover_delivers_boot_changes_without_greeting(core_app_
 
 
 @pytest.mark.parametrize("outcome", ["exception", "cancelled"])
+@pytest.mark.parametrize("carrier", ["greeting", "shared_channel"])
 async def test_boot_handoff_failure_releases_reservation(
-    core_app_factory, fast_self_change, tmp_plugin, monkeypatch, outcome
+    core_app_factory, fast_self_change, tmp_plugin, monkeypatch, outcome, carrier
 ):
     app = await core_app_factory(turns=[ScriptedTurn(text="醒来时发现自己有些变化。", when=SELF_CHANGED_WHEN)])
     await app.start()
@@ -358,7 +437,11 @@ async def test_boot_handoff_failure_releases_reservation(
         return await save(state)
 
     monkeypatch.setattr(dispatcher.ledger, "_save_unlocked", first_save_fails)
-    await app.bootstrap()
+    if carrier == "shared_channel":
+        dispatcher.boot_greeting_pending = False
+        dispatcher.wake()
+    else:
+        await app.bootstrap()
     await asyncio.wait_for(failed.wait(), 3)
     if outcome == "cancelled":
         await app.muika.stop()

@@ -1,7 +1,6 @@
 """驱动 Muika 的事件处理、对话和后台活动。"""
 
 import asyncio
-import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -13,7 +12,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from muika.config import mas_config
 from muika.models import AdapterInfo
 from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
@@ -319,7 +317,6 @@ class Muika:
         await self._run_brain_pipeline(event)
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
-        self._save_last_connection_time()
         if self.after_activity is not None:
             await self.after_activity()
 
@@ -730,21 +727,3 @@ class Muika:
         self.start_background_task(self.reflection.maybe_reflect())
 
         logger.debug("[Loop] Session reset complete -- waiting for next user interaction silently.")
-
-    @staticmethod
-    def _save_last_connection_time() -> None:
-        """保存最近连接时间，并清理较早的记录。"""
-        data_dir = mas_config.data_dir
-        records_path = data_dir / "connection_records"
-        records_path.mkdir(exist_ok=True, parents=True)
-
-        record_file = records_path / (datetime.strftime(datetime.now(), "%Y-%m-%d %H-%M-%S") + ".txt")
-        record_file.write_text("")
-
-        while len(os.listdir(records_path)) > 3:
-            oldest_file = min(
-                (p for p in records_path.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-            )
-            oldest_file.unlink()
-            logger.debug(f"Deleted old connection record: {oldest_file.name}")

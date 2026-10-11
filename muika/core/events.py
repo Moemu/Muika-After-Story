@@ -1,34 +1,13 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Optional, TypeAlias
 
-from muika.config import mas_config
 from muika.models import Message
 
 if TYPE_CHECKING:
     from muika.models import AdapterInfo
-
-
-def _get_last_connection_time() -> Optional[datetime]:
-    """
-    从日志文件中获取上一次对话的时间
-    """
-    RECORDS_PATH = mas_config.data_dir / "connection_records"
-    RECORDS_PATH.mkdir(exist_ok=True, parents=True)
-
-    pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.txt$")
-
-    log_files = [p for p in RECORDS_PATH.iterdir() if p.is_file() and pattern.match(p.name)]
-
-    if not log_files:
-        return None
-
-    last_file = max(log_files, key=lambda p: p.stem).stem
-
-    return datetime.strptime(last_file, "%Y-%m-%d %H-%M-%S")
 
 
 @dataclass
@@ -80,7 +59,7 @@ class ScheduledTriggerEvent:
 @dataclass(frozen=True)
 class SessionBootstrapEvent:
     timestamp: datetime = field(default_factory=datetime.now)
-    last_chat_time: Optional[datetime] = field(default_factory=_get_last_connection_time)
+    last_chat_time: Optional[datetime] = None
     type: Literal["session_bootstrap"] = "session_bootstrap"
     self_change: Optional[SelfChangedPayload] = None
 

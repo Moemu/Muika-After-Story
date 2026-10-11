@@ -562,6 +562,28 @@ async def test_network_partition_merges_both_live_histories(gateway_process, nod
         await runner.cleanup()
 
 
+async def test_platform_bootstrap_after_handoff_keeps_shared_session(gateway_process, node_process):
+    session, base, recorder = gateway_process[:3]
+    pc, _ = await node_process("pc", base, fallback=True)
+    await wait_node(pc, active=True, connected=True)
+    server, _ = await node_process("server", base)
+    await wait_node(server, active=False, connected=True)
+    bot = await session.ws_connect(base + "/ws", headers={"X-Client-Name": "same-player"})
+    await bot.send_json({"type": "session_bootstrap", "id": "first-channel"})
+    await wait_node(pc, model_calls=1)
+    await bot.send_json({"type": "user_message", "id": "talk", "message": "我们继续散步吧。"})
+    await bot_output(bot, recorder)
+    await wait_node(server, mood="期待散步")
+    await pc.command(action="handoff", target="server")
+    before = await wait_node(server, active=True, model_calls=1)
+    await bot.send_json({"type": "session_bootstrap", "id": "platform-reconnected"})
+    await asyncio.sleep(0.3)
+    after = await server.command(action="status")
+    assert after["model_calls"] == before["model_calls"]
+    assert after["conversations"] == 0
+    recorder.record("shared_bootstrap", greetings=1, extra_handoff_greetings=0)
+
+
 async def test_standby_presence_does_not_generate_persona_dialogue(gateway_process, node_process):
     session, base, recorder = gateway_process[:3]
     pc, _ = await node_process("pc", base, fallback=True)

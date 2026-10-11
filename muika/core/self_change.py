@@ -463,6 +463,7 @@ class SelfChangeDispatcher:
         self._background: set[asyncio.Task[None]] = set()
         self._closed = False
         self.boot_change: Optional[SelfChangedPayload] = None
+        self.boot_greeting_pending = True
         self._check_lock = asyncio.Lock()
         self.loop = asyncio.get_running_loop()
 
@@ -530,6 +531,18 @@ class SelfChangeDispatcher:
     async def check(self) -> None:
         """门控检查：条件满足时冻结账本并投递一次合并的感知事件。"""
         if not mas_config.self_change_awareness_enabled or not self._muika.is_alive:
+            return
+        if self.boot_change is not None and not self.boot_greeting_pending:
+            if not (self._can_send() and not is_core_maintenance_active()):
+                self.wake(SELF_CHANGE_RETRY_BASE_SECONDS)
+                return
+            payload = await self.take_boot_change()
+            if payload is not None:
+                try:
+                    await self._muika.create_event(SelfChangedEvent(payload=payload))
+                except (Exception, asyncio.CancelledError):
+                    self.on_processed(payload.batch_id, silent=False, reply="", receipt=SendReceipt.FAILED)
+                    raise
             return
         async with self._check_lock:
             await self._check_locked()

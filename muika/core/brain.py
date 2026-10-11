@@ -292,7 +292,7 @@ class MuikaBrain:
             logger.debug(f"[Brain] session_bootstrap | mode={mode} session={memory.session.session_id[:8]}...")
             template_data.is_first_session = memory.session.is_first_session
             template_data.absence_bucket = event.absence_bucket
-            template_data.last_connection_time = (
+            template_data.last_user_message_time = (
                 event.last_chat_time.strftime("%Y-%m-%d %H:%M:%S") if event.last_chat_time else None
             )
 
@@ -350,7 +350,7 @@ class MuikaBrain:
                 f"you have been waiting for about {elapsed} now. Consider reminding the user, or seeing what they are doing?"
             )
         elif event.type == "session_bootstrap":
-            prompt = "[System] A new session has just started. Greet the user."
+            prompt = "[System] A new session has begun. Greet the user as yourself."
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)
                 prompt += "\nLet the greeting follow your relationship and mood."

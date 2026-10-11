@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from pydantic import TypeAdapter
+from sqlalchemy import func, select
 
 from muika.config import mas_config
 from muika.core.events import (
@@ -44,7 +45,9 @@ from muika.core.self_mod.proposals import (
     is_core_maintenance_active,
     is_maintenance_command_allowed,
 )
-from muika.database.db import close_db, init_db
+from muika.database.crud import local_time
+from muika.database.db import close_db, get_session, init_db
+from muika.database.orm_models import ExperienceORM
 from muika.models import AdapterInfo, Message, Resource
 from muika.plugin import CommandDispatcher, load_plugins
 from muika.plugin.manager import get_plugin_manager
@@ -348,6 +351,25 @@ class CoreBootstrap:
                 )
             return ErrorMessage(message="inactive_core", detail="备用设备正在同步，请连接常驻入口。")
         source = "ipc:" + json.dumps([client_name, event.id], separators=(",", ":")) if self.node else None
+        if source and isinstance(event, IpcSessionBootstrapEvent):
+            async with get_session(record_activity=False) as db:
+                received = await db.scalar(
+                    select(ExperienceORM.id)
+                    .where(
+                        ExperienceORM.session_id.in_(
+                            [self._muika.memory.session.session_id, *self._muika.memory.snapshot.resume_sessions]
+                        ),
+                        ExperienceORM.kind == "note",
+                        ExperienceORM.source.like("ipc:%"),
+                        ExperienceORM.content == "Adapter event: session_bootstrap",
+                    )
+                    .limit(1)
+                )
+            if not self.is_bootstraped and received is not None:
+                if self._muika.self_change is not None:
+                    self._muika.self_change.boot_greeting_pending = False
+                    self._muika.self_change.wake()
+                self.is_bootstraped = True
         if source and await self._muika.memory.contains_source(source):
             return ActionResponse(action=event.type, status="observed")
         if source and not isinstance(event, IpcUserMessageEvent):
@@ -402,7 +424,13 @@ class CoreBootstrap:
 
             if not self.is_bootstraped:
                 self.is_bootstraped = True
-                await self._muika.create_event(SessionBootstrapEvent())
+                async with get_session(record_activity=False) as db:
+                    last_user = await db.scalar(
+                        select(func.max(ExperienceORM.occurred_at)).where(ExperienceORM.kind == "user")
+                    )
+                await self._muika.create_event(
+                    SessionBootstrapEvent(last_chat_time=local_time(last_user) if last_user else None)
+                )
 
             # 标记适配器为已引导
             return ActionResponse(action=event.type, status="queued")

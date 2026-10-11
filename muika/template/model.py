@@ -35,7 +35,8 @@ class PromptTemplatesData(BaseModel):
     current_time: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     time_tone_hint: Optional[str] = None
     absence_bucket: Optional[str] = None
-    last_connection_time: Optional[str] = None
+    last_user_message_time: Optional[str] = None
+    """最近一条玩家消息的时间；不是连接时间，两者不得混同。"""
 
     adapters_info: Optional[str] = None
     version: str = get_version()

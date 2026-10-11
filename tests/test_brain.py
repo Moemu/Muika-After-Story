@@ -203,7 +203,7 @@ async def test_generate_reply_session_bootstrap_first(fake_llm_factory):
     data = captured["data"]
     assert data.is_first_session is True
     assert data.absence_bucket == "short"
-    assert data.last_connection_time is None
+    assert data.last_user_message_time is None
 
 
 async def test_generate_reply_session_bootstrap_resume(fake_llm_factory):
@@ -224,7 +224,7 @@ async def test_generate_reply_session_bootstrap_resume(fake_llm_factory):
 
     data = captured["data"]
     assert data.is_first_session is False
-    assert data.last_connection_time is not None
+    assert data.last_user_message_time is not None
 
 
 async def test_generate_reply_time_tick_lonely_prompt(fake_llm_factory):
