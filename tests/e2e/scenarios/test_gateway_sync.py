@@ -1461,3 +1461,85 @@ async def test_disconnected_callback_failure_classifies_fallback(live_gateway, c
     finally:
         release.set()
         await link.close()
+
+
+@pytest.mark.parametrize("shutdown", ["remote", "disconnect", "cancel", "disconnect_cancel"])
+async def test_bot_slow_send_keeps_reading_and_finishes_received_messages(recorder, monkeypatch, shutdown):
+    import runpy
+
+    from aiohttp import WSMsgType, web
+    from aiohttp.test_utils import TestServer
+
+    IpcClient = runpy.run_path(str(ROOT / "muika_bot/ipc_client.py"))["IpcClient"]
+
+    sockets = asyncio.Queue()
+    entered, release, pong, drained = [asyncio.Event() for _ in range(4)]
+    delivered = []
+    primary_cleaning = asyncio.Event()
+
+    async def endpoint(request):
+        ws = web.WebSocketResponse(autoping=False)
+        await ws.prepare(request)
+        await sockets.put(ws)
+        async for frame in ws:
+            if frame.type == WSMsgType.PONG:
+                pong.set()
+        return ws
+
+    async def platform_send(message):
+        if message["content"] == "first":
+            entered.set()
+            await release.wait()
+        delivered.append(message["content"])
+        delivered.extend(message.get("resources", []))
+        if message["content"] == "second":
+            drained.set()
+
+    application = web.Application()
+    application.router.add_get("/ws", endpoint)
+    async with TestServer(application) as server:
+        client = IpcClient(str(server.make_url("/ws")), "test", fallback_urls=[])
+        if shutdown == "disconnect_cancel":
+            client._endpoints.append(str(server.make_url("/ws")))
+            client._endpoint_index = 1
+
+            async def prefer_primary():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    primary_cleaning.set()
+                    await release.wait()
+
+            monkeypatch.setattr(client, "_prefer_primary", prefer_primary)
+        client.on_message("send_message", platform_send)
+        running = asyncio.create_task(client.connect())
+        try:
+            ws = await asyncio.wait_for(sockets.get(), 3)
+            await ws.send_json({"type": "send_message", "content": "first", "resources": ["attachment"]})
+            await asyncio.wait_for(entered.wait(), 3)
+            await ws.send_json({"type": "send_message", "content": "second"})
+            await ws.ping(b"slow-send")
+            await asyncio.wait_for(pong.wait(), 1)
+            assert delivered == []
+            if shutdown == "remote":
+                await ws.close()
+                client._running = False
+            elif shutdown in {"disconnect", "disconnect_cancel"}:
+                await client.disconnect()
+                if shutdown == "disconnect_cancel":
+                    await asyncio.wait_for(primary_cleaning.wait(), 3)
+                    running.cancel()
+            else:
+                running.cancel()
+            await asyncio.sleep(0.05)
+            assert not running.done()
+            release.set()
+            await asyncio.wait_for(drained.wait(), 3)
+            await asyncio.gather(running, return_exceptions=True)
+            assert delivered == ["first", "attachment", "second"]
+            assert not client.is_connected and client._session is None
+            recorder.record("bot_delivery_drained", shutdown=shutdown, delivered=delivered, pong=True)
+        finally:
+            release.set()
+            await client.disconnect()
+            await asyncio.gather(running, return_exceptions=True)

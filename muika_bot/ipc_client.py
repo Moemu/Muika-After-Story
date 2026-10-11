@@ -130,24 +130,41 @@ class IpcClient:
         self._connected_event.set()
         logger.success("Connected to Muika.")
 
-        # 发送所有暂存的事件
-        await self._flush_pending()
+        messages: asyncio.Queue[str | None] = asyncio.Queue()
+        consumer = asyncio.create_task(self._consume_messages(messages, self._ws))
         primary = asyncio.create_task(self._prefer_primary())
 
         # 消息接收循环
         try:
             async for msg in self._ws:
                 if msg.type == WSMsgType.TEXT:
-                    await self._dispatch(msg.data)
+                    messages.put_nowait(msg.data)
                 elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSED):
                     break
         finally:
             primary.cancel()
-            await asyncio.gather(primary, return_exceptions=True)
             self._connected = False
             self._connected_event.clear()
-            self._ws = None
-            logger.debug("[IpcClient] Connection to Core lost")
+            messages.put_nowait(None)
+            cleanup = asyncio.gather(primary, consumer, return_exceptions=True)
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+            finally:
+                self._ws = None
+                logger.debug("[IpcClient] Connection to Core lost")
+            consumer.result()
+
+    async def _consume_messages(self, messages: asyncio.Queue[str | None], ws: aiohttp.ClientWebSocketResponse) -> None:
+        """按顺序处理已接收的回复，断线后完成发送再释放连接。"""
+        try:
+            await self._flush_pending()
+            while (raw := await messages.get()) is not None:
+                await self._dispatch(raw)
+        finally:
+            await ws.close()
 
     def _log_connect_failure(self, detail: str) -> None:
         """连续失败时降频输出，避免 Core 未就绪期间刷屏。"""
@@ -277,38 +294,38 @@ class IpcClient:
         self._running = True
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
-        while self._running:
-            try:
-                await self._connect_once()
-            except asyncio.TimeoutError:
-                self._log_connect_failure(f"Connection timed out after {self._session.timeout.total}s")
-            except aiohttp.ClientError as e:
-                self._log_connect_failure(f"Connection failed: {e}")
-            except Exception as e:
-                logger.error(f"[IpcClient] Connection failed: {type(e).__name__}: {e}")
+        try:
+            while self._running:
+                try:
+                    await self._connect_once()
+                except asyncio.TimeoutError:
+                    self._log_connect_failure(f"Connection timed out after {self._session.timeout.total}s")
+                except aiohttp.ClientError as e:
+                    self._log_connect_failure(f"Connection failed: {e}")
+                except Exception as e:
+                    logger.error(f"[IpcClient] Connection failed: {type(e).__name__}: {e}")
 
-            if not self._running:
-                break
+                if not self._running:
+                    break
 
-            # 重连
-            self._reconnect_count += 1
-            self._endpoint_index = 0 if self._return_primary else (self._endpoint_index + 1) % len(self._endpoints)
-            self._return_primary = False
-            delay = min(_INITIAL_RECONNECT_DELAY * (2 ** min(self._reconnect_count - 1, 5)), _MAX_RECONNECT_DELAY)
-            logger.debug(f"[IpcClient] Reconnecting in {delay:.1f}s (attempt {self._reconnect_count})...")
-            await asyncio.sleep(delay)
+                # 重连
+                self._reconnect_count += 1
+                self._endpoint_index = 0 if self._return_primary else (self._endpoint_index + 1) % len(self._endpoints)
+                self._return_primary = False
+                delay = min(_INITIAL_RECONNECT_DELAY * (2 ** min(self._reconnect_count - 1, 5)), _MAX_RECONNECT_DELAY)
+                logger.debug(f"[IpcClient] Reconnecting in {delay:.1f}s (attempt {self._reconnect_count})...")
+                await asyncio.sleep(delay)
 
-        # 清理
-        if self._session:
-            await self._session.close()
-            self._session = None
+        finally:
+            if self._session:
+                await self._session.close()
+                self._session = None
 
     async def disconnect(self) -> None:
         """断开连接并停止重连。"""
         self._running = False
         if self._ws and not self._ws.closed:
             await self._ws.close()
-            self._ws = None
         logger.info("Disconnected from Muika.")
 
     async def send_user_message(self, message: str, resources: Optional[list[dict]] = None) -> bool:
