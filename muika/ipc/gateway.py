@@ -48,6 +48,7 @@ class Gateway:
         for kind in ("user_message", "command", "session_bootstrap", "session_end"):
             self.bots.register_handler(kind, self._input)
         self.nodes: dict[str, CoreConnection] = {}
+        self._connection_tasks: set[asyncio.Task[web.WebSocketResponse]] = set()
         self.active: str | None = None
         self.epoch = 0
         self._lock = asyncio.Lock()
@@ -175,6 +176,7 @@ class Gateway:
         for node in list(self.nodes.values()):
             await node.ws.close()
         await self.bots.stop()
+        await asyncio.gather(*self._connection_tasks, return_exceptions=True)
         await asyncio.gather(*self._closing_sockets, return_exceptions=True)
         await self.db.close()
 
@@ -195,7 +197,7 @@ class Gateway:
             closing.add_done_callback(self._closing_sockets.discard)
             return False
 
-    async def _history(self, ws: web.WebSocketResponse, after: int) -> None:
+    async def _history(self, node: CoreConnection, after: int) -> None:
         async with self.db.execute(
             "SELECT sequence, payload FROM activity WHERE sequence > ? ORDER BY sequence LIMIT 64", (after,)
         ) as cursor:
@@ -208,13 +210,14 @@ class Gateway:
                 rows, complete = rows[:index], False
                 break
         entries = [SyncEntry(gateway_sequence=row[0], activity=Activity.model_validate_json(row[1])) for row in rows]
-        await ws.send_json(
+        await self._send(
+            node,
             {
                 "kind": "history",
                 "entries": [entry.model_dump(mode="json") for entry in entries],
                 "complete": complete,
                 "through": rows[-1][0] if rows else after,
-            }
+            },
         )
 
     async def _elect(self, preferred: str | None = None) -> None:
@@ -291,7 +294,7 @@ class Gateway:
     async def _packet(self, node: CoreConnection, message: dict) -> None:
         kind = message["kind"]
         if kind == "history":
-            await self._history(node.ws, int(message["after"]))
+            await self._history(node, int(message["after"]))
         elif kind == "heartbeat":
             if self.active is None and node.ready:
                 await self._elect()
@@ -370,25 +373,48 @@ class Gateway:
             return ws
         node = CoreConnection(name, origin, int(request.headers.get("X-Priority", "0")), ws, time.monotonic())
         self.nodes[name] = node
+        task = asyncio.current_task()
+        assert task is not None
+        self._connection_tasks.add(task)
+        packets: asyncio.Queue[str | None] = asyncio.Queue()
+        consumer = asyncio.create_task(self._consume_packets(packets, node))
         try:
             async for packet in ws:
                 if packet.type == WSMsgType.TEXT:
-                    async with self._lock:
-                        data: dict = {}
-                        try:
-                            node.last_seen = time.monotonic()
-                            parsed = json.loads(packet.data)
-                            if not isinstance(parsed, dict):
-                                raise ValueError("A Core packet must be an object")
-                            data = parsed
-                            await self._packet(node, data)
-                        except (ValueError, KeyError, TypeError) as exc:
-                            await ws.send_json({"kind": "error", "detail": str(exc), "operation": data.get("kind")})
+                    node.last_seen = time.monotonic()
+                    packets.put_nowait(packet.data)
         finally:
-            async with self._lock:
-                self.nodes.pop(name, None)
-                await self._elect()
+            packets.put_nowait(None)
+            try:
+                await asyncio.shield(consumer)
+            except asyncio.CancelledError:
+                await consumer
+                raise
+            finally:
+                try:
+                    async with self._lock:
+                        self.nodes.pop(name, None)
+                        await self._elect()
+                finally:
+                    self._connection_tasks.discard(task)
         return ws
+
+    async def _consume_packets(self, packets: asyncio.Queue[str | None], node: CoreConnection) -> None:
+        """按原序处理已接收的数据包，并保留数据库和活动权的入口锁。"""
+        try:
+            while (raw := await packets.get()) is not None:
+                async with self._lock:
+                    data: dict = {}
+                    try:
+                        parsed = json.loads(raw)
+                        if not isinstance(parsed, dict):
+                            raise ValueError("A Core packet must be an object")
+                        data = parsed
+                        await self._packet(node, data)
+                    except (ValueError, KeyError, TypeError) as exc:
+                        await self._send(node, {"kind": "error", "detail": str(exc), "operation": data.get("kind")})
+        finally:
+            await node.ws.close()
 
 
 async def run(directory: Path, host: str, port: int) -> None:

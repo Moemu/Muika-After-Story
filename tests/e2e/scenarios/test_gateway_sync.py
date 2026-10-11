@@ -1543,3 +1543,70 @@ async def test_bot_slow_send_keeps_reading_and_finishes_received_messages(record
             release.set()
             await client.disconnect()
             await asyncio.gather(running, return_exceptions=True)
+
+
+@pytest.mark.parametrize("shutdown", ["remote", "stop"])
+async def test_gateway_reads_heartbeats_and_drains_history_before_close(live_gateway, monkeypatch, shutdown):
+    from aiohttp import WSMsgType
+
+    from muika.ipc.sync_models import Activity
+
+    gateway, session, base, recorder = live_gateway
+    sockets = []
+    for name in ("pc", "server"):
+        ws = await session.ws_connect(
+            base + "/cores",
+            headers={"X-Core-Name": name, "X-Node-ID": name, "X-Sync-Protocol": SYNC_PROTOCOL},
+            autoping=False,
+        )
+        sockets.append(ws)
+        await ready(ws, recorder)
+    pc, standby = sockets
+    await packet(pc, "role", recorder)
+    entered, release = asyncio.Event(), asyncio.Event()
+    history = gateway._history
+
+    async def slow_history(connection, after):
+        entered.set()
+        await release.wait()
+        await history(connection, after)
+
+    monkeypatch.setattr(gateway, "_history", slow_history)
+    monkeypatch.setattr(gateway.bots._runner, "_shutdown_timeout", 0.01)
+    stopping = None
+    activity = Activity(origin="pc")
+    try:
+        await pc.send_json({"kind": "history", "after": 0})
+        await asyncio.wait_for(entered.wait(), 2)
+        seen = {name: node.last_seen for name, node in gateway.nodes.items()}
+        await asyncio.sleep(0.03)
+        await pc.send_json({"kind": "publish", "activities": [activity.model_dump(mode="json")]})
+        for ws in sockets:
+            await ws.send_json({"kind": "heartbeat"})
+            await ws.ping(b"slow-history")
+            assert (await asyncio.wait_for(ws.receive(), 1)).type == WSMsgType.PONG
+        assert all(gateway.nodes[name].last_seen > timestamp for name, timestamp in seen.items())
+        if shutdown == "remote":
+            await pc.close()
+        else:
+            stopping = asyncio.create_task(gateway.stop())
+            await asyncio.sleep(0.1)
+            assert not stopping.done()
+        release.set()
+        if stopping is None:
+            echoed = await packet(standby, "history", recorder)
+            assert echoed["entries"][0]["activity"]["id"] == activity.id
+            await packet(standby, "role", recorder)
+            assert "pc" not in gateway.nodes
+        else:
+            await asyncio.wait_for(stopping, 3)
+            assert not gateway.nodes
+        with sqlite3.connect(gateway.directory / "gateway.db") as db:
+            assert db.execute("SELECT count(*) FROM activity WHERE id=?", (activity.id,)).fetchone()[0] == 1
+        recorder.record("gateway_receive_drained", shutdown=shutdown, activity=activity.id, pong=True)
+    finally:
+        release.set()
+        if stopping is not None:
+            await stopping
+        for ws in sockets:
+            await ws.close()
