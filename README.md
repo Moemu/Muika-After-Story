@@ -1,4 +1,6 @@
 <div align=center>
+  <!--  No agent is allowed to modify this file without explicit approval.
+  (Including approval of the plan, approval of modifications to this file must be done separately) -->
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?fresh=1&amp;iconPath=assets%2Fmuika-icon.webp&amp;theme=dark&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clicense" />
     <img width="100%" src="https://erika.snowy.moe/v1/banner/Moemu/Muika-After-Story.webp?fresh=1&amp;iconPath=assets%2Fmuika-icon.webp&amp;theme=light&amp;meta=full_name%2Cstars%2Cforks%2Cissues%2Crelease%2Clicense" alt="Muika-After-Story Banner" />
@@ -98,18 +100,32 @@ Muika 可以在聊天期间处理后台任务，也可以主动提出想法、�
 
 ## Architecture🌙
 
+**单实例环境**
+
 ```mermaid
 flowchart LR
-    Player["玩家 / 聊天平台"] <--> Adapter["平台适配器<br/>NoneBot / AstrBot / 自定义接入"]
-    Adapter <-->|单机 WebSocket IPC| Core["Muika Core<br/>事件循环与主人格"]
-    Adapter <-->|多设备 WebSocket IPC| Gateway["Gateway（可选）<br/>聊天入口与活动日志"]
-    Gateway <-->|角色协调与经历同步| Core
-    Gateway <-->|角色协调与经历同步| OtherCore["其他设备 Core<br/>本地记忆与工具"]
-    Supervisor["进程监督<br/>重启与启动失败恢复"] --> Core
-    Core <--> Memory["记忆与持续状态<br/>经历 / 日记 / 事实 / 情绪"]
+    Player["玩家 / 聊天平台"] <--> AdapterA["Adpater A<br/>ex. NoneBot 2(muika_bot)"]
+    Player <--> AdapterB["Adpater B (Optional)<br/>ex. AstrBot / DDLC?"]
+    AdapterA <-->|WebSocket IPC| Core["Muika Core<br/>事件循环与主人格"]
+    AdapterB <-->|WebSocket IPC| Core
     Core <--> Agent["行动 Agent<br/>持久后台任务"]
-    Agent <--> Tools["工具 / 插件 / MCP"]
-    Agent <--> Review["Code Review Agent<br/>代码操作审查"]
+    Agent <--> Tools["Agent Workspace<br/>工具 / 插件 / MCP"]
+```
+
+**多实例部署环境**
+
+```mermaid
+flowchart LR
+    Player["玩家 / 聊天平台"] <--> AdapterA["Adpater A<br/>ex. NoneBot 2(muika_bot)"]
+    Player <--> AdapterB["Adpater B (Optional)<br/>ex. AstrBot / DDLC?"]
+    AdapterA <-->|公网 WebSocket IPC| Gateway["Server Gateway<br/>部署在服务器上的多实例路由中枢"]
+    AdapterB <-->|公网 WebSocket IPC| Gateway
+    Gateway <-->|角色协调与经历同步| CoreA["Core A<br/>用户系统上的主活动核心"]
+    Gateway <-->|角色协调与经历同步| CoreB["Core B<br/>服务器上的备用活动核心"]
+    CoreA <--> AgentA["Action Agent<br/>绝大多数的日常任务"]
+    CoreB <--> AgentB["Action Agent<br/>可以在服务器上有限活动"]
+    AgentA <--> ToolsA["Windows Agent Workspace<br/>工具 / 插件 / MCP"]
+    AgentB <--> ToolsB["Linux Agent Workspace<br/>工具 / 插件 / MCP"]
 ```
 
 主人格负责交流和自主决策，行动 Agent 负责执行任务，两者共用一个 Muika 性格提示词。行动结果回到对话，记忆保存共同经历和持续状态，让关系跨越会话与重启。
