@@ -206,9 +206,11 @@ class CoreApp:
         self.sent.append(content)
         self._outbox.put_nowait(content)
 
-    async def _collect_command(self, content: str, resources: Optional[list[dict]] = None) -> None:
+    async def _collect_command(
+        self, content: str, resources: Optional[list[dict]] = None, target: Optional[str] = None
+    ) -> None:
         """CommandDispatcher 的回复回调：命令结果与对话外发分开收集。"""
-        self._recorder.record("command_out", text=content)
+        self._recorder.record("command_out", text=content, target=target)
         self.command_replies.append(content)
 
     def db_query(self, sql: str, params: Sequence[object] = ()) -> list[dict]:

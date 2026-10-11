@@ -410,7 +410,7 @@ class CoreBootstrap:
 
         if isinstance(event, IpcCommandEvent):
             self._ws_server.set_triggering_adapter(client_name)
-            await CommandDispatcher.get().dispatch(event.raw)
+            await CommandDispatcher.get().dispatch(event.raw, target=client_name)
             return ActionResponse(action=event.type, status="ok")
 
         if isinstance(event, IpcSessionBootstrapEvent):

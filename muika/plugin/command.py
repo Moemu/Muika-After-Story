@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
 
@@ -187,7 +188,7 @@ class CommandRegistry:
 
         text = "\n".join(text_parts) if text_parts else ""
         resources = resource_dicts if resource_dicts else None
-        await dispatcher._command_reply(text, resources)
+        await dispatcher.reply_to_origin(text, resources)
         raise FinishedException()
 
 
@@ -240,13 +241,15 @@ class CommandDispatcher:
     """命令派发器单例。
 
     在 Core 启动时通过 :meth:`setup` 注入 :class:`Muika` 实例，
-    此后所有命令通过 :meth:`dispatch` 派发，无需额外参数。
+    此后通过 :meth:`dispatch` 派发命令，并传入来源适配器。
     """
 
     _instance: Optional[CommandDispatcher] = None
 
     def __init__(
-        self, muika: Muika, command_reply: Callable[[str, Optional[list[dict]]], Coroutine[None, None, None]]
+        self,
+        muika: Muika,
+        command_reply: Callable[[str, Optional[list[dict]], Optional[str]], Coroutine[None, None, None]],
     ) -> None:
         from muika.core.agent.agent import Agent
         from muika.core.brain import MuikaBrain
@@ -260,6 +263,7 @@ class CommandDispatcher:
 
         self.muika = muika
         self._command_reply = command_reply
+        self._reply_target: ContextVar[str | None] = ContextVar("command_reply_target", default=None)
         self._injections: dict[type, Any] = {
             MuikaCls: muika,
             MuikaState: muika.state,
@@ -276,7 +280,7 @@ class CommandDispatcher:
     def setup(
         cls,
         muika: Muika,
-        command_reply: Callable[[str, Optional[list[dict]]], Coroutine[None, None, None]],
+        command_reply: Callable[[str, Optional[list[dict]], Optional[str]], Coroutine[None, None, None]],
     ) -> CommandDispatcher:
         """初始化命令派发器。
 
@@ -296,59 +300,70 @@ class CommandDispatcher:
             )
         return cls._instance
 
-    async def dispatch(self, raw: str) -> None:
+    async def reply_to_origin(self, content: str, resources: Optional[list[dict]] = None) -> None:
+        """将命令结果发送到本次派发的来源适配器。"""
+        await self._command_reply(content, resources, self._reply_target.get())
+
+    async def dispatch(self, raw: str, target: str | None = None) -> None:
         """派发一条命令消息。
 
         依次按优先级尝试每个 :class:`CommandRegistry`，对匹配的 Alconna
         结果路由到对应的子命令处理器。
         未匹配任何命令时回复 "未知的指令"。
+
+        :param raw: 带可选前缀的命令文本。
+        :param target: 来源适配器；进程内直接调用可以省略。
         """
-        # 1. 剥离前缀
-        cmd_raw = raw
-        if raw and raw[0] in COMMAND_PREFIXES:
-            cmd_raw = raw[1:].lstrip()
+        token = self._reply_target.set(target)
+        try:
+            # 1. 剥离前缀
+            cmd_raw = raw
+            if raw and raw[0] in COMMAND_PREFIXES:
+                cmd_raw = raw[1:].lstrip()
 
-        if not cmd_raw:
-            await self._command_reply("未知的指令", None)
-            return
-
-        # 2. 按优先级依序尝试
-        for registry in get_commands():
-            parse_text = cmd_raw
-
-            # 别名替换
-            head = parse_text.split(maxsplit=1)[0] if parse_text.strip() else ""
-            if head and head in registry.aliases:
-                root_name = registry.alc.command
-                tail = parse_text[len(head) :]
-                parse_text = root_name + tail
-                logger.debug(f"[Command] Alias '{head}' → '{root_name}'; parsing '{parse_text}'")
-
-            res = registry.alc.parse(parse_text)
-            if not res.matched:
-                continue
-
-            logger.debug(f"[Command] Matched '{registry.alc.command}' ← '{cmd_raw}'")
-
-            # 3. 路由到处理器
-            matched = False
-            for dest, handler in registry._handlers.items():
-                if res.query(dest) is not None:
-                    logger.debug(f"[Command] Routing to '{dest}' handler")
-                    await self._invoke(handler, registry, res)
-                    matched = True
-                    break
-
-            if not matched and registry._default_handler is not None:
-                logger.debug("[Command] Routing to default handler")
-                await self._invoke(registry._default_handler, registry, res)
-                matched = True
-
-            if matched:
+            if not cmd_raw:
+                await self.reply_to_origin("未知的指令")
                 return
 
-        # 无匹配
-        await self._command_reply("未知的指令", None)
+            # 2. 按优先级依序尝试
+            for registry in get_commands():
+                parse_text = cmd_raw
+
+                # 别名替换
+                head = parse_text.split(maxsplit=1)[0] if parse_text.strip() else ""
+                if head and head in registry.aliases:
+                    root_name = registry.alc.command
+                    tail = parse_text[len(head) :]
+                    parse_text = root_name + tail
+                    logger.debug(f"[Command] Alias '{head}' → '{root_name}'; parsing '{parse_text}'")
+
+                res = registry.alc.parse(parse_text)
+                if not res.matched:
+                    continue
+
+                logger.debug(f"[Command] Matched '{registry.alc.command}' ← '{cmd_raw}'")
+
+                # 3. 路由到处理器
+                matched = False
+                for dest, handler in registry._handlers.items():
+                    if res.query(dest) is not None:
+                        logger.debug(f"[Command] Routing to '{dest}' handler")
+                        await self._invoke(handler, registry, res)
+                        matched = True
+                        break
+
+                if not matched and registry._default_handler is not None:
+                    logger.debug("[Command] Routing to default handler")
+                    await self._invoke(registry._default_handler, registry, res)
+                    matched = True
+
+                if matched:
+                    return
+
+            # 无匹配
+            await self.reply_to_origin("未知的指令")
+        finally:
+            self._reply_target.reset(token)
 
     async def _invoke(
         self,
