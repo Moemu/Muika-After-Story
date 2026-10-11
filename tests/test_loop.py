@@ -363,7 +363,7 @@ async def test_god_mode_enables_tools_and_isolates_resources(engine, tmp_path):
     await engine._run_brain_pipeline(TimeTickEvent())
     handoff = await asyncio.wait_for(engine.event_queue.get(), timeout=1)
     await engine._process_event(handoff, 0)
-    await engine._run_brain_pipeline(TimeTickEvent())
+    await engine._run_brain_pipeline(_user_event())
     assert requests == [False, True, True]
     assert engine.executor.send_message.await_args_list[0].kwargs["resources"] == [resource]
     assert engine.executor.send_message.await_args_list[1].kwargs["resources"] == []
