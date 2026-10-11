@@ -174,78 +174,77 @@ class DigestAgent:
             if expired_count > 0:
                 logger.debug(f"[DigestAgent] Purged {expired_count} expired cache entries")
 
-            for source in sources:
-                try:
-                    logger.debug(f"[DigestAgent] Fetching RSS: {source.name}")
-                    rss_content = await fetch_web_content(source.url)
+        for source in sources:
+            try:
+                logger.debug(f"[DigestAgent] Fetching RSS: {source.name}")
+                rss_content = await fetch_web_content(source.url)
 
-                    # 比对 RSS 指纹，内容未更新则跳过
-                    raw_hash = hashlib.md5(rss_content).hexdigest()
-                    if self._rss_fingerprints.get(source.id) == raw_hash:
-                        logger.debug(f"[DigestAgent] RSS unchanged for {source.name}, skipping")
-                        continue
-                    self._rss_fingerprints[source.id] = raw_hash
+                # 比对 RSS 指纹，内容未更新则跳过
+                raw_hash = hashlib.md5(rss_content).hexdigest()
+                if self._rss_fingerprints.get(source.id) == raw_hash:
+                    logger.debug(f"[DigestAgent] RSS unchanged for {source.name}, skipping")
+                    continue
+                self._rss_fingerprints[source.id] = raw_hash
 
-                    entries = parse_rss_feed(rss_content)
+                entries = parse_rss_feed(rss_content)
 
-                    entries = random.sample(entries, min(len(entries), _MAX_CANDIDATES_PER_SOURCE))
+                entries = random.sample(entries, min(len(entries), _MAX_CANDIDATES_PER_SOURCE))
 
-                    scored_candidates: list[ScoredCandidate] = []
-                    for idx, entry in enumerate(entries):
-                        if idx >= _MAX_EVALUATIONS_PER_SOURCE:
-                            break
+                scored_candidates: list[ScoredCandidate] = []
+                for idx, entry in enumerate(entries):
+                    if idx >= _MAX_EVALUATIONS_PER_SOURCE:
+                        break
 
-                        url_hash = hashlib.md5(entry.link.encode()).hexdigest()[:12]
-                        topic_id = f"event_rss_{source.id}_{url_hash}"
+                    url_hash = hashlib.md5(entry.link.encode()).hexdigest()[:12]
+                    topic_id = f"event_rss_{source.id}_{url_hash}"
 
-                        # 检查是否已作为话题使用过
+                    # 检查是否已作为话题使用过
+                    async with get_session() as db_session:
                         history = await TopicHistoryCRUD.get_by_topic_id(db_session, topic_id)
                         if history:
                             continue
-
-                        # 检查评估缓存
                         cached = await RssDigestCacheCRUD.get_cached(db_session, topic_id, DIGEST_CACHE_TTL_DAYS)
-                        if cached is not None:
-                            if cached.keep == 0 or cached.score < DIGEST_MIN_SCORE:
-                                logger.debug(
-                                    f"[DigestAgent] Cached reject (score={cached.score}) "
-                                    f"from {source.name}: {entry.title}"
-                                )
-                                continue
-                            if not cached.summary.strip():
-                                continue
-                            # 使用缓存中的正面评估结果
-                            scored_candidates.append(
-                                ScoredCandidate(
-                                    score=cached.score,
-                                    entry=entry,
-                                    topic_id=topic_id,
-                                    summary=cached.summary.strip(),
-                                    primary_theme=cached.primary_theme,
-                                )
-                            )
+
+                    # 检查评估缓存
+                    if cached is not None:
+                        if cached.keep == 0 or cached.score < DIGEST_MIN_SCORE:
                             logger.debug(
-                                f"[DigestAgent] Cache hit (score={cached.score}) " f"from {source.name}: {entry.title}"
+                                f"[DigestAgent] Cached reject (score={cached.score}) "
+                                f"from {source.name}: {entry.title}"
                             )
                             continue
-
-                        # 缓存未命中：抓取全文 + LLM 评估
-                        # 提交以释放 SQLite 写锁，避免阻塞 @record_plugin_usage 的 usage 写入
-                        await db_session.commit()
-
-                        content = await extract_web_content(entry.link)
-                        if not content:
+                        if not cached.summary.strip():
                             continue
-
-                        assessment = await self._assess_entry_for_muika(
-                            source_name=source.name,
-                            title=entry.title,
-                            content=content,
+                        # 使用缓存中的正面评估结果
+                        scored_candidates.append(
+                            ScoredCandidate(
+                                score=cached.score,
+                                entry=entry,
+                                topic_id=topic_id,
+                                summary=cached.summary.strip(),
+                                primary_theme=cached.primary_theme,
+                            )
                         )
-                        if assessment is None:
-                            continue
+                        logger.debug(
+                            f"[DigestAgent] Cache hit (score={cached.score}) " f"from {source.name}: {entry.title}"
+                        )
+                        continue
 
-                        # 将所有评估结果写入缓存（避免重启后重复评估）
+                    # 缓存未命中：抓取全文 + LLM 评估
+                    content = await extract_web_content(entry.link)
+                    if not content:
+                        continue
+
+                    assessment = await self._assess_entry_for_muika(
+                        source_name=source.name,
+                        title=entry.title,
+                        content=content,
+                    )
+                    if assessment is None:
+                        continue
+
+                    # 将所有评估结果写入缓存（避免重启后重复评估）
+                    async with get_session() as db_session:
                         await RssDigestCacheCRUD.upsert(
                             session=db_session,
                             topic_id=topic_id,
@@ -260,57 +259,57 @@ class DigestAgent:
                             summary=assessment.summary.strip() if assessment.summary else "",
                         )
 
-                        if (not assessment.keep) or assessment.score < DIGEST_MIN_SCORE:
-                            logger.debug(
-                                f"[DigestAgent] Skip low-fit entry ({assessment.score}) from {source.name}: "
-                                f"{entry.title} reason={assessment.reason}"
-                            )
-                            continue
-
-                        if not assessment.summary.strip():
-                            logger.debug(f"[DigestAgent] Skip kept entry without summary: {entry.title}")
-                            continue
-
-                        scored_candidates.append(
-                            ScoredCandidate(
-                                score=assessment.score,
-                                entry=entry,
-                                topic_id=topic_id,
-                                summary=assessment.summary.strip(),
-                                primary_theme=assessment.primary_theme,
-                            )
+                    if (not assessment.keep) or assessment.score < DIGEST_MIN_SCORE:
+                        logger.debug(
+                            f"[DigestAgent] Skip low-fit entry ({assessment.score}) from {source.name}: "
+                            f"{entry.title} reason={assessment.reason}"
                         )
-
-                    if not scored_candidates:
-                        logger.debug(f"[DigestAgent] No candidate passed score gate in source: {source.name}")
                         continue
 
-                    scored_candidates.sort(key=lambda item: item.score, reverse=True)
-                    chosen = scored_candidates[0]
+                    if not assessment.summary.strip():
+                        logger.debug(f"[DigestAgent] Skip kept entry without summary: {entry.title}")
+                        continue
 
-                    logger.debug(
-                        f"[DigestAgent] Digesting selected entry score={chosen.score} source={source.name}: "
-                        f"{chosen.entry.title}"
+                    scored_candidates.append(
+                        ScoredCandidate(
+                            score=assessment.score,
+                            entry=entry,
+                            topic_id=topic_id,
+                            summary=assessment.summary.strip(),
+                            primary_theme=assessment.primary_theme,
+                        )
                     )
 
-                    topic = EventTopic(
-                        id=chosen.topic_id,
-                        source=TopicSource.EVENT,
-                        category=source.id,
-                        title=chosen.entry.title,
-                        content=chosen.summary,
-                        date=chosen.entry.published,
-                        cooldown_days=7,
-                        tags=["news", source.id, chosen.primary_theme],
-                    )
-                    self.topic_manager.enqueue_event(topic)
+                if not scored_candidates:
+                    logger.debug(f"[DigestAgent] No candidate passed score gate in source: {source.name}")
+                    continue
 
+                scored_candidates.sort(key=lambda item: item.score, reverse=True)
+                chosen = scored_candidates[0]
+
+                logger.debug(
+                    f"[DigestAgent] Digesting selected entry score={chosen.score} source={source.name}: "
+                    f"{chosen.entry.title}"
+                )
+
+                topic = EventTopic(
+                    id=chosen.topic_id,
+                    source=TopicSource.EVENT,
+                    category=source.id,
+                    title=chosen.entry.title,
+                    content=chosen.summary,
+                    date=chosen.entry.published,
+                    cooldown_days=7,
+                    tags=["news", source.id, chosen.primary_theme],
+                )
+                async with get_session() as db_session:
                     await TopicHistoryCRUD.record(db_session, topic_id=chosen.topic_id, user_engaged=False)
+                self.topic_manager.enqueue_event(topic)
 
-                    logger.info(f"[DigestAgent] Reading note ready: {chosen.entry.title}")
-                    return
+                logger.info(f"[DigestAgent] Reading note ready: {chosen.entry.title}")
+                return
 
-                except Exception as e:
-                    logger.error(f"[DigestAgent] Error fetching source {source.name}: {e}")
+            except Exception as e:
+                logger.error(f"[DigestAgent] Error fetching source {source.name}: {e}")
 
-            logger.info("[DigestAgent] Reading check finished without a new note.")
+        logger.info("[DigestAgent] Reading check finished without a new note.")
