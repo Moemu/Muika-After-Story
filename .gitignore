@@ -151,14 +151,13 @@ configs/*
 plugins
 docs
 data
-benchmarks/.runtime
-benchmarks/results
-benchmarks/dashboard/
-benchmarks/screenshots/
 tests/test_benchmark_dashboard.py
 
 # launcher is maintained in the nested MuikaAI/mas-launcher repository
 launcher/
+
+# benchmarks is maintained in the nested benchmarks/ repository
+benchmarks/
 
 tests/e2e/artifacts/
 .env.multi-device.local
