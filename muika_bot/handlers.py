@@ -42,7 +42,11 @@ DELAYED_SECOND_PER_PARAGRAPH = 3
 driver = get_driver()
 session_manager = SessionManager()
 
-_ipc_client: IpcClient = IpcClient(core_url=mas_config.core_ws_url, secret=mas_config.ipc_secret)
+_ipc_client: IpcClient = IpcClient(
+    core_url=mas_config.core_ws_url,
+    secret=mas_config.ipc_secret,
+    client_name=mas_config.client_name or "nonebot-qq",
+)
 _message_target = Target(id=mas_config.master_id, private=True)
 
 
