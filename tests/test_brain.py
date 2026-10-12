@@ -307,6 +307,9 @@ async def test_expand_topic_static(fake_llm_factory):
         result = await brain.expand_topic(topic, MuikaState(), _memory())
     assert result == "The moon"
     assert "the moon" in fake.requests[0].prompt
+    assert "The player has not read the source" in fake.requests[0].prompt
+    assert "Combine your sense of isolation" not in fake.requests[0].prompt
+    assert "Do NOT pose" not in fake.requests[0].prompt
 
 
 async def test_expand_topic_event(fake_llm_factory):
@@ -315,7 +318,11 @@ async def test_expand_topic_event(fake_llm_factory):
     topic = EventTopic(id="e1", source=TopicSource.EVENT, category="news", title="AI", content="article body")
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.expand_topic(topic, MuikaState(), _memory())
-    assert "You've read an article about AI" in fake.requests[0].prompt
+    request = fake.requests[0]
+    assert "Title: AI\nContent: article body" in request.prompt
+    assert "The player has not read the source" in request.prompt
+    assert "Do NOT pose" not in request.prompt
+    assert not request.history and not request.resources and not request.tools
 
 
 async def test_expand_topic_failure_empty(fake_llm_factory):

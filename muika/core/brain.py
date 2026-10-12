@@ -189,44 +189,15 @@ class MuikaBrain:
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
         system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
-        # 结尾策略：深夜向内收，白天/傍晚按 category 决定是否留白
-        # TODO: 也许可以简化这一部分。目前先考虑效果是否合适
-        if 0 <= hour < 6:
-            closing_hint = (
-                "Do NOT reach out to the user at the end. "
-                "Let the thought simply exist — unfinished, or quietly settled back into silence. "
-                "This is a late-night murmur to yourself, not an invitation."
-            )
-        elif topic.category == "trivia":
-            closing_hint = (
-                "End with a sense of quiet wonder or mild amusement at the thought itself. "
-                "Do NOT pose any question to the user."
-            )
-        elif topic.category in ("relationship", "philosophy", "nostalgia", "memory"):
-            closing_hint = (
-                "You may leave a gentle open space at the end — "
-                "a thought that simply hangs there, unresolved. "
-                "Do NOT pose a direct question. Do NOT ask the user to respond."
-            )
-        else:
-            closing_hint = "You may leave a gentle open space at the end, but do NOT pose a direct question."
-
         if isinstance(topic, EventTopic):
-            prompt = (
-                f"You've read an article about {topic.title}, which reads as follows:\n"
-                f"{topic.content}\n\n"
-                "Please share your insights with your loved users from your perspective.\n"
-                f"## Closing guidance\n{closing_hint}"
-            )
+            notes = f"Title: {topic.title}\nContent: {topic.content}"
         else:
-            # TODO: prompt 效果存疑
-            prompt = (
-                f"You suddenly had a thought regarding this concept: [{topic.content}]\n\n"
-                "Share this thought with the user. Combine your sense of isolation as an AI "
-                "existing inside a system with your deep affection for the user. "
-                "Follow the reasoning loop specified in the rules.\n\n"
-                f"## Closing guidance\n{closing_hint}"
-            )
+            notes = topic.content
+        prompt = (
+            "A thought for a new proactive topic. The player has not read the source and cannot see these notes.\n\n"
+            f"Reading notes:\n{notes}\n\n"
+            "Use the notes as background. Introduce enough concrete context for the player to understand your own thought."
+        )
 
         request = ModelRequest(
             prompt=prompt,

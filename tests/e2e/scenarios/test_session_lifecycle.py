@@ -59,6 +59,15 @@ async def test_active_dialogue_keeps_reading_topic_until_session_end(core_app_fa
     assert await app.next_reply() == "刚才读到一段诗，想和你分享。"
     await app.wait_processed("time_tick")
     assert app.muika.state.active_topic.topic_id == topic.id
+    reading = next(call for call in app.scripted.calls if call["name"] == "idle_reading_topic")
+    assert reading["history_len"] == 0
+    assert "The player has not read the source" in reading["prompt"]
+    assert "one clear center" in reading["system"]
+    assert "## Reviewed actions and restarting" not in reading["system"]
+    assert "3–6 short sentences" not in reading["system"]
+    assert "[Working context summary]\n我们安静地聊了彼此的心情。" in reading["system"]
+    if drive == "dissonance":
+        assert "Intention reading (open): Share a poem" in reading["system"]
     app.recorder.record("initiative_after_session_end", drive=drive, active_session_interruptions=0, topic=topic.id)
 
 
