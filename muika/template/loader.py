@@ -10,7 +10,7 @@ from muika.utils.logger import logger
 from .model import PromptTemplatesData
 
 _BUILTIN_TEMPLATES_DIR = Path(__file__).parent.parent / "builtin_templates"
-SEARCH_PATH = ["./templates", _BUILTIN_TEMPLATES_DIR]
+SEARCH_PATH: list[str | Path] = ["./templates", _BUILTIN_TEMPLATES_DIR]
 
 
 def generate_prompt_from_template(
