@@ -20,8 +20,6 @@ from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 from ..models import Resource
 
 if TYPE_CHECKING:
-    from numpy import ndarray
-
     from muika.core.memory import SessionTurn
 
 
@@ -195,20 +193,3 @@ class ModelStreamCompletions:
     """调用成功（如不成功会在 `chunk` 中输出错误信息）"""
     message: ModelMessage | None = None
     stop_reason: StopReason = "stop"
-
-
-@dataclass
-class EmbeddingsBatchResult:
-    """
-    嵌入输出
-    """
-
-    embeddings: List[List[float]]
-    usage: Usage = field(default_factory=Usage)
-    succeed: bool = True
-
-    @property
-    def array(self) -> List["ndarray"]:
-        from numpy import array
-
-        return [array(embedding) for embedding in self.embeddings]

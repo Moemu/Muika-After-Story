@@ -3,7 +3,6 @@ from ._config import ModelConfig
 from ._dependencies import MODEL_DEPENDENCY_MAP, get_missing_dependencies
 from ._retry import LLMRequestError
 from ._schema import (
-    EmbeddingsBatchResult,
     ModelCompletions,
     ModelRequest,
     ModelStreamCompletions,
@@ -18,7 +17,6 @@ __all__ = [
     "ModelRequest",
     "ModelCompletions",
     "ModelStreamCompletions",
-    "EmbeddingsBatchResult",
     "Usage",
     "LLMRequestError",
     "MODEL_DEPENDENCY_MAP",

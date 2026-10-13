@@ -10,7 +10,6 @@ from muika.database.db import get_session
 from muika.plugin.loader import _get_caller_plugin_name
 
 from ._schema import (
-    EmbeddingsBatchResult,
     ModelCompletions,
     ModelRequest,
     ModelStreamCompletions,
@@ -21,7 +20,6 @@ if TYPE_CHECKING:
     from ._base import BaseLLM
 
 ASK_FUNC: TypeAlias = Callable[..., Awaitable[Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]]]
-EMBED_FUNC: TypeAlias = Callable[..., Awaitable[EmbeddingsBatchResult]]
 
 _usage_write_lock = asyncio.Lock()
 
