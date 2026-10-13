@@ -7,11 +7,9 @@ from typing import (
     AsyncGenerator,
     Awaitable,
     List,
-    Literal,
     Optional,
     Type,
     Union,
-    overload,
 )
 from uuid import uuid4
 
@@ -35,7 +33,6 @@ from muika.models import Resource
 
 from .. import (
     BaseLLM,
-    ModelCompletions,
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
@@ -264,16 +261,3 @@ class Gemini(BaseLLM):
         message.provider_data = {"gemini_content": Content(role="model", parts=parts).model_dump(mode="json")}
         reason = stop_reason(finish, has_tools=bool(message.tool_calls))
         yield ModelStreamCompletions(message=message, usage=usage, stop_reason=reason, succeed=reason != "filtered")
-
-    @overload
-    async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
-
-    @overload
-    async def ask(
-        self, request: ModelRequest, *, stream: Literal[True] = True
-    ) -> AsyncGenerator[ModelStreamCompletions, None]: ...
-
-    async def ask(
-        self, request: ModelRequest, *, stream: bool = False
-    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        return await self.run_conversation(request, stream=stream)

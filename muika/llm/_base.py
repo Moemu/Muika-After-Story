@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
@@ -43,7 +43,7 @@ class BaseLLM(ABC):
     """
     模型基类，所有模型加载器都必须继承于该类
 
-    推荐使用该基类中定义的方法构建模型加载器类，但无论如何都必须实现 `ask` 方法
+    内置提供者实现 request_step，共用 ask 的工具循环与用量记录。
     """
 
     def __init__(self, model_config: ModelConfig) -> None:
@@ -64,14 +64,12 @@ class BaseLLM(ABC):
 
         super().__init_subclass__(**kwargs)
 
-        # 1. Get the original 'ask' method from the new subclass
+        if "ask" not in cls.__dict__ and cls.ask is not BaseLLM.ask:
+            return
+
         original_ask = cls.ask
-
-        # 2. Wrap it with the decorator
         decorated_ask = record_plugin_usage(original_ask)
-
-        # 3. Replace the original method on the subclass with the decorated version
-        setattr(cls, "ask", decorated_ask)
+        cls.ask = decorated_ask
 
     def _require(self, *require_fields: str):
         """
@@ -205,7 +203,6 @@ class BaseLLM(ABC):
         self, request: "ModelRequest", *, stream: Literal[True] = True
     ) -> AsyncGenerator["ModelStreamCompletions", None]: ...
 
-    @abstractmethod
     async def ask(
         self, request: "ModelRequest", *, stream: bool = False
     ) -> Union["ModelCompletions", AsyncGenerator["ModelStreamCompletions", None]]:
@@ -217,4 +214,4 @@ class BaseLLM(ABC):
 
         :return: 模型输出体
         """
-        pass
+        return await self.run_conversation(request, stream=stream)

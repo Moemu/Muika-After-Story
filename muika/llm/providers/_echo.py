@@ -1,9 +1,7 @@
 from collections.abc import AsyncGenerator, Sequence
-from typing import Literal, Union, overload
 
 from .. import (
     BaseLLM,
-    ModelCompletions,
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
@@ -102,24 +100,3 @@ class Echo(BaseLLM):
         messages.append(user_content)
 
         return messages
-
-    @overload
-    async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
-
-    @overload
-    async def ask(
-        self, request: ModelRequest, *, stream: Literal[True] = True
-    ) -> AsyncGenerator["ModelStreamCompletions", None]: ...
-
-    async def ask(
-        self, request: ModelRequest, *, stream: bool = False
-    ) -> Union[ModelCompletions, AsyncGenerator["ModelStreamCompletions", None]]:
-        """
-        模型交互询问
-
-        :param request: 模型调用请求体
-        :param stream: 是否开启流式对话
-
-        :return: 模型输出体
-        """
-        return await self.run_conversation(request, stream=stream)

@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import Any, AsyncGenerator, List, Literal, Union, overload
+from typing import Any, AsyncGenerator, List
 
 import dashscope
 from dashscope.api_entities.dashscope_response import (
@@ -9,7 +9,6 @@ from dashscope.api_entities.dashscope_response import (
 
 from .. import (
     BaseLLM,
-    ModelCompletions,
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
@@ -242,16 +241,3 @@ class Dashscope(BaseLLM):
             output_tokens=response.usage.get("output_tokens", 0),
             cached_tokens=details.get("cached_tokens", 0),
         )
-
-    @overload
-    async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
-
-    @overload
-    async def ask(
-        self, request: ModelRequest, *, stream: Literal[True] = True
-    ) -> AsyncGenerator[ModelStreamCompletions, None]: ...
-
-    async def ask(
-        self, request: ModelRequest, *, stream: bool = False
-    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        return await self.run_conversation(request, stream=stream)

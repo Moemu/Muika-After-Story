@@ -50,8 +50,15 @@ def _response(message, finish_reason="stop"):
 
 
 @pytest.mark.parametrize("mode", ["step", "complete", "stream", "closed_stream"])
-async def test_usage_records_cumulative_tokens_and_original_owner(monkeypatch, db_session, session_ctx_factory, mode):
-    provider = _provider()
+@pytest.mark.parametrize("inherited", [False, True])
+async def test_usage_records_cumulative_tokens_and_original_owner(
+    monkeypatch, db_session, session_ctx_factory, mode, inherited
+):
+    class InheritedOpenai(Openai):
+        pass
+
+    provider_type = InheritedOpenai if inherited else Openai
+    provider = provider_type(ModelConfig(provider="openai", model_name="test", api_key="test"))
     monkeypatch.setattr(usage_wrapper, "get_session", lambda: session_ctx_factory(db_session))
     monkeypatch.setattr(usage_wrapper, "_get_caller_plugin_name", lambda: "original")
     monkeypatch.setattr(usage_wrapper, "get_name_from_config", lambda config: "test-model")

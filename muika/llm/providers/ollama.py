@@ -1,6 +1,6 @@
 import json
 from collections.abc import Sequence
-from typing import Any, AsyncGenerator, Literal, Union, overload
+from typing import Any, AsyncGenerator
 from uuid import uuid4
 
 import ollama
@@ -11,7 +11,6 @@ from muika.utils.logger import logger
 
 from .. import (
     BaseLLM,
-    ModelCompletions,
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
@@ -185,16 +184,3 @@ class Ollama(BaseLLM):
         yield ModelStreamCompletions(
             message=message, usage=usage, stop_reason=stop_reason(finish, has_tools=bool(message.tool_calls))
         )
-
-    @overload
-    async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
-
-    @overload
-    async def ask(
-        self, request: ModelRequest, *, stream: Literal[True] = True
-    ) -> AsyncGenerator[ModelStreamCompletions, None]: ...
-
-    async def ask(
-        self, request: ModelRequest, *, stream: bool = False
-    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        return await self.run_conversation(request, stream=stream)

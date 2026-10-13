@@ -2,7 +2,7 @@ import base64
 import wave
 from collections.abc import Sequence
 from io import BytesIO
-from typing import Any, AsyncGenerator, List, Literal, Union, overload
+from typing import Any, AsyncGenerator, List, Literal, Union
 
 import openai
 from openai import NOT_GIVEN, NotGiven
@@ -17,7 +17,6 @@ from muika.models import Resource
 
 from .. import (
     BaseLLM,
-    ModelCompletions,
     ModelConfig,
     ModelRequest,
     ModelStreamCompletions,
@@ -278,16 +277,3 @@ class Openai(BaseLLM):
         yield ModelStreamCompletions(
             message=message, usage=usage, resources=resources, stop_reason=reason, succeed=reason != "filtered"
         )
-
-    @overload
-    async def ask(self, request: ModelRequest, *, stream: Literal[False] = False) -> ModelCompletions: ...
-
-    @overload
-    async def ask(
-        self, request: ModelRequest, *, stream: Literal[True] = True
-    ) -> AsyncGenerator[ModelStreamCompletions, None]: ...
-
-    async def ask(
-        self, request: ModelRequest, *, stream: bool = False
-    ) -> Union[ModelCompletions, AsyncGenerator[ModelStreamCompletions, None]]:
-        return await self.run_conversation(request, stream=stream)
