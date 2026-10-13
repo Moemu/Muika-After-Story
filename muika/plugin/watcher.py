@@ -86,8 +86,9 @@ class PluginFileHandler(FileSystemEventHandler):
 
         if self._loop is not None:
             self._loop.call_soon_threadsafe(
-                asyncio.create_task,
-                self._dispatch(package_name, is_delete),
+                self._dispatch_sync,
+                package_name,
+                is_delete,
             )
         else:
             self._dispatch_sync(package_name, is_delete)
@@ -129,12 +130,6 @@ class PluginFileHandler(FileSystemEventHandler):
         if subdir.is_dir() and src.is_relative_to(subdir):
             return path_to_module_name(subdir, self._base_path)
         return None
-
-    async def _dispatch(self, package_name: str, is_delete: bool) -> None:
-        if is_delete:
-            self._manager.unload(package_name, origin="runtime")
-        else:
-            self._manager.reload(package_name, origin="runtime")
 
     def _dispatch_sync(self, package_name: str, is_delete: bool) -> None:
         if is_delete:
