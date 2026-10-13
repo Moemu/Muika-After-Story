@@ -263,8 +263,8 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fak
     agent._skill_manager = MagicMock()
     agent._skill_manager.render_prompt_section.return_value = ""
     monkeypatch.setattr("muika.core.agent.agent.generate_prompt_from_template", lambda *args: "system")
-    await agent.execute_command("test", MuikaState(), MagicMock())
-    assert "restored_probe" in {t.name for t in fake_model.requests[-1].tools}
+    request = agent.build_request("test", MuikaState())
+    assert "restored_probe" in {t.name for t in request.tools}
     assert fake.before[target] == []
 
 

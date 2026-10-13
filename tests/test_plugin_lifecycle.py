@@ -725,8 +725,8 @@ async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monk
     monkeypatch.setattr("muika.core.agent.agent.generate_prompt_from_template", lambda *args: "system")
 
     async def visible():
-        await agent.execute_command("test", MuikaState(), MagicMock())
-        return {t.name for t in fake.requests[-1].tools}
+        request = agent.build_request("test", MuikaState())
+        return {t.name for t in request.tools}
 
     assert "visible_probe" not in await visible()
     load_plugin("visible_probe")

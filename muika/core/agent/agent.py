@@ -11,30 +11,13 @@ from muika.config import get_model_config, mas_config
 
 # 导入工具模块以完成注册。
 from muika.core.actions import tools as _tools  # noqa: F401
-from muika.core.executor import Executor
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest, load_model
 from muika.llm.loader import refresh_model
-from muika.llm.utils.thought_processor import general_processor
-from muika.models import Resource
 from muika.plugin.func_call import get_tool_list
-from muika.plugin.func_call.context import tool_context
 from muika.plugin.skills import get_skill_manager
 from muika.template.loader import generate_prompt_from_template
-from muika.utils.logger import logger
-
-from .report import parse_report
-
-
-def _parse_agent_report(text: str) -> str:
-    report = parse_report(text)
-    if report:
-        body = report.describe()
-        return body if report.status == "completed" else f"Agent blocked: {body}"
-    _, visible = general_processor(text)
-    last_output = visible.strip() or "(empty response)"
-    return f"Agent stopped before reporting completion. Last output: {last_output}"
 
 
 class Agent:
@@ -81,38 +64,3 @@ class Agent:
             f"allowed file roots={mas_config.fs_allowed_paths}."
         )
         return ModelRequest(prompt=f"Command: {command}", system=system, tools=get_tool_list(), purpose="agent_step")
-
-    async def execute_command(
-        self,
-        command: str,
-        state: MuikaState,
-        executor: Executor,
-    ) -> tuple[str, list[Resource]]:
-        """调用模型执行行动意图，返回执行报告和工具资源。"""
-        async with self.action_lock:
-            return await self._execute_command(command, state, executor)
-
-    async def _execute_command(self, command: str, state: MuikaState, executor: Executor) -> tuple[str, list[Resource]]:
-        logger.debug(f"[Agent] Executing command: {command!r}")
-
-        with tool_context(state, executor, review_context=command) as context:
-            request = self.build_request(command, state)
-
-            try:
-                completion = await self.model.ask(request=request, stream=False)
-                if not completion.succeed:
-                    raise RuntimeError(completion.text)
-                report = _parse_agent_report(completion.text)
-            except Exception as e:
-                logger.error(f"[Agent] LLM error: {e}")
-                return (f"I encountered an error while executing the command: {e}", [])
-
-            # 收集工具执行过程中产生的资源（图片等）
-            resources = context.resources
-
-            if report:
-                logger.debug(f"[Agent] Report ready ({len(report)} chars): {report[:120]!r}")
-            else:
-                logger.debug("[Agent] Empty report (silent operation).")
-
-            return (report, resources)

@@ -1,14 +1,17 @@
 """行动真实性：人格委派 → Agent 执行真实工具 → 磁盘副作用 → 基于结果的可见回复。"""
 
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
 from muika.core.agent.task_store import TaskStore
+from muika.core.state import MuikaState
 from muika.llm import ModelRequest
 from muika.llm._schema import ToolCall
+from muika.plugin.func_call.context import get_dependencies
 
 pytestmark = pytest.mark.e2e
 
@@ -105,3 +108,48 @@ async def test_delegated_file_write_is_grounded(core_app_factory, recorder, monk
     # 全链路恰好两轮可见回复，剧本耗尽，无多余 LLM 调用
     assert app.sent == [ack, final]
     assert app.scripted.pending_turns == 0
+    assert get_dependencies()[MuikaState] is None
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "acknowledgement", "model_error"])
+async def test_unfinished_agent_work_is_reported_truthfully(core_app_factory, recorder, monkeypatch, outcome):
+    turns = [
+        ScriptedTurn(when="[User]", name="delegate", text="等我检查一下。<agent>检查保存的诗稿。</agent>"),
+        ScriptedTurn(when="[Action result]", name="unfinished", text="这次还没能检查完，诗稿仍留在那里。"),
+    ]
+    if outcome == "blocked":
+        turns.append(
+            ScriptedTurn(
+                when=_is_agent_request,
+                name="blocked",
+                text='<agent_result status="blocked">'
+                + json.dumps({"summary": "Cannot access the draft.", "remaining": ["Read the draft."]})
+                + "</agent_result>",
+            )
+        )
+    elif outcome == "acknowledgement":
+        turns.extend(
+            ScriptedTurn(when=_is_agent_request, name=f"ack-{index}", text="好的，我先检查。") for index in range(2)
+        )
+    app = await core_app_factory(turns=turns)
+    if outcome == "model_error":
+        monkeypatch.setattr(app.scripted, "step", AsyncMock(side_effect=RuntimeError("model unavailable")))
+    await app.start()
+    await app.user_says("帮我检查保存的诗稿。")
+    assert_clean_visible(await app.next_reply())
+    assert_clean_visible(await app.next_reply())
+    await app.wait_processed("agent_task")
+    (task,) = await TaskStore().load()
+    assert task.status == ("failed" if outcome == "model_error" else "blocked")
+    if outcome == "blocked":
+        assert task.report.summary == "Cannot access the draft."
+        assert task.report.remaining == ["Read the draft."]
+    else:
+        assert task.report is None
+        if outcome == "model_error":
+            assert "model unavailable" in task.error
+        else:
+            assert task.acknowledgement_retry
+    assert get_dependencies()[MuikaState] is None
+    assert app.scripted.pending_turns == 0
+    recorder.record("unfinished_action", outcome=outcome, status=task.status, error=task.error)

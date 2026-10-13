@@ -22,17 +22,6 @@ class AgentReport(BaseModel):
     verification: list[str] = Field(default_factory=list)
     remaining: list[str] = Field(default_factory=list)
 
-    def describe(self) -> str:
-        parts = [self.summary]
-        for label, values in (
-            ("Completed", self.completed),
-            ("Verified", self.verification),
-            ("Remaining", self.remaining),
-        ):
-            if values:
-                parts.append(label + ":\n" + "\n".join(f"- {item}" for item in values))
-        return "\n\n".join(parts)
-
 
 def parse_report(text: str) -> AgentReport | None:
     """解析报告标签；旧模板的纯文本正文保留为摘要。"""
