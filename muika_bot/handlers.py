@@ -144,16 +144,8 @@ def _init_ipc_client() -> IpcClient:
     """Initialize the IPC client and register Core -> Bot message handlers."""
 
     @_ipc_client.on_message("send_message")
-    async def _handle_send_message(data: dict) -> None:
-        content = data.get("content", "")
-        if content:
-            await _send_message(content)
-        resources = data.get("resources", [])
-        if resources:
-            await _render_resources(resources)
-
     @_ipc_client.on_message("command_result")
-    async def _handle_command_result(data: dict) -> None:
+    async def _handle_send_message(data: dict) -> None:
         content = data.get("content", "")
         if content:
             await _send_message(content)
