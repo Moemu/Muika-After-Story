@@ -12,16 +12,6 @@ from muika.core.memory import MemoryManager
 from muika.core.state import MuikaState
 from muika.utils.logger import logger
 
-REFLECTION_HOUR = 5
-
-
-def seconds_until_reflection(now: datetime) -> float:
-    """返回距下一次本地时间 05:00 的秒数。"""
-    target = now.replace(hour=REFLECTION_HOUR, minute=0, second=0, microsecond=0)
-    if target < now:
-        target += timedelta(days=1)
-    return max(0.0, (target - now).total_seconds())
-
 
 class ReflectionAgent:
     """拥有日记整理的串行入口和失败重试间隔。"""

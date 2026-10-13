@@ -8,14 +8,8 @@ import pytest
 from muika.config import mas_config
 from muika.core.memory import MemoryManager
 from muika.core.memory_models import DreamResult
-from muika.core.reflection import ReflectionAgent, seconds_until_reflection
+from muika.core.reflection import ReflectionAgent
 from muika.core.state import MuikaState
-
-
-def test_daily_boundary():
-    assert seconds_until_reflection(datetime(2026, 9, 1, 4)) == 3600
-    assert seconds_until_reflection(datetime(2026, 9, 1, 5)) == 0
-    assert seconds_until_reflection(datetime(2026, 9, 1, 6)) == 23 * 3600
 
 
 @pytest.fixture
