@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import warnings
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import replace
@@ -48,6 +49,16 @@ from muika.llm.context import (
 )
 from muika.models import Resource
 from muika.utils.logger import logger
+
+from .constants import (
+    ACTIVITY_HISTORY_DAYS,
+    ACTIVITY_MATCH_WINDOW,
+    ACTIVITY_MIN_DAYS,
+    ACTIVITY_MIN_MATCHING_DAYS,
+    QUIET_END_HOUR,
+    QUIET_START_HOUR,
+    SESSION_IDLE_TIMEOUT,
+)
 
 if TYPE_CHECKING:
     from muika.llm import BaseLLM
@@ -112,6 +123,7 @@ class MemoryManager:
     def __init__(self) -> None:
         self.recent_turns: deque[SessionTurn] = deque()
         self.last_dialogue_at: datetime | None = None
+        self._dialogue_times: list[tuple[datetime, str]] = []
         self.facts: dict[int, Fact] = {}
         self.snapshot = MemorySnapshot()
         self._lock = asyncio.Lock()
@@ -129,6 +141,29 @@ class MemoryManager:
     @property
     def has_history(self) -> bool:
         return self.snapshot.first_interaction_at is not None or bool(self.facts)
+
+    def can_initiate_at(self, now: datetime) -> bool:
+        """按进程本地时间和历史独立开场，判断是否适合主动发起对话。"""
+        if QUIET_END_HOUR <= now.hour < QUIET_START_HOUR:
+            return True
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = today - timedelta(days=ACTIVITY_HISTORY_DAYS)
+        context_start = start - timedelta(seconds=SESSION_IDLE_TIMEOUT)
+        active_days = set()
+        matching_days = set()
+        previous: datetime | None = None
+        day_seconds = timedelta(days=1).total_seconds()
+        for stamp, kind in self._dialogue_times:
+            if not context_start <= stamp < today:
+                continue
+            if kind == "user" and stamp >= start:
+                active_days.add(stamp.date())
+                if previous is None or (stamp - previous).total_seconds() >= SESSION_IDLE_TIMEOUT:
+                    distance = (stamp - now).total_seconds() % day_seconds
+                    if min(distance, day_seconds - distance) <= ACTIVITY_MATCH_WINDOW:
+                        matching_days.add(stamp.date())
+            previous = stamp
+        return len(active_days) >= ACTIVITY_MIN_DAYS and len(matching_days) >= ACTIVITY_MIN_MATCHING_DAYS
 
     async def _save_snapshot(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
         await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
@@ -155,8 +190,22 @@ class MemoryManager:
                         ExperienceORM.kind.in_(DIALOGUE_KINDS),
                     )
                 )
+                cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+                    days=ACTIVITY_HISTORY_DAYS, seconds=SESSION_IDLE_TIMEOUT
+                )
+                dialogue_times = sorted(
+                    {
+                        (local_time(stamp), kind)
+                        for stamp, kind in await db.execute(
+                            select(ExperienceORM.occurred_at, ExperienceORM.kind).where(
+                                ExperienceORM.kind.in_(DIALOGUE_KINDS), ExperienceORM.occurred_at >= cutoff.isoformat()
+                            )
+                        )
+                    }
+                )
                 await self._save_snapshot(db, snapshot)
             self.snapshot, self.facts = snapshot, facts
+            self._dialogue_times = dialogue_times
             self.last_dialogue_at = local_time(last_dialogue_at) if last_dialogue_at else None
             if previous_session != snapshot.session.session_id:
                 self.recent_turns.clear()
@@ -310,6 +359,15 @@ class MemoryManager:
             self.snapshot = snapshot
             if kind in DIALOGUE_KINDS:
                 self.last_dialogue_at = max(self.last_dialogue_at, now) if self.last_dialogue_at else now
+                cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+                    days=ACTIVITY_HISTORY_DAYS, seconds=SESSION_IDLE_TIMEOUT
+                )
+                self._dialogue_times = [(stamp, role) for stamp, role in self._dialogue_times if stamp >= cutoff]
+                if now >= cutoff:
+                    entry = (now, kind)
+                    index = bisect_left(self._dialogue_times, entry)
+                    if index == len(self._dialogue_times) or self._dialogue_times[index] != entry:
+                        self._dialogue_times.insert(index, entry)
             if turn is not None:
                 self.recent_turns.append(turn)
             return row_id

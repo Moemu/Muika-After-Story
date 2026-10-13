@@ -160,7 +160,7 @@ class Muika:
         if event.type != "time_tick":
             return "emotional"
 
-        if self.has_active_session:
+        if self.has_active_session or not self.memory.can_initiate_at(datetime.now()):
             return None
 
         persistent = self.memory.persistent
@@ -498,7 +498,11 @@ class Muika:
             logger.debug("[Topic] No available seed -- skipping topic pipeline this tick.")
             return
         expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
-        if not self.event_queue.empty() or self.memory.last_dialogue_at != last_dialogue_at:
+        if (
+            not self.event_queue.empty()
+            or self.memory.last_dialogue_at != last_dialogue_at
+            or not self.memory.can_initiate_at(datetime.now())
+        ):
             if isinstance(topic, EventTopic):
                 self.topic_manager.enqueue_event(topic)
             return
@@ -514,7 +518,11 @@ class Muika:
             return
         if parsed.target:
             logger.debug(f"[Topic] Routing to target={parsed.target!r}")
-        if not self.event_queue.empty() or self.memory.last_dialogue_at != last_dialogue_at:
+        if (
+            not self.event_queue.empty()
+            or self.memory.last_dialogue_at != last_dialogue_at
+            or not self.memory.can_initiate_at(datetime.now())
+        ):
             if isinstance(topic, EventTopic):
                 self.topic_manager.enqueue_event(topic)
             return
@@ -568,12 +576,20 @@ class Muika:
                     task_context="\n".join(filter(None, (self.agent_tasks.describe(), self.restart.describe()))),
                 )
                 resources = context.resources
-            if event.type == "time_tick" and (self.has_active_session or not self.event_queue.empty()):
+            if event.type == "time_tick" and (
+                self.has_active_session
+                or not self.event_queue.empty()
+                or not self.memory.can_initiate_at(datetime.now())
+            ):
                 return
             parsed = self._parse_reply_tags(reply)
             for update in parsed.state_updates:
                 await self.memory.update_state(update)
-            if event.type == "time_tick" and (self.has_active_session or not self.event_queue.empty()):
+            if event.type == "time_tick" and (
+                self.has_active_session
+                or not self.event_queue.empty()
+                or not self.memory.can_initiate_at(datetime.now())
+            ):
                 return
             silent_turn = parsed.do_nothing
             if silent_turn:

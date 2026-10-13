@@ -34,6 +34,15 @@ def sandbox(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def daytime_initiative(monkeypatch):
+    """将非时段场景的主动开场判断固定在本地正午。"""
+    from muika.core.memory import MemoryManager
+
+    original = MemoryManager.can_initiate_at
+    monkeypatch.setattr(MemoryManager, "can_initiate_at", lambda memory, now: original(memory, now.replace(hour=12)))
+
+
+@pytest.fixture
 def approved_review(monkeypatch):
     """用明确通过的审查结论隔离非审查测试中的模型调用。"""
     from unittest.mock import AsyncMock

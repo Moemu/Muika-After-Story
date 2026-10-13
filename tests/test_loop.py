@@ -17,6 +17,8 @@ from muika.llm import ModelCompletions, ModelConfig, ModelRequest
 from muika.llm.context import ContextCompactor
 from muika.models import Message
 
+pytestmark = pytest.mark.usefixtures("daytime_initiative")
+
 
 def test_restart_tag_is_private_and_never_taken_from_inner_monologue():
     tag = '<restart patch_id="20260913_120000_abcdef12">'

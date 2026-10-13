@@ -16,7 +16,7 @@ from muika.ipc.sync_models import SyncEntry
 from muika.ipc.sync_store import SyncStore
 from muika.models import AdapterInfo
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.e2e, pytest.mark.usefixtures("daytime_initiative")]
 
 
 @pytest.mark.parametrize("drive", ["boredom", "curiosity", "loneliness", "dissonance"])

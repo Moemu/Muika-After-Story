@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("daytime_initiative")
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
