@@ -1,6 +1,10 @@
 """MASConfig 的旧字段迁移与联网搜索配置默认值。"""
 
+import pytest
+from pydantic import ValidationError
+
 from muika.config import MASConfig
+from muika.llm import ModelConfig
 
 
 def _make(**kwargs) -> MASConfig:
@@ -33,3 +37,21 @@ def test_web_search_disabled_by_default():
     config = _make()
     assert config.web_search_provider is None
     assert config.web_search_api_key == ""
+
+
+@pytest.mark.parametrize(
+    "field, valid, invalid",
+    [
+        ("retry_attempts", [1, 10], [0, 11]),
+        ("congestion_retry_attempts", [1, 10], [0, 11]),
+        ("request_timeout_seconds", [0.01, 90.0], [0, -1]),
+        ("context_window", [1024, 131072], [0, 1023]),
+    ],
+)
+def test_model_request_limits(field, valid, invalid):
+    for value in valid:
+        config = ModelConfig(provider="_echo", **{field: value})
+        assert config.model_dump()[field] == value
+    for value in invalid:
+        with pytest.raises(ValidationError):
+            ModelConfig(provider="_echo", **{field: value})

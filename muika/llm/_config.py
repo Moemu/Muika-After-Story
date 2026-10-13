@@ -1,7 +1,7 @@
 from importlib.util import find_spec
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ModelConfig(BaseModel):
@@ -12,7 +12,7 @@ class ModelConfig(BaseModel):
 
     max_tokens: int = 4096
     """最大回复 Tokens """
-    context_window: int = 131072
+    context_window: int = Field(default=131072, ge=1024)
     """模型服务的上下文预算，包含输入与输出。"""
     temperature: float = 0.75
     """模型的温度系数"""
@@ -28,11 +28,11 @@ class ModelConfig(BaseModel):
     """模型的重复惩罚"""
     stream: bool = False
     """是否使用流式输出"""
-    retry_attempts: int = 3
+    retry_attempts: int = Field(default=3, ge=1, le=10)
     """普通传输错误的总尝试次数"""
-    congestion_retry_attempts: int = 10
+    congestion_retry_attempts: int = Field(default=10, ge=1, le=10)
     """拥堵错误的总尝试次数"""
-    request_timeout_seconds: float = 90.0
+    request_timeout_seconds: float = Field(default=90.0, gt=0)
     """单次模型请求的超时时间"""
     stream_fallback_on_timeout: bool = True
     """非流式请求超时后是否改用流式传输"""
@@ -41,17 +41,10 @@ class ModelConfig(BaseModel):
     content_security: bool = False
     """是否启用内容安全"""
 
-    model_path: str = ""
-    """本地模型路径"""
-    adapter_path: str = ""
-    """基于 model_path 的微调模型或适配器路径"""
-
     model_name: str = ""
     """所要使用模型的名称"""
     api_key: str = ""
     """在线服务的 API KEY"""
-    api_secret: str = ""
-    """在线服务的 api secret """
     api_host: str = ""
     """自定义 API 地址"""
 
@@ -106,31 +99,3 @@ class ModelConfig(BaseModel):
             raise ValueError(f"指定的模型加载器 '{provider}' 不存在于 llm 目录中")
 
         return provider
-
-    @field_validator("retry_attempts")
-    @classmethod
-    def check_retry_attempts(cls, value: int) -> int:
-        if not 1 <= value <= 10:
-            raise ValueError("retry_attempts must be between 1 and 10")
-        return value
-
-    @field_validator("congestion_retry_attempts")
-    @classmethod
-    def check_congestion_retry_attempts(cls, value: int) -> int:
-        if not 1 <= value <= 10:
-            raise ValueError("congestion_retry_attempts must be between 1 and 10")
-        return value
-
-    @field_validator("request_timeout_seconds")
-    @classmethod
-    def check_request_timeout(cls, value: float) -> float:
-        if value <= 0:
-            raise ValueError("request_timeout_seconds must be greater than zero")
-        return value
-
-    @field_validator("context_window")
-    @classmethod
-    def check_context_window(cls, value: int) -> int:
-        if value < 1024:
-            raise ValueError("context_window must be at least 1024")
-        return value
