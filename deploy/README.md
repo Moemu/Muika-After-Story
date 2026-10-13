@@ -1,194 +1,136 @@
-# QQ Bot 部署指南
+# Bot 部署指南
 
-通过 NapCatQQ + OneBot v11 协议将 Muika 接入 QQ。
+MAS 以完整 Bot 项目提供 NoneBot 接入。Core 管理对话、记忆和行动；Bot 连接聊天平台，并通过 IPC 与 Core 通信。
+默认镜像包含 OneBot v11，以及 FastAPI、HTTPX 和 WebSocket 驱动依赖。Telegram 等平台按需安装适配器，无需运行 NapCat。
 
-电脑关机后仍需继续聊天时，请先阅读[多设备部署指南](https://mas.snowy.moe/guide/multi-device)。
-本页保留 QQ 接入的安装步骤；多设备配置使用指南中的聊天入口地址。
+电脑关闭后仍需继续聊天时，请先阅读[多设备部署指南](https://mas.snowy.moe/guide/multi-device)。
+本页命令均在仓库根目录执行，需要 Docker 和 Docker Compose v2。
 
-## 架构
+## 准备 Core 和配置
 
-```
-宿主机 (Windows)
-├── Muika Core                             ── AI 引擎（LLM / 记忆 / Agent Agent）
-│   python -m muika.ipc.bootstrap
-│   ws://0.0.0.0:8765/ws
-│
-└── Docker  (WSL2 / Other Linux Server)
-    ├── muika-napcat                       ── QQ 协议实现（NapCatQQ）
-    │   镜像: mlikiowa/napcat-docker:latest
-    │   端口: 3000(HTTP) / 3001(WS) / 6099(WebUI)
-    │
-    └── muika-bot                 ── NoneBot
-        镜像: deploy/bot.Dockerfile (构建)
-        nonebot-adapter-onebot  ←→  napcat:3001
-        IPC Client  ←→  host.docker.internal:8765
-```
-
-**消息流：**
-
-```
-用户 → [QQ] → NapCat → OneBot WS → muika-bot → IPC → Core
-Core → IPC → muika-bot → OneBot API → NapCat → [QQ] → 用户
-Core → (主动消息, 孤独感/话题驱动) → IPC → muika-bot → NapCat → [QQ]
-```
-
-## 前置条件
-
-- Linux 服务器（带 Docker + Docker Compose v2）
-- Python 3.10+
-- 一个可用的 QQ 号（用于 NapCat 登录）
-
----
-
-## 部署流程
-
-### 搭建 Core 环境
-
-Core 是 Muika 的 AI 引擎，**必须先于 Bot 启动**。
+按[快速开始](https://mas.snowy.moe/guide/getting-started#manual)准备 Core、模型配置和项目根目录的 `.env`，先启动 Core：
 
 ```bash
-# 1. 克隆项目并安装依赖
-cd Muika-After-Story
-pip install -e .[standard]
-
-# 2. 配置 Core 的运行环境
-#    编辑或创建 .env 文件，至少填入 LLM 模型配置
-
-# 3. 启动 Core
-python -m muika.ipc.bootstrap
+uv run --no-sync python core_main.py
 ```
 
-Core 首次启动时会**自动生成 `IPC_SECRET`**，写入项目根目录的 `.env` 文件。记下这个值，下一步会用到：
+Core 首次启动时生成缺失的 `IPC_SECRET`，并写入 `.env`。Bot 必须使用相同密钥。
+若 Core 在宿主机上，容器使用以下地址；Core 需监听容器可访问的接口，并允许该连接：
+
+```dotenv
+CORE_WS_URL=ws://host.docker.internal:8765/ws
+```
+
+若 Core 在其他服务器或通过 Gateway 提供接入，填写对应聊天入口地址。
+Compose 将 `.env` 作为环境变量和只读文件传入 Bot。文件挂载供 NoneBot 读取适配器自定义配置；`data/` 保存运行数据和协议确认记录。
+
+## 选择平台
+
+### QQ：默认 OneBot v11
+
+在 `.env` 中填写你的 QQ 号：
+
+```dotenv
+MASTER_ID=123456789
+SUPERUSERS=["123456789"]
+ENABLE_ADAPTERS=["nonebot.adapters.onebot.v11"]
+CLIENT_NAME=qq
+```
+
+合并 QQ 配置，构建 Bot 并启动 NapCat：
 
 ```bash
-grep IPC_SECRET .env
-# 输出示例: IPC_SECRET=abc123...
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/qq.compose.yml build muika-bot
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/qq.compose.yml up -d napcat
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/qq.compose.yml run --rm --no-deps muika-bot python -m muika.agreement confirm
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/qq.compose.yml up -d muika-bot
 ```
 
-> Core 已运行时不要关闭终端，另开一个终端执行后续操作。
-> 生产环境建议用 systemd / pm2 管理 Core 进程。
+在 Docker 宿主机打开 `http://127.0.0.1:6099/webui` 并登录 QQ。远程管理时，可通过 SSH 转发该端口。
+在 NapCat 中启用 OneBot v11 WebSocket 服务端，监听 `0.0.0.0:3001`。Bot 通过 `ws://napcat:3001` 连接它。
+如果设置 OneBot 访问令牌，Bot 的 `ONEBOT_ACCESS_TOKEN` 需与 NapCat 一致。
 
----
+QQ 覆盖文件只为 NapCat 发布 WebUI 端口，并将账号、配置和插件保存在 `deploy/napcat/` 下。
+只有 `MASTER_ID` 的消息会进入 Core；群聊需要 @Muika。当前回复和主动消息均发到主人的私聊。
 
-### 配置 QQ Bot 环境
+### Telegram：按需添加适配器
+
+在 `.env` 中填写以下内容，并保留已有的 `IPC_SECRET` 和 `CORE_WS_URL`：
+
+```dotenv
+MASTER_ID=你的Telegram数字用户ID
+SUPERUSERS=["你的Telegram数字用户ID"]
+ENABLE_ADAPTERS=["nonebot.adapters.telegram"]
+DRIVER=~fastapi+~httpx
+TELEGRAM_BOTS=[{"token":"你的BotToken"}]
+CLIENT_NAME=telegram
+BOT_EXTRA_DEPENDENCIES=nonebot-adapter-telegram==0.1.0b20
+```
+
+构建并启动：
 
 ```bash
-# 1. 复制环境变量模板
-cp .env.qq .env.qq.local
-
-# 2. 编辑 .env.qq.local，填写实际值：
-#    - MASTER_ID     → 你的 QQ 号
-#    - SUPERUSERS    → 同上
-#    - IPC_SECRET    → 从 Core 的 .env 中复制过来的值
-#    - 其他项保持默认即可
+docker compose --env-file .env -f deploy/docker-compose.yml build muika-bot
+docker compose --env-file .env -f deploy/docker-compose.yml run --rm muika-bot python -m muika.agreement confirm
+docker compose --env-file .env -f deploy/docker-compose.yml up -d muika-bot
 ```
 
-> `.env.qq.local` 是本地配置，不会被 git 追踪（已在 `.gitignore` 中）。
-> 也可直接用 `.env.qq` 编辑，但注意不要提交密钥到仓库。
+此示例使用长轮询，无需对外开放 Bot 端口。Webhook、代理等选项见 [Telegram 适配器手册](https://github.com/nonebot/adapter-telegram/blob/beta/MANUAL.md)。
 
----
+### 其他 NoneBot 适配器
 
-### 启动 NapCat 和 muika-bot 适配器
+三个步骤分别配置：
+
+1. 用 `BOT_EXTRA_DEPENDENCIES` 指定要安装的包，多个包以空格分隔，建议固定版本。更改后重新构建镜像。
+2. 用 `ENABLE_ADAPTERS` 指定已安装适配器的模块名，例如 `["nonebot.adapters.telegram"]`。
+3. 按适配器手册配置 `DRIVER`、平台凭据和连接参数。驱动所需的可选依赖也放入构建依赖。
+
+`ENABLE_ADAPTERS` 必须是非空 JSON 字符串数组；省略时加载 OneBot v11。加载配置不会安装包或切换驱动。
+适配器还需受 Alconna 通用消息接口支持；能被 NoneBot 注册不代表所有平台功能都可用。
+`BOT_EXTRA_DEPENDENCIES` 只传公开依赖规格，不用于传递凭据；Token 等配置留在运行时 `.env` 中。
+镜像默认依赖使用仓库的 `uv.lock`。额外包与这些版本冲突时，构建会报错；需先在实例源码中用 `uv add` 更新并验证锁文件，再构建镜像。
+
+直接构建镜像时，可使用相同构建参数：
 
 ```bash
-cd deploy
-docker compose up -d
+docker build -f deploy/bot.Dockerfile --build-arg 'BOT_EXTRA_DEPENDENCIES=nonebot-adapter-telegram==0.1.0b20' -t muika-bot:telegram .
 ```
 
-这会构建 bot 镜像并启动 Napcat。
+## 源码运行
 
-NapCat 容器启动后将暴露 `6099` 作为 NapCat WebUI 管理后台
+当前 wheel 只包含 Core 包。运行 NoneBot Bot 需保留仓库中的 `bot.py` 和 `muika_bot/`。
+安装默认依赖后，用 `uv add` 保存实例额外依赖：
 
-**首次使用需要登录 QQ：**
-
-在浏览器打开 `http://<服务器IP>:6099/webui`，用手机 QQ 扫码登录。
-
-> 首次登录后 NapCat 可能自动退出，再次执行 `docker compose restart` 即可。
-> 登录成功后的会话会持久化到 `deploy/napcat/QQ/`，下次启动无需重复扫码。
-
-Bot 在容器内通过 `host.docker.internal:8765` 连接宿主机 Core。
-
----
-
-## 配置参考
-
-### `.env.qq` 关键配置项
-
-| 变量 | 说明 | Docker 默认值 | 宿主机默认值 |
-|------|------|---------------|-------------|
-| `MASTER_ID` | 主人的 QQ 号 | **必填** | **必填** |
-| `IPC_SECRET` | 与 Core 的通信密钥 | 从 Core 的 `.env` 中复制 | 同左 |
-| `CORE_WS_URL` | Core 的 WebSocket 地址 | `ws://host.docker.internal:8765/ws` | `ws://127.0.0.1:8765/ws` |
-| `ONEBOT_WS_URLS` | NapCat WebSocket 地址 | `["ws://napcat:3001"]` | `["ws://localhost:3001"]` |
-
-### NapCat 持久化数据
-
-```
-deploy/napcat/
-├── QQ/          # QQ 账号数据（登录态、缓存）—— 重启不丢
-├── config/      # NapCat 配置文件
-└── plugins/     # NapCat 插件
+```bash
+uv sync --extra nonebot
+uv add --optional nonebot "nonebot-adapter-telegram==0.1.0b20"
+uv sync --extra nonebot
+uv run --no-sync python -m muika.agreement confirm
+uv run --no-sync python bot.py
 ```
 
----
+`uv add` 修改当前实例的 `pyproject.toml` 和 `uv.lock`；后续同步环境会保留这些依赖。
+仅用 `uv pip install` 临时安装的包可能被下次 `uv sync` 移除。使用 pip 时，将额外依赖记录在实例的依赖文件中。
+Core 和 Bot 共用源码环境时，同步时还需保留 Core 所需的 `standard` 等可选依赖。
 
-## IPC_SECRET 说明
+## 更新与排查
 
-| 场景 | 做法 |
-|------|------|
-| **全新部署** | Core 首次启动时自动生成 `IPC_SECRET` 并写入 `.env`。将 `.env` 中的值复制到 `.env.qq.local` 的对应字段 |
-| **已有 Core** | `.env` 中的 `IPC_SECRET` 已经存在，直接复制即可 |
-| **手动指定** | 在启动 Core **之前**，在 `.env` 中填入自定义的 `IPC_SECRET=xxxx`。Core 会使用这个值而不会自动生成。然后在 `.env.qq.local` 中使用同样的值 |
+修改源码或依赖后，重新执行对应平台的构建命令，再运行 `up -d muika-bot`。
+QQ 命令保留两个 `-f` 参数。查看日志：
 
-Core 和 Bot 的 `IPC_SECRET` **必须一致**，否则 Bot 无法连接 Core。
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml logs -f muika-bot
+```
 
----
-
-## 群聊说明
-
-- 只有 `MASTER_ID` 的 QQ 号在群里 @Muika 会得到响应
-- 群内其他人 @Muika 会被忽略
-- 回复会发到群内，而不是私聊
-- Muika 的主动消息（孤独感/话题驱动）会发到**上一次对话所在的位置**（群聊或私聊）
-  - 如果从未对话过，主动消息发到私聊
-  - 如果想切换对话位置，在新的位置发一条消息即可
+Bot 启动失败时，先按日志检查配置数组、适配器包和驱动依赖。
+IPC 连接失败时，检查 `CORE_WS_URL`、Core 的监听地址和双方的 `IPC_SECRET`；Core 健康检查地址为 `/health`。
+平台连接后，用 `MASTER_ID` 对应账号发一条私聊，确认回复能通过平台返回。
+删除容器时保留 `data/` 和 `deploy/napcat/`，升级不会替换其中的运行数据。
 
 ## Core 退出
 
 Core 收到首次 Ctrl+C 或 SIGTERM 后，会停止接入并等待对话摘要和资源清理。
-启动期间收到停止请求也会进入清理。监督进程最多等待 180 秒；再次收到停止信号时立即强制退出。
-强制退出可能使本次对话摘要无法保存。
+监督进程最多等待 180 秒；再次收到停止信号时立即强制退出，可能使本次摘要无法保存。
 
-`multi-device.compose.yml` 为 Core 设置了 190 秒退出宽限期。使用该文件执行 `docker compose stop core`
-会等待正常退出。单独运行 Core 容器时，使用 `docker stop --time 190 <容器名>`，为清理保留同样的时间。
-SIGKILL 无法触发退出清理。
-
-## 注意事项
-
-1. **QQ 号风控**：使用账号协议（非官方 Bot API）的机器人有封号风险。建议使用小号
-2. **扫码登录时效**：NapCat 的 QQ 登录态可能过期，需要定期重新扫码
-3. **Core 先启动**：确保 Core 在 muika-bot 之前启动，否则 Bot 会等待重连
-4. **日志查看**：`docker compose logs -f muika-bot` 查看 Bot 日志，`docker compose logs -f napcat` 查看 NapCat 日志
-5. **IPC 连接失败**：确认 `CORE_WS_URL` 和 `IPC_SECRET` 都配置正确
-
-## 故障排查
-
-**Bot 无法连接 Core：**
-```bash
-# 确认 Core 正在运行
-curl http://localhost:8765/health
-
-# 确认 docker 可访问宿主机端口
-docker compose exec muika-bot curl http://host.docker.internal:8765/health
-```
-
-**NapCat 无法登录：**
-```bash
-# 查看 NapCat 日志
-docker compose logs napcat
-# 打开 WebUI http://<ip>:6099/webui 扫码
-```
-
-**Bot 日志显示 "Ignored non-master message"：**
-- 确认 `.env.qq` 中 `MASTER_ID` 设置正确
-- 确认 `SUPERUSERS` 也包含同样的 QQ 号
+`multi-device.compose.yml` 为 Core 设置了 190 秒退出宽限期。
+单独运行 Core 容器时，使用 `docker stop --time 190 <容器名>`，为清理保留同样的时间。SIGKILL 无法触发退出清理。

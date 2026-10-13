@@ -16,12 +16,18 @@ RUN python -m venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
 # 先复制 pyproject.toml 以充分利用 Docker 层缓存
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY muika/ ./muika/
 
 # 安装 muika 包（含 nonebot 额外依赖）
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install ".[nonebot]"
+RUN /usr/local/bin/pip install uv && \
+    uv export --frozen --extra nonebot --no-dev --no-hashes --no-emit-project -o /tmp/bot-requirements.txt && \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -r /tmp/bot-requirements.txt ".[nonebot]"
+
+ARG BOT_EXTRA_DEPENDENCIES=""
+RUN if [ -n "$BOT_EXTRA_DEPENDENCIES" ]; then \
+    pip install -c /tmp/bot-requirements.txt ${BOT_EXTRA_DEPENDENCIES}; fi
 
 
 # ---- 运行阶段 ----
