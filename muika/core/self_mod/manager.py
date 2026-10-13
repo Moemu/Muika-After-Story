@@ -144,7 +144,7 @@ class SelfModManager:
             action="rollback",
             reason=f"Reverted {rel} (target revision #{target_id})",
             before_path=(
-                self._write_snapshot_text(rel, current_text, suffix=".pre_revert") if current_text is not None else None
+                self._write_snapshot(resolved, current_text, suffix=".pre_revert") if current_text is not None else None
             ),
             after_path=after_path_rel,
             source="self",
@@ -227,32 +227,10 @@ class SelfModManager:
             logger.error(f"[SelfMod] Skill registry refresh failed: {exc}")
             return f" Skill registry refresh failed: {exc}."
 
-    def _write_snapshot_text(self, rel_path: str, text: Optional[str], suffix: str) -> Optional[str]:
-        """将文本快照写入备份目录（按相对路径命名），返回文件名；text 为 None 返回 None。"""
-        if text is None:
-            return None
-        self._backup_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        escaped = rel_path.replace("/", "_")
-        filename = f"{ts}__{escaped}{suffix}"
-        (self._backup_dir / filename).write_text(text, encoding="utf-8")
-        return filename
-
     def _read_snapshot(self, filename: str) -> str:
         """从备份目录读取快照内容。"""
         path = self._backup_dir / filename
         return path.read_text(encoding="utf-8", errors="replace")
-
-    def _find_before_snapshots(self, rel_path: str) -> list[Path]:
-        """按时间顺序返回指定相对路径的全部 before 快照（不含 .after 后缀）。"""
-        if not self._backup_dir.exists():
-            return []
-        escaped = rel_path.replace("/", "_")
-        return sorted(
-            p
-            for p in self._backup_dir.glob(f"*__{escaped}")
-            if not p.name.endswith(".after") and not p.name.endswith(".pre_revert")
-        )
 
     @staticmethod
     def _atomic_write(resolved: Path, content: str) -> None:
