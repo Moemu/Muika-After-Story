@@ -13,7 +13,6 @@ import yaml as yaml_
 from pydantic import (
     AliasChoices,
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -22,7 +21,7 @@ from watchdog.events import FileMovedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
-from muika.utils.logger import init_logger, logger
+from muika.utils.logger import logger
 
 from .llm import ModelConfig
 
@@ -197,14 +196,14 @@ class MASConfig(BaseSettings):
 
         superusers = os.getenv("SUPERUSERS")
         if not superusers:
-            raise ValidationError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
+            raise ValueError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
 
         try:
             v = str(list(superusers)[0])
             return v
         except Exception as exc:
             logger.error(exc)
-            raise ValidationError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
+            raise ValueError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
 
     @staticmethod
     def generate_ipc_secret() -> str:
@@ -218,6 +217,8 @@ class MASConfig(BaseSettings):
         env_path = Path(".env")
         try:
             env_data = env_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            env_data = ""
         except UnicodeEncodeError:
             env_data = env_path.read_text(encoding="gbk")
 
@@ -234,7 +235,6 @@ class MASConfig(BaseSettings):
         if v:
             return v
 
-        init_logger()
         logger.warning("未设置 ipc_secret, 将随机生成一个并写入 .env 文件中")
         return cls.generate_ipc_secret()
 
