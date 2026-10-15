@@ -310,7 +310,9 @@ class Gateway:
                 if activity.origin != node.origin:
                     raise ValueError("Activity origin does not match this Core")
                 await self.db.execute(
-                    "INSERT OR IGNORE INTO activity(id,payload) VALUES(?,?)", (activity.id, activity.model_dump_json())
+                    "INSERT INTO activity(id,payload) SELECT ?, ? WHERE NOT EXISTS("
+                    "SELECT 1 FROM activity WHERE id = ?)",
+                    (activity.id, activity.model_dump_json(), activity.id),
                 )
                 async with self.db.execute("SELECT sequence FROM activity WHERE id=?", (activity.id,)) as cursor:
                     position = await cursor.fetchone()

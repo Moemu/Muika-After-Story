@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import TypeAlias
 
 from pydantic import TypeAdapter
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from muika.core.events import TimeTickEvent
@@ -177,7 +177,20 @@ class SyncStore:
 
     async def cursor(self) -> int:
         async with get_session(record_activity=False) as db:
-            return await db.scalar(select(func.max(SyncEventORM.gateway_sequence))) or 0
+            rows = (
+                await db.scalars(
+                    select(SyncEventORM.gateway_sequence)
+                    .where(SyncEventORM.gateway_sequence.is_not(None))
+                    .order_by(SyncEventORM.gateway_sequence)
+                )
+            ).all()
+            cursor = 0
+            for seq in rows:
+                if seq == cursor + 1:
+                    cursor = seq
+                elif seq > cursor + 1:
+                    break
+            return cursor
 
     async def entries(self, after: int = 0, *, pending_only: bool = False) -> list[SyncEntry]:
         """读取增量或尚未纳入共同日志的本地活动。"""

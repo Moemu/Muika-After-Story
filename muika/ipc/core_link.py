@@ -52,6 +52,7 @@ class CoreLink:
         self._closing = False
         self._captured = False
         self._foreground = False
+        self._history_requested = False
         self.attachments = AttachmentTransfer(
             mas_config.gateway_url, mas_config.ipc_secret, mas_config.data_dir / "chat_attachments"
         )
@@ -162,8 +163,15 @@ class CoreLink:
                 self._sent.update(item.id for item in batch)
             return bool(pending)
 
+    async def _request_history(self, after: int) -> None:
+        """请求 after 之后的增量历史，并把下一条历史回复标记为本次请求的回答。"""
+        assert self.ws is not None
+        self._history_requested = True
+        await self.ws.send_json({"kind": "history", "after": after})
+
     async def _history(self, packet: dict) -> None:
         assert self.ws is not None
+        requested, self._history_requested = self._history_requested, False
         changed = False
         for raw in packet["entries"]:
             entry = SyncEntry.model_validate(raw)
@@ -180,7 +188,7 @@ class CoreLink:
         if changed:
             await self.memory.load(record_activity=False)
         if not packet["complete"]:
-            await self.ws.send_json({"kind": "history", "after": packet["through"]})
+            await self._request_history(packet["through"])
             return
         if self._joining:
             pending = await self.store.entries(pending_only=True)
@@ -199,6 +207,11 @@ class CoreLink:
                 await self.store.capture_snapshot()
                 self._captured = True
             if not await self._publish():
+                cursor = await self.store.cursor()
+                # 请求回答已枚举游标之后的全部活动；残留空洞在网关中不存在，补请求拿不到。
+                if packet.get("through") and cursor < packet["through"] and not requested:
+                    await self._request_history(cursor)
+                    return
                 self._joining = False
                 self._preserve = False
                 await self.ws.send_json({"kind": "ready", "foreground": self._foreground})
@@ -296,12 +309,13 @@ class CoreLink:
                     self._captured = False
                     self.connected, self._joining = True, True
                     self._sent.clear()
+                    self._history_requested = False
                     packets: asyncio.Queue[dict] = asyncio.Queue()
                     consumer = asyncio.create_task(self._consume_packets(packets))
                     workers = [consumer, asyncio.create_task(self._pulse()), asyncio.create_task(self._flush())]
                     for worker in workers:
                         worker.add_done_callback(partial(self._worker_finished, ws=self.ws))
-                    await self.ws.send_json({"kind": "history", "after": await self.store.cursor()})
+                    await self._request_history(await self.store.cursor())
                     async for message in self.ws:
                         if message.type != aiohttp.WSMsgType.TEXT:
                             break

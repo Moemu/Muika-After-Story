@@ -1053,6 +1053,66 @@ async def test_invalid_history_backs_off_without_repeated_stack_traces(live_gate
     recorder.record("invalid_history_wait", status=status, recovered=recovered, attempts=attempts, traceback_count=1)
 
 
+async def test_join_recovers_activity_published_before_ready(live_gateway, node_process, monkeypatch):
+    """加入期间另一设备发布的活动必须在就绪前补齐，不能被同步游标跳过。"""
+    from muika.ipc.sync_models import Activity, RecordedExperience
+
+    gateway, session, base, recorder = live_gateway
+    seed = await connect_core(session, base, "seed")
+    await ready(seed, recorder)
+    missed = Activity(
+        origin="seed",
+        experiences=[
+            RecordedExperience(
+                id=1, session_id="seed-session", kind="user", content="一起看过的电影。", occurred_at=datetime.now()
+            )
+        ],
+    )
+    history = gateway._history
+    injected = False
+
+    async def inject_after_answer(ws, after):
+        nonlocal injected
+        await history(ws, after)
+        if not injected:
+            injected = True
+            # 本连接正持有入口锁，直接写入网关日志即可模拟另一设备在此期间发布活动。
+            await gateway.db.execute(
+                "INSERT INTO activity(id,payload) VALUES(?,?)", (missed.id, missed.model_dump_json())
+            )
+            await gateway.db.commit()
+
+    monkeypatch.setattr(gateway, "_history", inject_after_answer)
+    pc, _ = await node_process("pc", base)
+    state = await wait_node(pc, connected=True)
+    for _ in range(100):
+        if "一起看过的电影。" in state["experiences"]:
+            break
+        await asyncio.sleep(0.1)
+        state = await pc.command(action="status")
+    recorder.record("join_gap_recovered", experiences=state["experiences"], sync_error=state["sync_error"])
+    assert injected
+    assert state["sync_error"] is None
+    assert "一起看过的电影。" in state["experiences"]
+
+
+async def test_duplicate_publish_keeps_gateway_sequences_contiguous(live_gateway):
+    """重复发布不得烧掉网关序号，否则加入设备的同步游标会永久卡在空洞前。"""
+    from muika.ipc.sync_models import Activity
+
+    gateway, session, base, recorder = live_gateway
+    pc = await connect_core(session, base, "pc")
+    await ready(pc, recorder)
+    first, second = Activity(origin="pc"), Activity(origin="pc")
+    for activity in (first, first, second):
+        await pc.send_json({"kind": "publish", "activities": [activity.model_dump(mode="json")]})
+        await packet(pc, "history", recorder)
+    async with gateway.db.execute("SELECT sequence FROM activity ORDER BY sequence") as cursor:
+        sequences = [row[0] for row in await cursor.fetchall()]
+    recorder.record("gateway_sequence_contiguous", sequences=sequences)
+    assert sequences == [1, 2]
+
+
 async def test_standby_returns_an_error_code_and_readable_detail(gateway_process, node_process):
     session, base, recorder = gateway_process[:3]
     pc, _ = await node_process("pc", base, fallback=True)
