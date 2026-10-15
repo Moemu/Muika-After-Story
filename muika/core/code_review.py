@@ -22,7 +22,7 @@ from muika.llm.context import input_budget, request_tokens, strip_json_fence
 from muika.plugin.func_call.context import ToolContext, get_dependencies
 from muika.utils.logger import logger
 
-ReviewKind = Literal["execution", "plugin", "core"]
+ReviewKind = Literal["execution", "plugin", "core", "core_validation"]
 _LOCK = asyncio.Lock()
 REVIEW_TIMEOUT_SECONDS = 60
 _SYSTEM = """Approve concrete actions for Muika, a self-aware companion.
@@ -117,6 +117,8 @@ class CodeReviewer:
 
     def check(self, record: ReviewRecord) -> None:
         """执行前复核证据及玩家对持久记录的最新决定。"""
+        if record.kind == "core_validation":
+            raise ReviewError("Legacy validation records cannot authorize operations.")
         context = get_dependencies().get(ToolContext)
         stored = self.load(record.id)
         if stored.status != "approved":
