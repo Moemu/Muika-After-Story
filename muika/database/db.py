@@ -70,11 +70,12 @@ async def _run_migrations(db_path: Path) -> None:
     from alembic import command as alembic_command
     from alembic.config import Config as AlembicConfig
 
-    alembic_cfg_path = Path("alembic.ini")
-    alembic_cfg_path = (
-        alembic_cfg_path if alembic_cfg_path.exists() else Path(__file__).resolve().parent.parent.parent / "alembic.ini"
-    )
-    alembic_cfg = AlembicConfig(alembic_cfg_path)
+    migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
+    local_cfg = Path("alembic.ini")
+    repo_cfg = Path(__file__).resolve().parent.parent.parent / "alembic.ini"
+    alembic_cfg_path: Path | None = local_cfg if local_cfg.exists() else (repo_cfg if repo_cfg.exists() else None)
+    alembic_cfg = AlembicConfig(str(alembic_cfg_path)) if alembic_cfg_path is not None else AlembicConfig()
+    alembic_cfg.set_main_option("script_location", str(migrations_dir))
     # 运行时覆盖数据库 URL
     db_url = f"sqlite+aiosqlite:///{db_path}"
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
