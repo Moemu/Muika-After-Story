@@ -1,11 +1,17 @@
 """同步本地活动并接受在线角色；入口失联时由指定 PC 继续本地活动。"""
 
 import asyncio
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from functools import partial
 from uuid import uuid4
+
+if sys.version_info >= (3, 11):
+    from asyncio import timeout
+else:
+    from async_timeout import timeout
 
 import aiohttp
 from sqlalchemy import select
@@ -118,7 +124,7 @@ class CoreLink:
             raise ValueError("The requested device is unavailable")
         await self.memory.add_material("agent", f"Core handoff requested to {target}; completion is not yet observed.")
         try:
-            async with asyncio.timeout(15):
+            async with timeout(15):
                 while any(entry.activity.id not in self._sent for entry in await self.store.entries(pending_only=True)):
                     await self._publish()
             await self.ws.send_json({"kind": "handoff", "target": target, "epoch": self.epoch})

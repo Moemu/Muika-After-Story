@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sys
 from pathlib import Path
 from typing import Literal
+
+if sys.version_info >= (3, 11):
+    from asyncio import timeout_at
+else:
+    from async_timeout import timeout_at
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
@@ -160,7 +166,7 @@ class CodeReviewer:
         )
         request.id = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
         try:
-            async with asyncio.timeout_at(deadline):
+            async with timeout_at(deadline):
                 if kind == "execution" and isinstance(context, ToolContext):
                     raw_command = payload.get("command", [])
                     command = (

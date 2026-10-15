@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import random
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Generic, Literal, TypeVar
+
+if sys.version_info >= (3, 11):
+    from asyncio import timeout
+else:
+    from async_timeout import timeout
 
 from muika.utils.logger import logger
 
@@ -55,7 +61,7 @@ class RequestRetry(Generic[T]):
             attempt += 1
             await _wait_for_congestion(self.key)
             try:
-                async with asyncio.timeout(self.config.request_timeout_seconds):
+                async with timeout(self.config.request_timeout_seconds):
                     return await operation()
             except asyncio.CancelledError:
                 raise
@@ -85,12 +91,12 @@ class RequestRetry(Generic[T]):
             await _wait_for_congestion(self.key)
             received = False
             try:
-                async with asyncio.timeout(self.config.request_timeout_seconds):
+                async with timeout(self.config.request_timeout_seconds):
                     response = await operation()
                 iterator = response.__aiter__()
                 while True:
                     try:
-                        async with asyncio.timeout(self.config.request_timeout_seconds):
+                        async with timeout(self.config.request_timeout_seconds):
                             item = await anext(iterator)
                     except StopAsyncIteration:
                         return
