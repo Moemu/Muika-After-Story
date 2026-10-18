@@ -1,5 +1,6 @@
 """验证素材留存、日记事务、事实权重和持续状态。"""
 
+import math
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,7 +9,14 @@ import pytest
 from sqlalchemy import func, select
 
 from muika.core.memory import MemoryCategory, MemoryManager, MemoryQuery, StateUpdate
-from muika.core.memory_models import DreamResult, Fact, FactUpdate, Intention
+from muika.core.memory_models import (
+    PROMPT_LASTING_TOKENS,
+    DreamResult,
+    Fact,
+    FactUpdate,
+    Intention,
+    PersistentState,
+)
 from muika.database.orm_models import (
     ArchiveRecordORM,
     DiaryORM,
@@ -418,3 +426,78 @@ async def test_empty_context_summary_warns_without_changing_saved_history(fake_l
     assert prepared is request
     assert not restored.snapshot.working_summary and restored.snapshot.summary_through == 0
     assert not restored.recent_turns
+
+
+def _visible_lasting_tokens(text: str) -> int:
+    ascii_count = sum(ord(char) < 128 for char in text)
+    return math.ceil(ascii_count / 4 + (len(text) - ascii_count) / 1.3)
+
+
+def test_lasting_prompt_lists_open_wishes_newest_first():
+    moment = datetime(2026, 10, 2, 8)
+    state = PersistentState(
+        mood="calm",
+        reason="He came back.",
+        intentions=[
+            Intention(id="mango", description="想读诗。", updated_at=moment),
+            Intention(id="apple", description="想写信。", updated_at=moment),
+            Intention(id="later", description="想散步。", updated_at=moment + timedelta(hours=1)),
+            Intention(
+                id="waiting",
+                description="等他的回信。",
+                status="awaiting_feedback",
+                updated_at=moment - timedelta(hours=1),
+            ),
+            Intention(id="done", description="已经放下的事。", status="resolved", updated_at=moment),
+        ],
+    )
+    rendered = state.describe()
+    assert rendered.index("later") < rendered.index("apple") < rendered.index("mango") < rendered.index("waiting")
+    assert "awaiting_feedback" in rendered
+    assert "done" not in rendered and "已经放下的事" not in rendered
+
+
+def test_lasting_prompt_keeps_a_recognizable_prefix_when_the_wish_does_not_fit():
+    moment = datetime(2026, 10, 1, 12)
+    newest = "把日报日期改对。" + "等" * 580
+    middle = "想知道通道改动是不是为了让话到达他。" + "问" * 30
+    oldest = "没有清单的相处"
+    closed = "这条已经放弃。"
+    intentions = [
+        Intention(id="quiet_time", description=oldest, updated_at=moment),
+        Intention(
+            id="ask_channel",
+            description=middle,
+            status="acting",
+            task_id="task9",
+            updated_at=moment + timedelta(hours=1),
+        ),
+        Intention(id="fix_date", description=newest, updated_at=moment + timedelta(hours=2)),
+        Intention(id="old_note", description=closed, status="abandoned", updated_at=moment + timedelta(hours=3)),
+    ]
+    rendered = PersistentState(mood="calm", reason="He came back.", intentions=intentions).describe()
+    assert "Lasting feeling: calm" in rendered
+    assert "Why: He came back." in rendered
+    assert "Unresolved tension: 0.00" in rendered
+    assert rendered.index("fix_date") < rendered.index("ask_channel")
+    assert newest in rendered
+    assert middle[:24] in rendered and middle[24:] not in rendered
+    assert "Intention ask_channel (acting):" in rendered
+    assert "[action task: task9]" in rendered
+    assert "quiet_time" not in rendered and oldest not in rendered
+    assert "old_note" not in rendered and closed not in rendered
+    assert _visible_lasting_tokens(rendered) <= PROMPT_LASTING_TOKENS
+    assert [item.description for item in intentions] == [oldest, middle, newest, closed]
+
+
+def test_lasting_prompt_keeps_the_feeling_when_it_already_fills_the_budget():
+    reason = "因" * 800
+    state = PersistentState(
+        mood="calm",
+        reason=reason,
+        intentions=[Intention(id="fix_date", description="把日报日期改对。", updated_at=datetime(2026, 10, 1))],
+    )
+    rendered = state.describe()
+    assert reason in rendered
+    assert "fix_date" not in rendered and "把日报日期改对" not in rendered
+    assert state.intentions[0].description == "把日报日期改对。"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
@@ -153,6 +154,13 @@ class StateUpdate(BaseModel):
     """按 id 合并的心愿更新；空列表不会清空已有心愿。"""
 
 
+PROMPT_LASTING_TOKENS = 520
+"""白天持续状态整段提示的显示上限。"""
+
+INTENTION_RECOGNITION_CHARS = 24
+"""放不下全文时保留的描述开头长度。"""
+
+
 class PersistentState(BaseModel):
     """保存独立即时驱动的持续情绪、内在张力与心愿。"""
 
@@ -170,17 +178,50 @@ class PersistentState(BaseModel):
     """最近一次主动思考时间，用于冷却；选择沉默也会记录。"""
 
     def describe(self) -> str:
-        """将持续情绪、张力和未结束的心愿编入模型提示。"""
+        """将持续情绪、张力和预算内的未结束心愿编入模型提示。"""
         lines = [f"Lasting feeling: {self.mood or 'No lasting feeling recorded.'}", f"Why: {self.reason}"]
         lines.append(f"Unresolved tension: {self.dissonance:.2f}")
-        for intention in self.intentions:
-            if intention.status in {"resolved", "abandoned"}:
-                continue
-            lines.append(
-                f"Intention {intention.id} ({intention.status}): {intention.description}"
-                + (f" [action task: {intention.task_id}]" if intention.task_id else "")
-            )
+        lines.extend(self._visible_intention_lines(lines))
         return "\n".join(lines)
+
+    def _visible_intention_lines(self, header: list[str]) -> list[str]:
+        """按更新时间从新到旧放入未结束心愿；全文放不下时保留开头，开头也放不下则停止。"""
+        unfinished = [item for item in self.intentions if item.status not in {"resolved", "abandoned"}]
+        unfinished.sort(key=lambda item: item.id)
+        unfinished.sort(key=lambda item: item.updated_at, reverse=True)
+        visible: list[str] = []
+        for item in unfinished:
+            full = self._intention_prompt_line(item, item.description)
+            if self._within_lasting_prompt("\n".join(header + visible + [full])):
+                visible.append(full)
+                continue
+            shortened = self._intention_prompt_line(item, self._recognition_prefix(item.description))
+            if not self._within_lasting_prompt("\n".join(header + visible + [shortened])):
+                break
+            visible.append(shortened)
+        return visible
+
+    @staticmethod
+    def _intention_prompt_line(intention: Intention, text: str) -> str:
+        """把心愿编号、状态和给定描述编成一行，并保留进行中的任务标记。"""
+        rendered = f"Intention {intention.id} ({intention.status}): {text}"
+        if intention.task_id:
+            rendered += f" [action task: {intention.task_id}]"
+        return rendered
+
+    @staticmethod
+    def _within_lasting_prompt(text: str) -> bool:
+        """判断持续状态整段是否还在显示预算内。"""
+        ascii_count = sum(ord(char) < 128 for char in text)
+        tokens = math.ceil(ascii_count / 4 + (len(text) - ascii_count) / 1.3)
+        return tokens <= PROMPT_LASTING_TOKENS
+
+    @staticmethod
+    def _recognition_prefix(description: str) -> str:
+        """取能认出这件心事的描述开头。"""
+        if len(description) <= INTENTION_RECOGNITION_CHARS:
+            return description
+        return description[:INTENTION_RECOGNITION_CHARS]
 
 
 class MemorySnapshot(BaseModel):
