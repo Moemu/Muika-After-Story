@@ -56,8 +56,16 @@ New or corrected facts must be supported by today's experience references. Conso
 merging different people.
 For equivalent legacy facts, cite and supersede the old fact IDs. Keep the same value and category; this does
 not count as recall.
-Review unfinished intentions and actual results. Reuse intention IDs; do not create a new ID for the same
-wish.
+The prompt lists each current open intention by id. Review that list against today's evidence.
+An open intention is something she still means to do, find out, or continue, and can later mark resolved or abandoned.
+What he said, or what remains unanswered, is a fact, not an intention.
+A way of speaking, a one-time reply, or a decision to stop is not a new intention. If that decision ends an
+older intention, mark that id abandoned.
+If a listed intention is itself a fact, a note, or a settled way of speaking, mark that id abandoned.
+Record what he said or what remains unanswered as a fact.
+The same wish has the same desired outcome and the same condition she is still waiting on. A new date,
+different wording, or a note that it is still unfinished is not a new wish. Reuse the listed id and update its
+description. Do not create a new id for a wish already listed.
 Update lasting feelings only when the day's evidence warrants it. Preserve unresolved tension without forcing
 action.
 Every dissonance_delta needs source references and a reason.
@@ -79,7 +87,7 @@ class MemoryReasoner:
         self.compactor = ContextCompactor(summarize_model)
 
     async def dream(self, day: date, memory: MemoryManager) -> bool:
-        """按预算整理一天的素材，成功后原子提交。"""
+        """按预算整理一天的素材并附上未结束心愿，成功后原子提交。"""
         model = self.summarize_model
         compactor = ContextCompactor(model)
         material = await memory.day_material(day)
@@ -115,7 +123,15 @@ class MemoryReasoner:
             format="json",
             purpose="memory_dream",
         )
-        capacity = int(input_budget(model.config) * 0.6) - request_tokens(request) - 128
+        open_intentions = [
+            f"Intention {item.id} ({item.status}): {item.description}"
+            for item in memory.persistent.intentions
+            if item.status not in {"resolved", "abandoned"}
+        ]
+        intention_block = "Open intentions:\n" + ("\n".join(open_intentions) if open_intentions else "None.")
+        capacity = (
+            int(input_budget(model.config) * 0.6) - request_tokens(request) - 128 - estimate_tokens(intention_block)
+        )
         through = next((d.covered_through for d in diaries if d.source == f"dream:{day}"), 0)
         coverage = f"Previous coverage: experience IDs <= {through}. Tension changes must cite newer experiences."
         fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
@@ -123,16 +139,20 @@ class MemoryReasoner:
             related = await compactor.summarize(related, max(128, capacity // 4)) or related
             fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
         remaining = capacity - estimate_tokens(fixed)
-        if remaining < 128:
-            warnings.warn(
-                "The dream exceeds the summarizer budget; keeping its source material",
-                ContextOverflowWarning,
-                stacklevel=2,
-            )
-        elif estimate_tokens(source_text) > remaining:
-            source_text = await compactor.summarize(source_text, remaining) or source_text
+        source_tokens = estimate_tokens(source_text)
+        if source_tokens > max(remaining, 0):
+            if remaining >= 128:
+                source_text = await compactor.summarize(source_text, remaining) or source_text
+            elif source_tokens > 128:
+                warnings.warn(
+                    "The dream source exceeds its budget; summarizing dated experiences",
+                    ContextOverflowWarning,
+                    stacklevel=2,
+                )
+                source_text = await compactor.summarize(source_text, 128) or source_text
         request.prompt = fixed + "\nDated experiences:\n" + source_text
         refs &= set(re.findall(r"(?:experience|fact|diary):\d+", request.prompt))
+        request.prompt += "\n" + intention_block
         for attempt in range(2):
             response = await model.ask(request)
             content = strip_json_fence(response.require_content())

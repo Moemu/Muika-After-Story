@@ -2,11 +2,13 @@
 
 from datetime import date, datetime
 
+import pytest
+
 from muika.core.memory import MemoryManager
-from muika.core.memory_models import DreamResult
+from muika.core.memory_models import DreamResult, Intention, StateUpdate
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.llm import ModelCompletions, ModelConfig
-from muika.llm.context import input_budget, request_tokens
+from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
 
 
 async def test_long_day_is_chunked_then_committed_as_one_diary(fake_llm_factory, redirect_get_session):
@@ -30,3 +32,30 @@ async def test_long_day_is_chunked_then_committed_as_one_diary(fake_llm_factory,
     diaries = await memory.recent_diaries(day)
     assert len(diaries) == 1 and diaries[0].source == "dream:2026-09-01"
     assert len((await memory.day_material(day))[0].content) > 60000
+
+
+async def test_open_intentions_keep_their_text_and_source_yields_budget(fake_llm_factory, redirect_get_session):
+    memory = MemoryManager()
+    day = date(2026, 9, 1)
+    await memory.add_context("muika", "I read a poem and thought of him. " * 160, timestamp=datetime(2026, 9, 1, 12))
+    description = "remember this wish. " * 53
+    await memory.update_state(
+        StateUpdate(
+            reason="The wish is still open.",
+            intentions=[Intention(id=f"wish-{index}", description=description) for index in range(15)],
+        )
+    )
+
+    def respond(request):
+        if request.format == "json":
+            assert request_tokens(request) < input_budget(model.config)
+            assert "I read a poem and thought of him. " * 40 not in request.prompt
+            for index in range(15):
+                assert f"Intention wish-{index} (open): {description}" in request.prompt
+            return ModelCompletions(text=DreamResult(diary="I kept the open wishes in view.").model_dump_json())
+        return ModelCompletions(text="A short source summary.")
+
+    model = fake_llm_factory(side_effect=respond)
+    model.config = ModelConfig(provider="_echo", context_window=16384, max_tokens=2048)
+    with pytest.warns(ContextOverflowWarning):
+        assert await MemoryReasoner(model).dream(day, memory)

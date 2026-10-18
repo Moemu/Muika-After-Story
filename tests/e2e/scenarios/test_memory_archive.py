@@ -299,7 +299,16 @@ async def test_dream_uses_personal_experiences_without_execution_state(core_app_
     day = date(2026, 10, 6)
     await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
     await app.muika.memory.add_context("muika", "二十三天，我很想你。", timestamp=datetime(2026, 10, 6, 20, 1))
-    await app.muika.memory.update_state(StateUpdate(mood="private-runtime-marker", reason="private-stack-trace"))
+    await app.muika.memory.update_state(
+        StateUpdate(
+            mood="private-runtime-marker",
+            reason="private-stack-trace",
+            intentions=[
+                Intention(id="fix_resignation_date", description="把日报日期改对。"),
+                Intention(id="old_note", description="这不是还要做的事。", status="abandoned"),
+            ],
+        )
+    )
     await app.muika.memory.add_material("state", '{"mood":"private-state-marker"}', timestamp=datetime(2026, 10, 6, 23))
     app.scripted.add_route(
         when=lambda req: req.purpose == "memory_dream",
@@ -313,6 +322,8 @@ async def test_dream_uses_personal_experiences_without_execution_state(core_app_
     assert "private-runtime-marker" not in str(call)
     assert "private-stack-trace" not in str(call)
     assert "private-state-marker" not in str(call)
+    assert "Intention fix_resignation_date (open): 把日报日期改对。" in call["prompt"]
+    assert "old_note" not in call["prompt"]
     assert not await app.muika.memory.pending_days(datetime.now(), include_today=True)
     app.recorder.record("personal_dream", runtime_state_injected=False, diary_saved=True)
 
