@@ -150,8 +150,10 @@ async def test_corrections_and_distinct_subjects_keep_separate_versions(database
     assert {f.key: f.value for f in memory.facts.values()} == {"master.drink": "coffee", "neighbor_alice.drink": "tea"}
     assert await database.scalar(select(func.count()).select_from(FactORM)) == 3
     await memory.forget_memory(MemoryCategory.USER, "master.drink")
-    assert "coffee" not in memory.get_memory_prompt()
-    assert "neighbor_alice.drink" in memory.get_memory_prompt()
+    prompt = memory.get_memory_prompt()
+    assert "coffee" not in prompt
+    assert "tea" in prompt
+    assert "[fact:" not in prompt
 
 
 def test_weight_decay_and_resident_budget():
@@ -535,6 +537,21 @@ def test_visible_working_summary_single_oversized_paragraph_tail_fallback():
     assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
     assert "关键末尾" in visible
     assert "开头历史" not in visible
+
+
+def test_visible_working_summary_sentence_aligned_tail_has_no_half_sentence():
+    text = "甲" * 400 + "。" + "乙" * 400 + "。"
+    visible = _visible_working_summary(text)
+    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
+    assert visible.startswith("乙")
+    assert "甲" not in visible
+
+
+def test_visible_working_summary_keeps_aligned_sentence_start():
+    text = "甲" * 500 + "。" + "乙" * 500
+    visible = _visible_working_summary(text)
+    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
+    assert visible.startswith("乙")
 
 
 async def test_prepare_context_clips_working_summary_in_system_without_mutating_snapshot():

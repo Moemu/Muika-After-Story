@@ -112,7 +112,8 @@ def _visible_working_summary(summary: str) -> str:
     """按段落倒序保留最新上下文并限制在预算字符内，只作为读取投影不写回。
 
     当工作摘要超出字符预算时，优先保留时间顺序靠后的段落；若最新单段已超过预算
-    （常见于未整理的历史长文本），截取其尾部作为迁移兜底，可能以半句开头。
+    （常见于未整理的历史长文本），截取其尾部作为迁移兜底；切点落在句中时从最近的
+    完整句子开始，避免注入以半句开头的摘要。
     返回的文本仅用于提示词注入与材料组装，严禁写回快照或数据库。
 
     :param summary: 待展示或拼接的工作摘要原文。
@@ -124,7 +125,17 @@ def _visible_working_summary(summary: str) -> str:
     if not paragraphs:
         result = summary[-PROMPT_WORKING_SUMMARY_CHARS:]
     elif len(paragraphs[-1]) > PROMPT_WORKING_SUMMARY_CHARS:
-        result = paragraphs[-1][-PROMPT_WORKING_SUMMARY_CHARS:]
+        source = paragraphs[-1]
+        start = len(source) - PROMPT_WORKING_SUMMARY_CHARS
+        tail = source[start:]
+        if start > 0 and source[start - 1] not in "。！？；!?;\n":
+            first_end = min(
+                (index for index in (tail.find(mark) for mark in "。！？；!?;\n") if index != -1),
+                default=-1,
+            )
+            if 0 <= first_end < len(tail) // 2:
+                tail = tail[first_end + 1 :].lstrip()
+        result = tail
     else:
         selected: list[str] = []
         current_len = 0
@@ -495,7 +506,10 @@ class MemoryManager:
                 return False
 
     def get_memory_prompt(self, budget: int = 2048) -> str:
-        """在预算内提供关系日期及按回顾权重选择的最多二十条原子事实。"""
+        """在预算内提供关系日期及按回顾权重选择的最多二十条事实正文。
+
+        编号与键供夜间整理引用，白天模型不需要，注入它们只会挤占预算。
+        """
         metadata: list[str] = []
         if self.snapshot.first_interaction_at is not None:
             line = (
@@ -509,7 +523,7 @@ class MemoryManager:
         )
         lines: list[str] = []
         for record in records:
-            line = record.describe()
+            line = f"- {record.value}"
             if estimate_tokens("\n".join(metadata + lines + [line])) > budget:
                 continue
             lines.append(line)
