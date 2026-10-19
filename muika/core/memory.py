@@ -99,6 +99,9 @@ __all__ = [
 PROMPT_WORKING_SUMMARY_CHARS = 500
 """系统提示词中工作摘要的最大字符数上限。"""
 
+PROMPT_FACT_LIMIT = 10
+"""白天常驻事实的条数上限。"""
+
 DIALOGUE_SUMMARY_INTERVAL = timedelta(minutes=5)
 DIALOGUE_SUMMARY_MIN_TURNS = 6
 REFLECTION_KINDS = ("user", "muika", "note")
@@ -505,8 +508,37 @@ class MemoryManager:
                 logger.debug(f"[Memory] Dialogue summary error: {exc}")
                 return False
 
+    def _rank_prompt_facts(self, now: datetime, limit: int) -> list[Fact]:
+        """按心愿关联、类别覆盖和回顾权重挑选白天常驻事实。"""
+        scored = sorted(
+            self.facts.values(), key=lambda fact: (fact.score(now), fact.last_recalled_at, -fact.id), reverse=True
+        )
+        linked_refs = {
+            ref
+            for intention in self.snapshot.state.intentions
+            if intention.status not in {"resolved", "abandoned"}
+            for ref in intention.source_refs
+        }
+        selected: dict[int, Fact] = {}
+        for fact in scored:
+            if len(selected) >= limit // 3:
+                break
+            if set(fact.source_refs) & linked_refs:
+                selected[fact.id] = fact
+        for category in MemoryCategory:
+            if len(selected) >= limit:
+                break
+            quota = next((item for item in scored if item.category == category and item.id not in selected), None)
+            if quota is not None:
+                selected[quota.id] = quota
+        for fact in scored:
+            if len(selected) >= limit:
+                break
+            selected.setdefault(fact.id, fact)
+        return [fact for fact in scored if fact.id in selected]
+
     def get_memory_prompt(self, budget: int = 2048) -> str:
-        """在预算内提供关系日期及按回顾权重选择的最多二十条事实正文。
+        """在预算内提供关系日期及按心愿关联、类别覆盖与回顾权重挑选的事实正文。
 
         编号与键供夜间整理引用，白天模型不需要，注入它们只会挤占预算。
         """
@@ -517,18 +549,12 @@ class MemoryManager:
             )
             if estimate_tokens(line) <= budget:
                 metadata.append(line)
-        now = datetime.now()
-        records = sorted(
-            self.facts.values(), key=lambda fact: (fact.score(now), fact.last_recalled_at, -fact.id), reverse=True
-        )
         lines: list[str] = []
-        for record in records:
+        for record in self._rank_prompt_facts(datetime.now(), PROMPT_FACT_LIMIT):
             line = f"- {record.value}"
             if estimate_tokens("\n".join(metadata + lines + [line])) > budget:
                 continue
             lines.append(line)
-            if len(lines) == 20:
-                break
         return "\n".join(metadata + lines)
 
     @staticmethod

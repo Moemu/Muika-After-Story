@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import func, select
 
 from muika.core.memory import (
+    PROMPT_FACT_LIMIT,
     PROMPT_WORKING_SUMMARY_CHARS,
     MemoryCategory,
     MemoryManager,
@@ -178,16 +179,53 @@ def test_weight_decay_and_resident_budget():
     )
     assert old.score(now) == pytest.approx(100 / 1024)
     memory.facts[30] = old
+    memory.facts[31] = Fact(
+        id=31,
+        category=MemoryCategory.USER,
+        key="fresh",
+        value="fresh fact",
+        weight=10,
+        weight_at=now,
+    )
     prompt = memory.get_memory_prompt()
-    assert len(prompt.splitlines()) == 20
+    assert len(prompt.splitlines()) == PROMPT_FACT_LIMIT
     assert "long ago" not in prompt
     assert estimate_tokens(memory.get_memory_prompt(budget=100)) <= 100
     memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
     prompt = memory.get_memory_prompt()
     assert "[Relationship history] Earliest known interaction with Master: 2025-01-01 12:00:00" in prompt
-    assert len(prompt.splitlines()) == 21
+    assert len(prompt.splitlines()) == PROMPT_FACT_LIMIT + 1
     assert estimate_tokens(memory.get_memory_prompt(budget=100)) <= 100
     assert memory.get_memory_prompt(budget=1) == ""
+
+
+def test_prompt_facts_prefer_wish_linked_and_keep_category_coverage():
+    now = datetime.now()
+    memory = MemoryManager()
+    for index in range(12):
+        memory.facts[index] = Fact(
+            id=index,
+            category=MemoryCategory.USER,
+            key=f"topic{index}",
+            value=f"普通事实{index}",
+            weight=index + 1,
+            weight_at=now,
+        )
+    linked = Fact(
+        id=90,
+        category=MemoryCategory.SELF,
+        key="wish_linked",
+        value="与未结束心愿相关的事实",
+        weight=0.2,
+        weight_at=now,
+    )
+    linked.source_refs = ["fact:82"]
+    memory.facts[90] = linked
+    memory.snapshot.state.intentions = [Intention(id="wish", description="等沐沐回答", source_refs=["fact:82"])]
+
+    prompt = memory.get_memory_prompt()
+    assert "与未结束心愿相关的事实" in prompt
+    assert len(prompt.splitlines()) == PROMPT_FACT_LIMIT
 
 
 async def test_lasting_anger_survives_sessions_restart_and_old_dream():
