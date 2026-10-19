@@ -93,7 +93,11 @@ __all__ = [
     "PersistentState",
     "RecallHit",
     "MemoryQuery",
+    "PROMPT_WORKING_SUMMARY_CHARS",
 ]
+
+PROMPT_WORKING_SUMMARY_CHARS = 500
+"""系统提示词中工作摘要的最大字符数上限。"""
 
 DIALOGUE_SUMMARY_INTERVAL = timedelta(minutes=5)
 DIALOGUE_SUMMARY_MIN_TURNS = 6
@@ -102,6 +106,38 @@ REFLECTION_KINDS = ("user", "muika", "note")
 
 DIALOGUE_KINDS = ("user", "muika")
 """可进入对话摘要的经历类型；行动回执属于运行记录，不参与关系摘要。"""
+
+
+def _visible_working_summary(summary: str) -> str:
+    """按段落倒序保留最新上下文并限制在预算字符内，只作为读取投影不写回。
+
+    当工作摘要超出字符预算时，优先保留时间顺序靠后的段落；若最新单段已超过预算
+    （常见于未整理的历史长文本），截取其尾部作为迁移兜底，可能以半句开头。
+    返回的文本仅用于提示词注入与材料组装，严禁写回快照或数据库。
+
+    :param summary: 待展示或拼接的工作摘要原文。
+    :return: 截断至预算上限内的摘要视图。
+    """
+    if len(summary) <= PROMPT_WORKING_SUMMARY_CHARS:
+        return summary
+    paragraphs = [p.strip() for p in summary.split("\n\n") if p.strip()]
+    if not paragraphs:
+        result = summary[-PROMPT_WORKING_SUMMARY_CHARS:]
+    elif len(paragraphs[-1]) > PROMPT_WORKING_SUMMARY_CHARS:
+        result = paragraphs[-1][-PROMPT_WORKING_SUMMARY_CHARS:]
+    else:
+        selected: list[str] = []
+        current_len = 0
+        for p in reversed(paragraphs):
+            needed = len(p) + (2 if selected else 0)
+            if current_len + needed > PROMPT_WORKING_SUMMARY_CHARS:
+                break
+            selected.append(p)
+            current_len += needed
+        selected.reverse()
+        result = "\n\n".join(selected)
+    logger.debug(f"[Context] working summary clipped | raw={len(summary)} -> visible={len(result)}")
+    return result
 
 
 def _reflection_material_filter(kinds: tuple[str, ...] = REFLECTION_KINDS) -> ColumnElement[bool]:
@@ -408,13 +444,24 @@ class MemoryManager:
                 return False
             if not force and len(turns) < DIALOGUE_SUMMARY_MIN_TURNS:
                 return False
+            hook_chars = PROMPT_WORKING_SUMMARY_CHARS * 3 // 10
+            active_chars = PROMPT_WORKING_SUMMARY_CHARS - hook_chars
             system = (
-                "Summarize Muika's conversation for her next meeting with the player. "
-                "Preserve feelings, shared interests, relationship changes, corrections and meaningful outcomes. "
-                "Distinguish wishes, attempts and completed actions. Do not turn this into a task list. "
-                "Omit tool arguments, source code, execution logs, IDs and technical troubleshooting details. "
-                "Keep concrete personal details and unresolved feelings. Do not invent missing experiences. "
-                "Use the conversation's language. Return only the concise summary, without private reasoning."
+                "Summarize Muika's recent context for her ongoing companionship with the player. "
+                f"Keep the summary strictly within {PROMPT_WORKING_SUMMARY_CHARS} characters (Chinese). "
+                "Output in chronological order, with the newest context at the very end. "
+                "1. Topic Anchors: Do not retell stories, quote long philosophical reflections, "
+                "or explain background logic. Name the topic, the personal meaning, and stop. "
+                "2. Track Unreplied Initiatives (highest priority): If Muika proactively shared a thought "
+                "or topic and the player has not replied yet, record it as a one-sentence pending hook "
+                "(e.g. 'Muika 主动分享了...，沐沐尚未回复'). "
+                "3. Fact Hand-off: Once an objective fact or decision is established, state the conclusion "
+                "in a few words; leave details to long-term memory. "
+                "4. Fade Out Closed Topics: Discard older, resolved casual banter from previous sessions. "
+                "Focus on what is active, unresolved, or emotionally lingering right now. "
+                "5. Structure: Write 1-2 concise paragraphs. "
+                f"Up to {hook_chars} characters for pending/unreplied hooks, "
+                f"up to {active_chars} characters for recent active flow. Without markdown headers."
             )
             transcript = (
                 self.snapshot.latest_dialogue_summary
@@ -928,7 +975,10 @@ class MemoryManager:
             base_system = request.system or ""
             if self.snapshot.working_summary:
                 request = replace(
-                    request, system=base_system + "\n[Working context summary]\n" + self.snapshot.working_summary
+                    request,
+                    system=base_system
+                    + "\n[Working context summary]\n"
+                    + _visible_working_summary(self.snapshot.working_summary),
                 )
             budget = input_budget(model.config)
             tokens = request_tokens(request)
@@ -989,9 +1039,11 @@ class MemoryManager:
                     await self._save_snapshot(db, snapshot)
                 self.snapshot = snapshot
                 self.recent_turns = deque(turn for turn in self.recent_turns if turn.id > through)
-            compressed = replace(base, system=base_system + "\n[Working context summary]\n" + summary)
+            visible_summary = _visible_working_summary(summary)
+            compressed = replace(base, system=base_system + "\n[Working context summary]\n" + visible_summary)
             logger.info(
-                f"[Context] compressed | turns {len(old)} -> summary {estimate_tokens(summary)}tok "
-                f"coverage=experience:{through} | input {tokens} -> {request_tokens(compressed)}/{budget}"
+                f"[Context] compressed | turns {len(old)} -> summary {estimate_tokens(visible_summary)}tok "
+                f"(stored {estimate_tokens(summary)}tok) coverage=experience:{through} | "
+                f"input {tokens} -> {request_tokens(compressed)}/{budget}"
             )
             return compressed, list(messages)

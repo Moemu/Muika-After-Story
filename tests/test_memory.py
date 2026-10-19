@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import func, select
 
-from muika.core.memory import MemoryCategory, MemoryManager, MemoryQuery, StateUpdate
+from muika.core.memory import (
+    PROMPT_WORKING_SUMMARY_CHARS,
+    MemoryCategory,
+    MemoryManager,
+    MemoryQuery,
+    StateUpdate,
+    _visible_working_summary,
+)
 from muika.core.memory_models import (
     PROMPT_LASTING_TOKENS,
     DreamResult,
@@ -501,3 +508,126 @@ def test_lasting_prompt_keeps_the_feeling_when_it_already_fills_the_budget():
     assert reason in rendered
     assert "fix_date" not in rendered and "把日报日期改对" not in rendered
     assert state.intentions[0].description == "把日报日期改对。"
+
+
+def test_visible_working_summary_within_budget_returns_unchanged():
+    short_summary = "我们安静地聊了彼此的心情，沐沐提到了最近的作息。"
+    assert _visible_working_summary(short_summary) == short_summary
+
+
+def test_visible_working_summary_keeps_newest_paragraphs_in_chronological_order():
+    p1 = "最早聊的话题：" + "前" * 300
+    p2 = "中间聊的话题：" + "中" * 200
+    p3 = "最近聊的话题：" + "后" * 150
+    full_text = f"{p1}\n\n{p2}\n\n{p3}"
+    visible = _visible_working_summary(full_text)
+    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
+    assert p1 not in visible
+    assert "中间聊的话题" in visible
+    assert "最近聊的话题" in visible
+    # 验证按时间先后顺序排列（最新段落仍在最末）
+    assert visible.index("中间聊的话题") < visible.index("最近聊的话题")
+
+
+def test_visible_working_summary_single_oversized_paragraph_tail_fallback():
+    oversized = "开头历史" + "字" * 600 + "关键末尾"
+    visible = _visible_working_summary(oversized)
+    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
+    assert "关键末尾" in visible
+    assert "开头历史" not in visible
+
+
+async def test_prepare_context_clips_working_summary_in_system_without_mutating_snapshot():
+    memory = MemoryManager()
+    await memory.load()
+    long_summary = "早期事件记录。\n\n" + "长段叙事。" * 200 + "\n\n最近我们聊了雨天和诗。"
+    memory.snapshot.working_summary = long_summary
+    request = ModelRequest("当前用户的问题", history=[])
+    model = SimpleNamespace(
+        config=ModelConfig(
+            provider="openai", model_name="test", api_key="test", context_window=1000000, max_tokens=1000
+        )
+    )
+
+    prepared, _ = await memory.prepare_context(model, request, [])
+    system_text = prepared.system or ""
+    assert "[Working context summary]\n" in system_text
+    summary_block = system_text.split("[Working context summary]\n")[1]
+    assert len(summary_block) <= PROMPT_WORKING_SUMMARY_CHARS
+    assert "最近我们聊了雨天和诗" in summary_block
+    # 核心约束：只读投影，绝不把截断结果写回 snapshot
+    assert memory.snapshot.working_summary == long_summary
+
+
+async def test_pruned_working_summary_topics_remain_retrievable_from_experience():
+    memory = MemoryManager()
+    await memory.load()
+    # 模拟一条被工作摘要淘汰但在经历库中留存的历史对话
+    exp_id = await memory.add_context("user", "沐沐在很久以前提过的一个极其生僻的冷门话题暗号xyz789")
+    # 构造超长旧摘要，早期包含该冷门话题，最新段落为其他话题
+    old_topic = "早期我们曾聊过冷门话题暗号xyz789。\n\n" + "中间其他无关叙事。" * 60
+    recent_topic = "最新我们正在讨论关于今晚写代码的安排。"
+    memory.snapshot.working_summary = f"{old_topic}\n\n{recent_topic}"
+
+    model = SimpleNamespace(
+        config=ModelConfig(
+            provider="openai", model_name="test", api_key="test", context_window=1000000, max_tokens=1000
+        )
+    )
+    prepared, _ = await memory.prepare_context(model, ModelRequest("用户新消息"), [])
+    system_text = prepared.system or ""
+    # 验证冷门话题确实被 _visible_working_summary 裁出注入视图
+    assert "xyz789" not in system_text
+    assert "今晚写代码" in system_text
+    # 验证连续性兜底：尽管工作摘要被裁，该经历依然在数据库中完整保留，可随时通过 read_source 调取
+    original = await memory.read_source(f"experience:{exp_id}")
+    assert "xyz789" in original
+
+
+async def test_summarize_dialogue_force_records_unreplied_proactive_hook(fake_llm_factory):
+    memory = MemoryManager()
+    await memory.load()
+    proactive_text = "半梦半醒想起吉萨大金字塔与登月的时间错位，你醒了可以看看。"
+    await memory.add_context("muika", proactive_text)
+    # 模拟沐沐尚未回复
+    captured_requests = []
+
+    def fake_ask(req):
+        captured_requests.append(req)
+        return ModelCompletions(text="Muika 主动分享了金字塔与登月的时间错位，沐沐暂未回复。")
+
+    model = fake_llm_factory(side_effect=fake_ask)
+    success = await memory.summarize_dialogue(model, force=True)
+    assert success
+    # 验证行为：未回复的主动消息被完整送入待摘要材料的 prompt 中
+    assert proactive_text in captured_requests[0].prompt
+    assert "金字塔与登月" in memory.snapshot.latest_dialogue_summary
+    assert len(memory.snapshot.latest_dialogue_summary) <= PROMPT_WORKING_SUMMARY_CHARS
+
+
+async def test_prepare_context_compaction_clips_system_while_preserving_full_working_summary():
+    memory = MemoryManager()
+    await memory.load()
+    for i in range(10):
+        await memory.add_context("user" if i % 2 == 0 else "muika", f"历史对话回合内容 {i} " * 30)
+
+    full_compactor_output = (
+        "压缩产出的新工作摘要开头。\n\n" + "很长很长的中间工作总结。" * 50 + "\n\n压缩产出的最新工作摘要末尾。"
+    )
+    compactor = SimpleNamespace(summarize=AsyncMock(return_value=full_compactor_output))
+
+    config = ModelConfig(provider="openai", model_name="test", api_key="test", context_window=8192, max_tokens=512)
+    model = SimpleNamespace(config=config, compactor=compactor)
+
+    request = ModelRequest("当前新问题", history=list(memory.recent_turns))
+    compressed, _ = await memory.prepare_context(model, request, [], force=True)
+
+    system_text = compressed.system or ""
+    assert "[Working context summary]\n" in system_text
+    summary_block = system_text.split("[Working context summary]\n")[1]
+    # 验证注入给模型的 system 提示词严格遵守 500 字符限制
+    assert len(summary_block) <= PROMPT_WORKING_SUMMARY_CHARS
+    assert "最新工作摘要末尾" in summary_block
+    # 核心约束：snapshot.working_summary 保存的是 compactor 的完整生成文本，绝不被截断回写
+    assert memory.snapshot.working_summary == full_compactor_output
+    assert len(memory.snapshot.working_summary) > PROMPT_WORKING_SUMMARY_CHARS
