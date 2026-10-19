@@ -182,6 +182,7 @@ class MuikaBrain:
             event_type="",
             state=state,
             is_expand_topic=True,
+            action_permission=mas_config.action_permission,
             memory_context=memory_context,
             time_tone_hint=time_tone_hint,
             adapters_info=self.generate_adapters_info(adapters),
@@ -231,6 +232,7 @@ class MuikaBrain:
         resources: Optional[List[Resource]] = None,
         adapters: Optional[List[AdapterInfo]] = None,
         god_mode: bool = False,
+        god_mode_pending: bool = False,
         now: datetime | None = None,
         task_context: str = "",
     ) -> str:
@@ -252,6 +254,7 @@ class MuikaBrain:
             event_type=event.type,
             state=state,
             is_chat=True,
+            action_permission=mas_config.action_permission,
             heartbeat_intensity=get_model_config_manager().heart_intensity,
             memory_context=memory_context,
             adapters_info=self.generate_adapters_info(adapters, now=current_time),
@@ -343,6 +346,22 @@ class MuikaBrain:
                 f"\n\n[Private action coordination]\n{task_context}"
                 "\nUse these references for relevant action control. They are not dialogue topics. "
                 "Background work can continue while you keep the player company."
+            )
+        if god_mode:
+            prompt += (
+                "\n[Direct action handoff]\n"
+                "Direct tools are available for this task. Use the saved task state, inspect files before changing them, "
+                "and do not repeat completed actions. When the task is finished, use "
+                '<agent task_id="the existing ID" action="complete"> with an <agent_result status="completed"> report inside, '
+                "then close </agent>. The report contains JSON fields summary, completed, verification, and remaining. "
+                'If you cannot finish, use status="blocked". To return the work to your acting half, use action="continue". '
+                "Completing or returning the handoff releases direct control so queued tasks can proceed."
+            )
+        elif god_mode_pending:
+            prompt += (
+                "\n[Direct action request]\n"
+                "You asked to take over the current task. Wait for the handoff event before claiming you have taken over; "
+                "it arrives only after your acting half pauses and its running processes finish. Keep talking normally meanwhile."
             )
 
         # 历史记录去重

@@ -572,6 +572,7 @@ class Muika:
                     memory=self.memory,
                     adapters=self.current_adapters,
                     god_mode=self._god_mode,
+                    god_mode_pending=self._god_mode_pending,
                     resources=event.payload.message.resources if event.type == "user_message" else None,
                     task_context="\n".join(filter(None, (self.agent_tasks.describe(), self.restart.describe()))),
                 )

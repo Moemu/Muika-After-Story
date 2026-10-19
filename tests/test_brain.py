@@ -29,6 +29,7 @@ from muika.llm import ModelCompletions, ModelConfig
 from muika.llm._schema import FunctionTool
 from muika.llm.context import ContextCompactor
 from muika.models import AdapterInfo, Message
+from muika.template import PromptTemplatesData, generate_prompt_from_template
 
 
 def _user_event(msg: str = "hello") -> UserMessageEvent:
@@ -292,6 +293,57 @@ async def test_generate_reply_no_god_mode_no_tools(fake_llm_factory):
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=False)
     assert fake.requests[0].tools is None
+
+
+async def test_generate_reply_god_mode_active_shows_handoff_flow(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    brain = _brain(fake)
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
+        await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
+    assert "[Direct action handoff]" in fake.requests[0].prompt
+    assert 'action="complete"' in fake.requests[0].prompt
+    # 已交接时不再提示等待，避免暗示一个已经发生的事件。
+    assert "[Direct action request]" not in fake.requests[0].prompt
+    # 状态说明随当前输入下发，system 前缀保持稳定以利缓存。
+    assert "[Direct action handoff]" not in fake.requests[0].system
+
+
+async def test_generate_reply_god_mode_pending_waits_for_handoff(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    brain = _brain(fake)
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
+        await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode_pending=True)
+    assert "[Direct action request]" in fake.requests[0].prompt
+    assert "Wait for the handoff event" in fake.requests[0].prompt
+    assert "[Direct action handoff]" not in fake.requests[0].prompt
+    assert "[Direct action request]" not in fake.requests[0].system
+
+
+async def test_generate_reply_daily_turn_has_no_direct_action_prompt(fake_llm_factory):
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    brain = _brain(fake)
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
+        await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=False)
+    assert "[Direct action request]" not in fake.requests[0].prompt
+    assert "[Direct action handoff]" not in fake.requests[0].prompt
+    assert "[Direct action request]" not in fake.requests[0].system
+    assert "[Direct action handoff]" not in fake.requests[0].system
+
+
+def test_persona_template_renders_action_permission_variants():
+    base = {"event_type": "user_message", "state": MuikaState(), "is_chat": True}
+    self_modify = generate_prompt_from_template(
+        "Muika.md.jinja2", PromptTemplatesData(**base, action_permission="self_modify")
+    )
+    write = generate_prompt_from_template("Muika.md.jinja2", PromptTemplatesData(**base, action_permission="write"))
+    read_only = generate_prompt_from_template(
+        "Muika.md.jinja2", PromptTemplatesData(**base, action_permission="read_only")
+    )
+    assert "rewrite a small part of yourself" in self_modify
+    assert "cannot rewrite yourself" not in self_modify
+    assert "cannot rewrite yourself" in write
+    assert "rewrite a small part of yourself" not in write
+    assert "only read through her" in read_only
 
 
 # ---------------------------------------------------------------------------

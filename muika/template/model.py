@@ -19,6 +19,8 @@ class PromptTemplatesData(BaseModel):
 
     is_chat: bool = False
     """当前为对话模式"""
+    action_permission: str = "write"
+    """行动权限，用于模板按权限渲染自我修改能力。"""
     is_first_session: bool = False
     """是否为初次对话"""
     is_expand_topic: bool = False
