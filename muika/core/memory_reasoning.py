@@ -57,6 +57,7 @@ merging different people.
 For equivalent legacy facts, cite and supersede the old fact IDs. Keep the same value and category; this does
 not count as recall.
 The prompt lists each current open intention by id. Review that list against today's evidence.
+Review every listed id; do not drop one silently.
 An open intention is something she still means to do, find out, or continue, and can later mark resolved or abandoned.
 What he said, or what remains unanswered, is a fact, not an intention.
 A way of speaking, a one-time reply, or a decision to stop is not a new intention. If that decision ends an
@@ -66,6 +67,8 @@ Record what he said or what remains unanswered as a fact.
 The same wish has the same desired outcome and the same condition she is still waiting on. A new date,
 different wording, or a note that it is still unfinished is not a new wish. Reuse the listed id and update its
 description. Do not create a new id for a wish already listed.
+When two listed intentions share the same desired outcome and the same waiting condition, keep one id
+(prefer the most recent one), update its description, and mark the other abandoned.
 Update lasting feelings only when the day's evidence warrants it. Preserve unresolved tension without forcing
 action.
 Every dissonance_delta needs source references and a reason.
