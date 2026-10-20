@@ -5,13 +5,14 @@
 """
 
 import asyncio
+import json
 
 import pytest
 from aiohttp import WSMsgType
 from harness import IpcWire, ScriptedTurn, assert_clean_visible
 
 from muika.core.executor import SendReceipt
-from muika.ipc.protocol import CommandResult
+from muika.ipc.protocol import CommandResult, SendMessage
 
 pytestmark = pytest.mark.e2e
 
@@ -91,6 +92,36 @@ async def test_command_result_never_reroutes_to_another_adapter(core_app_factory
         app.recorder.record("command_target_bound", rerouted=0, queued=1)
     finally:
         await qq.close()
+
+
+async def test_outbound_without_target_routes_to_most_active_adapter(core_app_factory):
+    """无目标外发路由到最近活跃适配器；显式 target 只投给该适配器，不改投更活跃连接。"""
+    _app, wire = await _open_ipc(core_app_factory, [])
+    assert wire._ws is not None
+    second = await wire.connect_additional(client_name="second-bot")
+    server = wire._server
+    try:
+        await asyncio.sleep(0.1)
+        server.set_triggering_adapter("second-bot")
+        # 触发消息的适配器离线后，回落到最近活跃连接（second-bot 刚刷新 last_active）
+        server.set_triggering_adapter("offline-adapter")
+        receipt = await server.send_to_bot(SendMessage(content="route-by-activity"))
+        assert receipt is SendReceipt.WRITTEN
+        message = await asyncio.wait_for(second.receive(), 10)
+        assert message.type == WSMsgType.TEXT
+        assert json.loads(message.data)["content"] == "route-by-activity"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(wire._ws.receive(), 0.3)
+
+        receipt = await server.send_to_bot(SendMessage(content="route-by-target"), target="e2e-bot")
+        assert receipt is SendReceipt.WRITTEN
+        message = await asyncio.wait_for(wire._ws.receive(), 10)
+        assert message.type == WSMsgType.TEXT
+        assert json.loads(message.data)["content"] == "route-by-target"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(second.receive(), 0.3)
+    finally:
+        await wire.close()
 
 
 async def test_ipc_negative_paths(core_app_factory):

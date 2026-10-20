@@ -49,6 +49,7 @@ class IpcWire:
         self.app.attach_ipc_outbound(self._outbound)
         self._client: TestClient | None = None
         self._ws: ClientWebSocketResponse | None = None
+        self._extra_clients: list[ClientWebSocketResponse] = []
         self._server = CoreWsServer(secret=secret)
         self._install_handlers()
 
@@ -147,8 +148,20 @@ class IpcWire:
             raise
         self._record("open", client=client_name)
 
+    async def connect_additional(self, *, client_name: str) -> ClientWebSocketResponse:
+        """在同一真实服务端上再建一条 Bot 连接，用于多适配器路由断言。"""
+        assert self._client is not None, "call open() first"
+        ws = await self._client.ws_connect("/ws", headers={"X-Client-Name": client_name, "X-Auth-Token": self.secret})
+        self._extra_clients.append(ws)
+        self._record("open", client=client_name)
+        return ws
+
     async def close(self) -> None:
         """断开 Bot 连接并停止测试服务端。"""
+        for extra in self._extra_clients:
+            if not extra.closed:
+                await extra.close()
+        self._extra_clients.clear()
         ws, self._ws = self._ws, None
         if ws is not None:
             if not ws.closed:
