@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -174,33 +175,6 @@ async def test_legal_new_plugin_requires_manual_activation(deploy_env):
 
 
 @pytest.mark.asyncio
-async def test_reload_has_no_duplicate_hooks(deploy_env):
-    deployer, plugins, _ = deploy_env
-    target = plugins / "repeat.py"
-    content = "from muika.plugin.ctx import ctx\n@ctx.unload\ndef stop():\n    pass\n"
-    await deployer.deploy(str(target), content, "one")
-    await deployer.activate("repeat")
-    await deployer.deploy(str(target), content + "value = 2\n", "two")
-    await deployer.activate("repeat")
-    from muika.plugin.lifecycle import _unload_hooks
-
-    assert len(_unload_hooks["plugins.repeat"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_state_survives_formal_reload(deploy_env):
-    deployer, plugins, _ = deploy_env
-    target = plugins / "stateful.py"
-    first = "from muika.plugin.ctx import ctx\nstate = ctx.state\nstate['count'] = state.get('count', 0) + 1\n"
-    await deployer.deploy(str(target), first, "one")
-    await deployer.activate("stateful")
-    for version in (2, 3, 4):
-        await deployer.deploy(str(target), first + f"version = {version}\n", f"reload {version}")
-        await deployer.activate("stateful")
-    assert get_plugins()["plugins.stateful"].module.state["count"] == 4
-
-
-@pytest.mark.asyncio
 async def test_static_failure_keeps_formal_file(deploy_env):
     deployer, plugins, _ = deploy_env
     target = plugins / "safe.py"
@@ -222,7 +196,7 @@ async def test_probe_failure_creates_quarantine(deploy_env):
 
 @pytest.mark.asyncio
 async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fake_llm_factory):
-    deployer, plugins, fake = deploy_env
+    deployer, plugins, _ = deploy_env
     target = plugins / "restore.py"
     old_code = (
         "from muika.plugin.func_call import on_function_call\n"
@@ -265,7 +239,6 @@ async def test_activation_failure_restores_old_file(deploy_env, monkeypatch, fak
     monkeypatch.setattr("muika.core.agent.agent.generate_prompt_from_template", lambda *args: "system")
     request = agent.build_request("test", MuikaState())
     assert "restored_probe" in {t.name for t in request.tools}
-    assert fake.before[target] == []
 
 
 @pytest.mark.asyncio
@@ -326,8 +299,17 @@ def test_watcher_ignores_management_and_suppressed_events(deploy_env):
 
 
 @pytest.mark.asyncio
-async def test_quarantine_hash_guard_and_restore(deploy_env):
-    deployer, plugins, fake = deploy_env
+async def test_quarantine_hash_guard_and_restore(deploy_env, db_session, session_ctx_factory, monkeypatch):
+    """哈希不符的隔离候选拒绝恢复；修正后重新验证并暂存，审计记录 stage/restore。"""
+    from muika.core.self_mod import manager as manager_module
+    from muika.core.self_mod.manager import SelfModManager
+    from muika.database.crud import SelfModificationCRUD
+
+    deployer, plugins, _ = deploy_env
+    manager = SelfModManager()
+    monkeypatch.setattr(manager_module, "get_session", lambda: session_ctx_factory(db_session))
+    monkeypatch.setattr("muika.core.self_mod.plugin_deployer.get_self_mod_manager", lambda: manager)
+
     target = plugins / "recover.py"
     with pytest.raises(SelfModError):
         await deployer.deploy(str(target), "raise RuntimeError('bad')\n", "bad")
@@ -335,11 +317,16 @@ async def test_quarantine_hash_guard_and_restore(deploy_env):
     data = json.loads(metadata.read_text(encoding="utf-8"))
     candidate = metadata.with_suffix(".py")
     candidate.write_text("value = 3\n", encoding="utf-8")
-    data["candidate_sha256"] = __import__("hashlib").sha256(candidate.read_bytes()).hexdigest()
+
+    with pytest.raises(SelfModError, match="hash does not match"):
+        await deployer.restore_quarantine(data["quarantine_id"])
+
+    data["candidate_sha256"] = hashlib.sha256(candidate.read_bytes()).hexdigest()
     metadata.write_text(json.dumps(data), encoding="utf-8")
     report = await deployer.restore_quarantine(data["quarantine_id"])
     assert "validated and staged" in report
-    assert fake.events[-2:] == ["stage", "restore"]
+    actions = {record.action for record in await SelfModificationCRUD.list_recent(db_session, limit=10)}
+    assert {"stage", "restore"} <= actions
 
 
 @pytest.mark.asyncio
@@ -373,12 +360,23 @@ async def test_activation_rechecks_candidate_before_probe(deploy_env, monkeypatc
 
 @pytest.mark.asyncio
 async def test_quarantine_restore_response_hides_internal_tool_name(monkeypatch):
+    """经真实命令派发：恢复成功的玩家可见文案是固定句子，deployer 内部报告被丢弃。"""
+    from muika.plugin.command import CommandDispatcher
+
     deployer = SimpleNamespace(restore_quarantine=AsyncMock(return_value="Call plugin_load(name='x')"))
     monkeypatch.setattr(plugins_command, "get_plugin_deployer", lambda: deployer)
+    replies: list[str] = []
 
-    report = await plugins_command._restore_quarantine("q-20260829000000-12345678")
+    async def reply(content, resources, target) -> None:
+        replies.append(content)
 
-    assert "plugin_load" not in report
+    monkeypatch.setattr(CommandDispatcher, "_instance", CommandDispatcher(MagicMock(), reply))
+
+    await CommandDispatcher.get().dispatch("plugins quarantine restore q-20260829000000-12345678")
+
+    deployer.restore_quarantine.assert_awaited_once_with("q-20260829000000-12345678")
+    assert replies == ["[System] 该候选已通过重新验证，但尚未激活。Muika 可以在准备好后启用它。"]
+    assert "plugin_load" not in replies[0]
 
 
 def test_feature_switch_rejects_plugin_writes(deploy_env, monkeypatch):

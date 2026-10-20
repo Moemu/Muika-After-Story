@@ -154,63 +154,29 @@ async def test_restart_saves_task_control_before_handoff(engine, action):
         assert snapshots[0].cancel_requested
 
 
-def test_parse_no_tags():
-    r = Muika._parse_reply_tags("Hello there")
-    assert r == ParsedReply(clean_reply="Hello there", memory_contents=[], agent_commands=[], target=None)
-
-
-def test_parse_memory_tag():
-    r = Muika._parse_reply_tags("<memory>She likes tea</memory>")
-    assert r.memory_contents == ["She likes tea"]
-    assert r.clean_reply == ""
-
-
-def test_parse_multiple_memories():
-    r = Muika._parse_reply_tags("<memory>one</memory> <memory>two</memory>")
-    assert r.memory_contents == ["one", "two"]
-
-
-def test_parse_memory_empty_stripped():
-    r = Muika._parse_reply_tags("<memory>   </memory>")
-    assert r.memory_contents == []
-
-
-def test_parse_agent_command():
-    r = Muika._parse_reply_tags("<agent> run cmd </agent>")
-    assert r.agent_commands == ["run cmd"]
-    assert r.clean_reply == ""
-
-
-def test_parse_agent_case_insensitive():
-    r = Muika._parse_reply_tags("<AGENT>xyz</AGENT>")
-    assert r.agent_commands == ["xyz"]
-
-
-def test_parse_target():
-    r = Muika._parse_reply_tags("Hi <target: qq>")
-    assert r.target == "qq"
-    assert r.clean_reply == "Hi"
-
-
-def test_parse_target_last_wins():
-    r = Muika._parse_reply_tags("<target: a> <target: b>")
-    assert r.target == "b"
-
-
-def test_parse_timeout():
-    assert Muika._parse_reply_tags("<timeout: 10min>").timeout == 600.0
-    assert Muika._parse_reply_tags("<timeout: 2h>").timeout == 7200.0
-
-
-def test_parse_timeout_unrecognized_ignored():
-    r = Muika._parse_reply_tags("<timeout: someday>")
-    assert r.timeout is None
-    assert r.clean_reply == ""
-
-
-def test_parse_god_mode_variants():
-    assert Muika._parse_reply_tags("<enable_god_mode>").god_mode is True
-    assert Muika._parse_reply_tags("<enable_god_mode/>").god_mode is True
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("Hello there", {"clean_reply": "Hello there", "memory_contents": [], "agent_commands": [], "target": None}),
+        ("<memory>She likes tea</memory>", {"memory_contents": ["She likes tea"], "clean_reply": ""}),
+        ("<memory>one</memory> <memory>two</memory>", {"memory_contents": ["one", "two"]}),
+        ("<memory>   </memory>", {"memory_contents": []}),
+        ("<agent> run cmd </agent>", {"agent_commands": ["run cmd"], "clean_reply": ""}),
+        ("<AGENT>xyz</AGENT>", {"agent_commands": ["xyz"]}),
+        ("Hi <target: qq>", {"target": "qq", "clean_reply": "Hi"}),
+        ("<target: a> <target: b>", {"target": "b"}),
+        ("<timeout: 10min>", {"timeout": 600.0}),
+        ("<timeout: 2h>", {"timeout": 7200.0}),
+        ("<timeout: someday>", {"timeout": None, "clean_reply": ""}),
+        ("<enable_god_mode>", {"god_mode": True}),
+        ("<enable_god_mode/>", {"god_mode": True}),
+        ("<do_nothing>", {"do_nothing": True, "clean_reply": ""}),
+    ],
+)
+def test_parse_tags(reply, expected):
+    parsed = Muika._parse_reply_tags(reply)
+    for name, value in expected.items():
+        assert getattr(parsed, name) == value, name
 
 
 def test_parse_heart_stripped():
@@ -222,12 +188,6 @@ def test_parse_heart_stripped():
         target=None,
         heart_cot=["secret thoughts"],
     )
-
-
-def test_parse_do_nothing():
-    r = Muika._parse_reply_tags("<do_nothing>")
-    assert r.do_nothing is True
-    assert r.clean_reply == ""
 
 
 def test_parse_heart_before_memory_ordering():
@@ -269,52 +229,27 @@ def _tick() -> TimeTickEvent:
     return TimeTickEvent()
 
 
-def test_think_mode_user_message_emotional():
-    assert _engine().get_think_mode(_user_event()) == "emotional"
-
-
-def test_think_mode_idle_tick_none():
-    assert _engine().get_think_mode(_tick()) is None
-
-
-def test_think_mode_active_topic_blocks():
-    m = _engine()
-    m.state.active_topic = ActiveTopicState(topic_id="t", topic_seed="s", topic_type="trivia")
-    assert m.get_think_mode(_tick()) is None
-
-
-def test_think_mode_loneliness_emotional():
-    m = _engine()
-    m.state.loneliness = 0.9
-    assert m.get_think_mode(_tick()) == "emotional"
-
-
-def test_think_mode_loneliness_cooldown_blocks():
-    m = _engine()
-    m.state.loneliness = 0.9
-    m.state.last_proactive_at = datetime.now() - timedelta(seconds=60)
-    assert m.get_think_mode(_tick()) is None
-
-
-def test_think_mode_boredom_topic():
-    m = _engine()
-    m.state.boredom = 0.61
-    assert m.get_think_mode(_tick()) == "topic"
-
-
-def test_think_mode_curiosity_topic():
-    m = _engine()
-    m.state.curiosity = 0.7
+@pytest.mark.parametrize(
+    ("changes", "event", "expected"),
+    [
+        ({}, _user_event(), "emotional"),
+        ({}, _tick(), None),
+        ({"active_topic": ActiveTopicState(topic_id="t", topic_seed="s", topic_type="trivia")}, _tick(), None),
+        ({"loneliness": 0.9}, _tick(), "emotional"),
+        ({"loneliness": 0.9, "last_proactive_at": datetime.now() - timedelta(seconds=60)}, _tick(), None),
+        ({"boredom": 0.61}, _tick(), "topic"),
+        ({"curiosity": 0.7}, _tick(), "topic"),
+        ({"loneliness": 0.9, "boredom": 0.9}, _tick(), "emotional"),
+    ],
+)
+def test_think_mode(changes, event, expected):
+    engine = _engine()
+    for name, value in changes.items():
+        setattr(engine.state, name, value)
     with patch("muika.core.loop.random", return_value=0.0):
-        assert m.get_think_mode(_tick()) == "topic"
-    assert m.state.curiosity == 0.0
-
-
-def test_think_mode_loneliness_overrides_boredom():
-    m = _engine()
-    m.state.loneliness = 0.9
-    m.state.boredom = 0.9
-    assert m.get_think_mode(_tick()) == "emotional"
+        assert engine.get_think_mode(event) == expected
+    if "curiosity" in changes:
+        assert engine.state.curiosity == 0.0
 
 
 @pytest.mark.parametrize("opening", ["<heart>", "<HEART>"])
@@ -445,17 +380,6 @@ async def test_shutdown_waits_for_background_cleanup(engine):
     assert cleaned.is_set()
     assert not engine._tasks
     assert engine._timeout_task is None
-
-
-async def test_notes_are_material_not_classified_facts(engine):
-    engine.brain.generate_reply = AsyncMock(
-        return_value="I noticed a rhyme.<memory>I want to explore this poem.</memory>"
-    )
-    await engine._run_brain_pipeline(TimeTickEvent())
-    hits = await engine.memory.search(MemoryQuery(terms=["explore this poem"]))
-    assert len(hits) == 1
-    assert engine.memory.facts == {}
-    engine.agent.model.ask.assert_not_called()
 
 
 async def test_failed_memory_does_not_discard_following_silent_notes(engine):

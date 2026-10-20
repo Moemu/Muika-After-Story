@@ -1,9 +1,10 @@
 """``TopicStore``（临时 YAML 注入）与 ``TopicManager.get_next_topic`` 测试。"""
 
 import asyncio
+import random
 from collections import deque
+from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -13,6 +14,7 @@ from muika.core import topic_manager as topic_manager_module
 from muika.core.actions.tools import _topics as topic_tools
 from muika.core.state import ActiveTopicState, MuikaState
 from muika.core.topic_manager import EventTopic, TopicManager, TopicSource, TopicStore
+from muika.database.crud import TopicHistoryCRUD
 
 
 def _write_topics(tmp_path: Path, topics: list[dict]) -> Path:
@@ -35,36 +37,21 @@ def _manager_with_store(store: TopicStore) -> TopicManager:
 # ---------------------------------------------------------------------------
 
 
-def test_topic_store_loads_and_indexes(tmp_path):
-    p = _write_topics(
-        tmp_path,
-        [
-            {"id": "a1", "category": "trivia", "concept": "moon"},
-            {"id": "a2", "category": "philosophy", "concept": "mind"},
-        ],
-    )
-    store = TopicStore(p)
-    assert set(store.categories()) == {"trivia", "philosophy"}
-    assert [t.id for t in store.get_by_category("trivia")] == ["a1"]
+@pytest.mark.parametrize(
+    ("entry", "categories", "category", "content"),
+    [
+        ({"id": "a1", "category": "trivia", "concept": "moon"}, ["trivia"], "trivia", "moon"),
+        ({"id": "a1", "concept": "moon"}, ["misc"], "misc", "moon"),
+        ({"id": "a1", "content": "star"}, ["misc"], "misc", "star"),
+    ],
+    ids=["indexed", "concept_field", "content_fallback"],
+)
+def test_topic_store_loads_and_indexes(tmp_path, entry, categories, category, content):
+    store = TopicStore(_write_topics(tmp_path, [entry]))
+    assert store.categories() == categories
+    assert [t.id for t in store.get_by_category(category)] == ["a1"]
+    assert store.get_by_category(category)[0].content == content
     assert store.is_empty() is False
-
-
-def test_topic_store_concept_field(tmp_path):
-    p = _write_topics(tmp_path, [{"id": "a1", "concept": "moon"}])
-    store = TopicStore(p)
-    assert store.get_by_category("misc")[0].content == "moon"
-
-
-def test_topic_store_content_field_fallback(tmp_path):
-    p = _write_topics(tmp_path, [{"id": "a1", "content": "star"}])
-    store = TopicStore(p)
-    assert store.get_by_category("misc")[0].content == "star"
-
-
-def test_topic_store_default_category_misc(tmp_path):
-    p = _write_topics(tmp_path, [{"id": "a1", "concept": "x"}])
-    store = TopicStore(p)
-    assert store.categories() == ["misc"]
 
 
 def test_topic_store_missing_file_empty(tmp_path):
@@ -159,44 +146,43 @@ async def test_get_next_topic_empty_store_none(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_next_topic_weighted_selection(tmp_path):
-    p = _write_topics(tmp_path, [{"id": "a1", "category": "trivia", "concept": "moon"}])
-    store = TopicStore(p)
-    tm = _manager_with_store(store)
+async def test_get_next_topic_weighted_selection(tmp_path, redirect_get_session):
+    p = _write_topics(
+        tmp_path,
+        [
+            {"id": "a1", "category": "trivia", "concept": "moon"},
+            {"id": "a2", "category": "trivia", "concept": "mind"},
+        ],
+    )
+    tm = _manager_with_store(TopicStore(p))
+    # a2 有低互动历史且已过冷却：候选权重必须来自真实历史，而不是测试注入
+    await TopicHistoryCRUD.record(redirect_get_session, topic_id="a2", user_engaged=False)
+    await TopicHistoryCRUD.record(redirect_get_session, topic_id="a2", user_engaged=False)
+    row = await TopicHistoryCRUD.get_by_topic_id(redirect_get_session, "a2")
+    assert row is not None and row.use_count == 2 and row.engaged_count == 0
+    row.last_used_at = (datetime.now() - timedelta(days=8)).isoformat()
+    await redirect_get_session.commit()
 
-    async def fake_candidates():
-        return {"trivia": [(t, 1.0) for t in store.get_by_category("trivia")]}
-
-    tm._get_available_candidates = fake_candidates
-
-    with patch(
-        "muika.core.topic_manager.random.choices",
-        side_effect=lambda *args, **kwargs: [args[0][0]],
-    ):
-        chosen = await tm.get_next_topic(MuikaState())
-
-    assert chosen is not None
-    assert chosen.id == "a1"
-    assert "trivia" in tm._recent_categories
+    random.seed(20261020)
+    chosen_ids = [(await tm.get_next_topic(MuikaState())).id for _ in range(100)]
+    assert set(chosen_ids) == {"a1", "a2"}
+    assert chosen_ids.count("a1") > chosen_ids.count("a2")
+    assert list(tm._recent_categories) == ["trivia", "trivia", "trivia"]
 
 
 @pytest.mark.asyncio
-async def test_get_next_topic_all_cooldown_none(tmp_path):
-    p = _write_topics(tmp_path, [{"id": "a1", "category": "trivia", "concept": "moon"}])
+async def test_get_next_topic_all_cooldown_none(tmp_path, redirect_get_session):
+    p = _write_topics(tmp_path, [{"id": "a1", "category": "trivia", "concept": "moon", "cooldown_days": 7}])
     tm = _manager_with_store(TopicStore(p))
+    assert tm.store.categories() == ["trivia"]
 
-    async def fake_candidates():
-        return {}
-
-    tm._get_available_candidates = fake_candidates
+    await tm.record_topic_used("a1", user_engaged=False)
 
     assert await tm.get_next_topic(MuikaState()) is None
 
 
 @pytest.mark.asyncio
 async def test_record_topic_used_writes_db(tmp_path, redirect_get_session):
-    from muika.database.crud import TopicHistoryCRUD
-
     tm = _manager_with_store(TopicStore(tmp_path / "empty.yml"))
     await tm.record_topic_used("t1", user_engaged=False)
     await tm.record_topic_used("t1", user_engaged=True)

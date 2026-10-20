@@ -74,32 +74,23 @@ async def test_wait_returns_running_and_later_reads_all_output(processes, tmp_pa
 
 async def test_output_can_be_read_in_pages(processes, tmp_path):
     process_id = await processes.start(
-        [sys.executable, "-u", "-c", "print('abcdefghij', end='')"],
+        [sys.executable, "-u", "-c", "print('你好abcdefghij', end='')"],
         env=_environment(),
         cwd=str(tmp_path),
         owner=None,
         timeout=5,
     )
-    first = await processes.wait(process_id, owner=None, seconds=3, max_bytes=4)
-    second = await processes.wait(process_id, owner=None, seconds=0, stdout_offset=first.stdout_offset, max_bytes=4)
-    last = await processes.wait(process_id, owner=None, seconds=0, stdout_offset=second.stdout_offset, max_bytes=4)
-    assert first.stdout + second.stdout + last.stdout == "abcdefghij"
-    assert first.stdout_more and second.stdout_more and not last.stdout_more
-
-
-def test_output_pages_preserve_utf8_characters(tmp_path):
-    output = tmp_path / "output.log"
-    output.write_text("你好world", encoding="utf-8")
     offset = 0
-    chunks = []
-    while True:
-        content, following, more = ProcessManager._read(output, offset, 1)
-        assert following > offset
-        chunks.append(content)
-        offset = following
-        if not more:
-            break
-    assert "".join(chunks) == "你好world"
+    chunks: list[str] = []
+    more = True
+    while more:
+        page = await processes.wait(
+            process_id, owner=None, seconds=3 if offset == 0 else 0, stdout_offset=offset, max_bytes=4
+        )
+        assert page.stdout_offset > offset  # 每页都前进，不重复也不丢字节
+        chunks.append(page.stdout)
+        offset, more = page.stdout_offset, page.stdout_more
+    assert "".join(chunks) == "你好abcdefghij"  # 分页边界不截断多字节字符
 
 
 async def test_stopping_execution_terminates_descendants(processes, tmp_path):

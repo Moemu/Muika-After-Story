@@ -38,12 +38,10 @@ async def test_usage_save_and_get(db_session):
     total = await UsageORM.get_usage(db_session, plugin="brain", date=_today(), model="m")
     assert total == 19
 
-
-async def test_usage_save_negative_ignored(db_session):
+    # 负 token 不得抵消已记录用量
     await UsageORM.save_usage(db_session, plugin="p", model="m", input_tokens=-1, output_tokens=0, cached_tokens=0)
     await db_session.commit()
-    total = await UsageORM.get_usage(db_session, plugin="p", date=None, model=None)
-    assert total == 0
+    assert await UsageORM.get_usage(db_session, plugin="p", date=None, model=None) == 0
 
 
 async def test_usage_periods_include_today_without_an_extra_day(db_session):
@@ -140,6 +138,7 @@ async def test_archive_update_missing_creates(db_session):
 
 
 async def test_topic_history_record_create_increment(db_session):
+    assert await TopicHistoryCRUD.get_by_topic_id(db_session, "missing") is None
     await TopicHistoryCRUD.record(db_session, topic_id="t1", user_engaged=False)
     await db_session.commit()
     await TopicHistoryCRUD.record(db_session, topic_id="t1", user_engaged=True)
@@ -148,13 +147,6 @@ async def test_topic_history_record_create_increment(db_session):
     assert row is not None
     assert row.use_count == 2
     assert row.engaged_count == 1
-
-
-async def test_topic_history_get_by_topic_id_miss_and_hit(db_session):
-    assert await TopicHistoryCRUD.get_by_topic_id(db_session, "missing") is None
-    await TopicHistoryCRUD.record(db_session, topic_id="t1", user_engaged=False)
-    await db_session.commit()
-    assert await TopicHistoryCRUD.get_by_topic_id(db_session, "t1") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -179,17 +171,11 @@ async def _upsert_rss(db_session, topic_id: str):
     await db_session.commit()
 
 
-async def test_rss_cache_upsert_get(db_session):
-    await _upsert_rss(db_session, "hash1")
-    cached = await RssDigestCacheCRUD.get_cached(db_session, topic_id="hash1", ttl_days=7)
-    assert cached is not None
-    assert cached.score == 80
-
-
 async def test_rss_cache_expired_get_none(db_session):
     await _upsert_rss(db_session, "hash1")
     row = await RssDigestCacheCRUD.get_cached(db_session, topic_id="hash1", ttl_days=365)
     assert row is not None
+    assert row.score == 80
     row.evaluated_at = (datetime.now() - timedelta(days=8)).isoformat()
     await db_session.commit()
 

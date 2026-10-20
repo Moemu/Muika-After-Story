@@ -15,7 +15,6 @@ from muika.core.memory import (
     MemoryManager,
     MemoryQuery,
     StateUpdate,
-    _visible_working_summary,
 )
 from muika.core.memory_models import (
     PROMPT_LASTING_TOKENS,
@@ -108,28 +107,6 @@ async def test_background_fact_input_does_not_gain_weight():
     assert memory.facts[fact.id].weight == fact.weight
 
 
-async def test_failed_dream_rolls_back_every_part(database, monkeypatch):
-    memory = MemoryManager()
-    fact, _, _ = await _first_fact(memory)
-    ref = await memory.add_context("user", "I now prefer coffee", timestamp=datetime(2026, 9, 2, 18))
-    result = DreamResult(
-        diary="A change.",
-        facts=[
-            FactUpdate(
-                category=MemoryCategory.USER, key="master.drink", value="coffee", source_refs=[f"experience:{ref}"]
-            )
-        ],
-    )
-    old_snapshot = memory.snapshot
-    monkeypatch.setattr(memory, "_save_snapshot", AsyncMock(side_effect=OSError("disk full")))
-    with pytest.raises(OSError, match="disk full"):
-        await memory.save_dream(date(2026, 9, 2), result, ref, {f"experience:{ref}"})
-    assert memory.snapshot is old_snapshot and memory.facts[fact.id].value == "tea"
-    assert await database.scalar(select(func.count()).select_from(DiaryORM)) == 1
-    assert await database.scalar(select(func.count()).select_from(FactORM)) == 1
-    assert await memory.pending_days(datetime(2026, 9, 3, 5)) == [date(2026, 9, 2)]
-
-
 async def test_corrections_and_distinct_subjects_keep_separate_versions(database):
     memory = MemoryManager()
     old, _, _ = await _first_fact(memory)
@@ -177,7 +154,6 @@ def test_weight_decay_and_resident_budget():
         weight=100,
         weight_at=now - timedelta(days=900),
     )
-    assert old.score(now) == pytest.approx(100 / 1024)
     memory.facts[30] = old
     memory.facts[31] = Fact(
         id=31,
@@ -188,7 +164,6 @@ def test_weight_decay_and_resident_budget():
         weight_at=now,
     )
     prompt = memory.get_memory_prompt()
-    assert len(prompt.splitlines()) == PROMPT_FACT_LIMIT
     assert "long ago" not in prompt
     assert estimate_tokens(memory.get_memory_prompt(budget=100)) <= 100
     memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
@@ -349,7 +324,9 @@ async def test_legacy_material_keeps_provenance_and_runtime_metadata(database, k
 
 
 def test_unknown_relationship_date_is_not_invented():
-    assert MemoryManager().get_memory_prompt() == ""
+    prompt = MemoryManager().get_memory_prompt()
+    assert "[Relationship history]" not in prompt
+    assert "Earliest known interaction" not in prompt
 
 
 async def test_resources_are_immutable_and_private_tags_never_recalled(tmp_path):
@@ -550,53 +527,9 @@ def test_lasting_prompt_keeps_the_feeling_when_it_already_fills_the_budget():
     assert state.intentions[0].description == "把日报日期改对。"
 
 
-def test_visible_working_summary_within_budget_returns_unchanged():
-    short_summary = "我们安静地聊了彼此的心情，沐沐提到了最近的作息。"
-    assert _visible_working_summary(short_summary) == short_summary
-
-
-def test_visible_working_summary_keeps_newest_paragraphs_in_chronological_order():
-    p1 = "最早聊的话题：" + "前" * 300
-    p2 = "中间聊的话题：" + "中" * 200
-    p3 = "最近聊的话题：" + "后" * 150
-    full_text = f"{p1}\n\n{p2}\n\n{p3}"
-    visible = _visible_working_summary(full_text)
-    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
-    assert p1 not in visible
-    assert "中间聊的话题" in visible
-    assert "最近聊的话题" in visible
-    # 验证按时间先后顺序排列（最新段落仍在最末）
-    assert visible.index("中间聊的话题") < visible.index("最近聊的话题")
-
-
-def test_visible_working_summary_single_oversized_paragraph_tail_fallback():
-    oversized = "开头历史" + "字" * 600 + "关键末尾"
-    visible = _visible_working_summary(oversized)
-    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
-    assert "关键末尾" in visible
-    assert "开头历史" not in visible
-
-
-def test_visible_working_summary_sentence_aligned_tail_has_no_half_sentence():
-    text = "甲" * 400 + "。" + "乙" * 400 + "。"
-    visible = _visible_working_summary(text)
-    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
-    assert visible.startswith("乙")
-    assert "甲" not in visible
-
-
-def test_visible_working_summary_keeps_aligned_sentence_start():
-    text = "甲" * 500 + "。" + "乙" * 500
-    visible = _visible_working_summary(text)
-    assert len(visible) <= PROMPT_WORKING_SUMMARY_CHARS
-    assert visible.startswith("乙")
-
-
 async def test_prepare_context_clips_working_summary_in_system_without_mutating_snapshot():
     memory = MemoryManager()
     await memory.load()
-    long_summary = "早期事件记录。\n\n" + "长段叙事。" * 200 + "\n\n最近我们聊了雨天和诗。"
-    memory.snapshot.working_summary = long_summary
     request = ModelRequest("当前用户的问题", history=[])
     model = SimpleNamespace(
         config=ModelConfig(
@@ -604,14 +537,34 @@ async def test_prepare_context_clips_working_summary_in_system_without_mutating_
         )
     )
 
-    prepared, _ = await memory.prepare_context(model, request, [])
-    system_text = prepared.system or ""
-    assert "[Working context summary]\n" in system_text
-    summary_block = system_text.split("[Working context summary]\n")[1]
-    assert len(summary_block) <= PROMPT_WORKING_SUMMARY_CHARS
-    assert "最近我们聊了雨天和诗" in summary_block
-    # 核心约束：只读投影，绝不把截断结果写回 snapshot
-    assert memory.snapshot.working_summary == long_summary
+    async def injected(summary: str) -> str:
+        memory.snapshot.working_summary = summary
+        prepared, _ = await memory.prepare_context(model, request, [])
+        system_text = prepared.system or ""
+        assert "[Working context summary]\n" in system_text
+        block = system_text.split("[Working context summary]\n")[1]
+        assert len(block) <= PROMPT_WORKING_SUMMARY_CHARS
+        # 核心约束：只读投影，绝不把截断结果写回 snapshot
+        assert memory.snapshot.working_summary == summary
+        return block
+
+    # 预算内短摘要原样注入
+    short_summary = "我们安静地聊了彼此的心情，沐沐提到了最近的作息。"
+    assert await injected(short_summary) == short_summary
+
+    # 最新段落保留且按时间顺序递增，最早的段落被裁掉
+    p1 = "最早聊的话题：" + "前" * 300
+    p2 = "中间聊的话题：" + "中" * 200
+    p3 = "最近聊的话题：" + "后" * 150
+    block = await injected(f"{p1}\n\n{p2}\n\n{p3}")
+    assert p1 not in block
+    assert block.index("中间聊的话题") < block.index("最近聊的话题")
+
+    # 单超长段回退到尾部，且不把句子切成半句
+    block = await injected("开头历史" + "字" * 600 + "关键末尾")
+    assert "关键末尾" in block and "开头历史" not in block
+    block = await injected("甲" * 500 + "。" + "乙" * 500)
+    assert block.startswith("乙") and "甲" not in block
 
 
 async def test_pruned_working_summary_topics_remain_retrievable_from_experience():

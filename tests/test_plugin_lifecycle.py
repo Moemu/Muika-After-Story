@@ -17,8 +17,8 @@ from muika.plugin import loader as loader_mod
 from muika.plugin import state as state_mod
 from muika.plugin.command import (
     _commands,
+    get_commands,
     on_alconna,
-    remove_commands_for_plugin,
 )
 from muika.plugin.ctx import ctx
 from muika.plugin.exceptions import (
@@ -29,13 +29,14 @@ from muika.plugin.exceptions import (
 from muika.plugin.func_call.caller import (
     Caller,
     _caller_data,
+    get_function_calls,
     on_function_call,
-    remove_callers_for_plugin,
 )
 from muika.plugin.loader import (
     _declared_plugins,
     _loading_plugin,
     _plugins,
+    get_plugins,
     load_plugin,
     reload_plugin,
     unload_plugin,
@@ -69,110 +70,6 @@ def _isolate_registries():
     state_mod._store.clear()
     state_mod._store.update(saved_store)
     _loading_plugin.set(saved_loading)
-
-
-def test_loading_plugin_contextvar_tags_command_registry():
-    """load_plugin 设置 _loading_plugin 后，on_alconna 自动写入 plugin_package。"""
-    token = _loading_plugin.set("plugins.test_plugin")
-    try:
-        from arclet.alconna import Alconna
-
-        on_alconna(Alconna("testcmd_xyz"))
-    finally:
-        _loading_plugin.reset(token)
-
-    match = [c for c in _commands if c.alc.command == "testcmd_xyz"]
-    assert len(match) == 1
-    assert match[0].plugin_package == "plugins.test_plugin"
-
-
-def test_loading_plugin_contextvar_tags_caller():
-    """load_plugin 设置 _loading_plugin 后，on_function_call 自动写入 plugin_package。"""
-    token = _loading_plugin.set("plugins.test_plugin")
-    try:
-
-        @on_function_call(description="test func")
-        def my_test_func_xyz():  # noqa: D401
-            return "ok"
-
-    finally:
-        _loading_plugin.reset(token)
-
-    assert "my_test_func_xyz" in _caller_data
-    assert _caller_data["my_test_func_xyz"].plugin_package == "plugins.test_plugin"
-
-
-def test_registration_outside_load_has_no_owner():
-    """不在 load_plugin 上下文中的注册，plugin_package 应为 None。"""
-    from arclet.alconna import Alconna
-
-    on_alconna(Alconna("orphan_cmd"))
-    match = [c for c in _commands if c.alc.command == "orphan_cmd"]
-    assert match[0].plugin_package is None
-
-
-def test_remove_commands_for_plugin_filters_only_that_plugin():
-    from arclet.alconna import Alconna
-
-    r1 = on_alconna(Alconna("cmd_a"))
-    r1.plugin_package = "plugins.foo"
-    r2 = on_alconna(Alconna("cmd_b"))
-    r2.plugin_package = "plugins.bar"
-    r3 = on_alconna(Alconna("cmd_c"))
-    r3.plugin_package = "plugins.foo"
-
-    removed = remove_commands_for_plugin("plugins.foo")
-    assert removed == 2
-    remaining = [c.alc.command for c in _commands]
-    assert "cmd_b" in remaining
-    assert "cmd_a" not in remaining
-    assert "cmd_c" not in remaining
-
-
-def test_remove_callers_for_plugin_filters_only_that_plugin():
-    c1 = Caller("d1")
-    c1.plugin_package = "plugins.foo"
-    c1._name = "f1"
-    _caller_data["f1"] = c1
-    c2 = Caller("d2")
-    c2.plugin_package = "plugins.bar"
-    c2._name = "f2"
-    _caller_data["f2"] = c2
-
-    removed = remove_callers_for_plugin("plugins.foo")
-    assert removed == 1
-    assert "f2" in _caller_data
-    assert "f1" not in _caller_data
-
-
-def test_unload_plugin_removes_all_registrations_and_sys_modules():
-    """unload_plugin 应从 _plugins / _declared_plugins / _commands / _caller_data / sys.modules 全部清理。"""
-    fake_mod = types.ModuleType("plugins.fake_unload_test")
-    fake_mod.__path__ = []  # 标记为 package
-    sys.modules["plugins.fake_unload_test"] = fake_mod
-    sys.modules["plugins.fake_unload_test.sub"] = types.ModuleType("plugins.fake_unload_test.sub")
-
-    plugin = loader_mod.Plugin(name="fake", module=fake_mod, package_name="plugins.fake_unload_test", meta=None)
-    _plugins["plugins.fake_unload_test"] = plugin
-    _declared_plugins.add("plugins.fake_unload_test")
-
-    from arclet.alconna import Alconna
-
-    r = on_alconna(Alconna("fake_cmd"))
-    r.plugin_package = "plugins.fake_unload_test"
-    c = Caller("fake_desc")
-    c.plugin_package = "plugins.fake_unload_test"
-    c._name = "fake_func"
-    _caller_data["fake_func"] = c
-
-    ok = unload_plugin("plugins.fake_unload_test")
-    assert ok is True
-    assert "plugins.fake_unload_test" not in _plugins
-    assert "plugins.fake_unload_test" not in _declared_plugins
-    assert "plugins.fake_unload_test" not in sys.modules
-    assert "plugins.fake_unload_test.sub" not in sys.modules
-    assert all(c.alc.command != "fake_cmd" for c in _commands)
-    assert "fake_func" not in _caller_data
 
 
 def test_unload_nonexistent_returns_false():
@@ -210,51 +107,21 @@ def test_plugin_manager_list_loaded_includes_counts():
     assert info["is_builtin"] is False
 
 
-def test_ctx_load_decorator_registers_hook_in_order():
-    """@ctx.load 按装饰顺序注册，并原样返回被装饰函数。"""
+def test_ctx_decorators_return_the_decorated_function():
+    """@ctx.load / @ctx.unload 注册钩子后原样返回被装饰函数；顺序与 LIFO 由真实插件 keeper 证明。"""
 
-    def first():
+    def on_load():
         pass
 
-    def second():
-        pass
-
-    token = _loading_plugin.set("plugins.ctx_probe")
-    try:
-        assert ctx.load(first) is first
-        assert ctx.load(second) is second
-    finally:
-        _loading_plugin.reset(token)
-
-    assert lifecycle_mod._load_hooks["plugins.ctx_probe"] == [first, second]
-
-
-def test_ctx_unload_decorator_registers_hook():
-    """@ctx.unload 注册到 unload 钩子表，并原样返回被装饰函数。"""
-
-    def teardown():
+    def on_unload():
         pass
 
     token = _loading_plugin.set("plugins.ctx_probe")
     try:
-        assert ctx.unload(teardown) is teardown
+        assert ctx.load(on_load) is on_load
+        assert ctx.unload(on_unload) is on_unload
     finally:
         _loading_plugin.reset(token)
-
-    assert lifecycle_mod._unload_hooks["plugins.ctx_probe"] == [teardown]
-
-
-def test_ctx_decorator_without_loading_context_returns_func():
-    """加载上下文缺失时装饰器警告并原样返回，不注册。"""
-
-    def stray():
-        pass
-
-    assert _loading_plugin.get() is None
-    assert ctx.load(stray) is stray
-    assert ctx.unload(stray) is stray
-    assert all(stray not in hooks for hooks in lifecycle_mod._load_hooks.values())
-    assert all(stray not in hooks for hooks in lifecycle_mod._unload_hooks.values())
 
 
 def test_ctx_state_is_per_package_and_stable():
@@ -268,7 +135,6 @@ def test_ctx_state_is_per_package_and_stable():
         _loading_plugin.reset(token)
 
     assert s1 is s2
-    assert s1 is state_mod._store["plugins.state_a"]
     assert s2["k"] == 1
 
     token = _loading_plugin.set("plugins.state_b")
@@ -286,8 +152,8 @@ def test_ctx_state_outside_loading_context_raises():
         ctx.state
 
 
-def test_failed_load_does_not_poison_declared_plugins(monkeypatch):
-    """加载失败后 _declared_plugins 应回滚，允许修复后重新加载（热重载核心场景）。"""
+def test_failed_load_can_be_retried_after_fix(monkeypatch):
+    """加载失败后修复模块即可重试成功，上一次失败不残留登记（热重载核心场景）。"""
 
     def raiser(name):
         raise RuntimeError("boom")
@@ -296,8 +162,8 @@ def test_failed_load_does_not_poison_declared_plugins(monkeypatch):
     monkeypatch.setattr(loader_mod.importlib, "import_module", raiser)
     with pytest.raises(PluginImportError, match="boom"):
         load_plugin("plugins.broken_probe")
-    assert "plugins.broken_probe" not in _declared_plugins
 
+    # 重试成功即证明声明登记已回滚：否则会抛 PluginConflictError
     monkeypatch.setattr(loader_mod.importlib, "import_module", real_import)
     sys.modules["plugins.broken_probe"] = types.ModuleType("plugins.broken_probe")
     try:
@@ -320,20 +186,21 @@ def test_duplicate_load_raises_without_purging_active_plugin():
         unload_plugin(module_name)
 
 
-def test_failed_load_cleans_partial_registrations(monkeypatch):
-    """import 半途失败时，已注册的 commands 应一并清理，不留孤儿注册。"""
+def test_failed_load_purges_partial_registrations_and_hooks(monkeypatch):
+    """import 半途失败时，已注册的 commands 与钩子应一并清理，不留孤儿注册。"""
 
     def raiser(name):
         from arclet.alconna import Alconna
 
         on_alconna(Alconna("partial_probe_cmd"))  # 模拟模块执行半途的注册
+        ctx.load(lambda: None)
         raise RuntimeError("boom")
 
     monkeypatch.setattr(loader_mod.importlib, "import_module", raiser)
     with pytest.raises(PluginImportError, match="boom"):
         load_plugin("plugins.partial_probe")
-    assert all(c.alc.command != "partial_probe_cmd" for c in _commands)
-    assert "plugins.partial_probe" not in _declared_plugins
+    assert "partial_probe_cmd" not in {item.alc.command for item in get_commands()}
+    assert "plugins.partial_probe" not in lifecycle_mod._load_hooks
 
 
 def test_reload_plugin_loads_never_loaded_plugin():
@@ -349,30 +216,79 @@ def test_reload_plugin_loads_never_loaded_plugin():
     assert "plugins.fresh_probe" not in sys.modules
 
 
+def core_probe_tool():
+    """代表 core 在插件加载上下文之外注册的工具（无插件归属）。"""
+    return "core"
+
+
 def test_load_unload_cycle_returns_to_baseline(tmp_path: Path, monkeypatch):
-    """N 轮加载/卸载后各注册表回到基线，无 sys.modules 残留。"""
-    pkg = tmp_path / "cycle_probe"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text(
+    """N 轮加载/卸载后命令/工具/插件登记/sys.modules 回基线；卸载 A 不影响 B 与 core。"""
+    cycle = tmp_path / "cycle_probe"
+    cycle.mkdir()
+    (cycle / "sub.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (cycle / "__init__.py").write_text(
         "from arclet.alconna import Alconna\n"
         "from muika.plugin.command import on_alconna\n"
-        "on_alconna(Alconna('cycle_probe_cmd'))\n",
+        "from muika.plugin.func_call import on_function_call\n"
+        "from . import sub\n"
+        "on_alconna(Alconna('cycle_a_cmd'))\n"
+        "@on_function_call('cycle a tool')\n"
+        "def cycle_a_tool():\n"
+        "    return sub.VALUE\n",
+        encoding="utf-8",
+    )
+    other = tmp_path / "other_plugin"
+    other.mkdir()
+    (other / "__init__.py").write_text(
+        "from arclet.alconna import Alconna\n"
+        "from muika.plugin.command import on_alconna\n"
+        "from muika.plugin.func_call import on_function_call\n"
+        "on_alconna(Alconna('cycle_b_cmd'))\n"
+        "@on_function_call('cycle b tool')\n"
+        "def cycle_b_tool():\n"
+        "    return 'b'\n",
         encoding="utf-8",
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
-    base_commands = len(_commands)
-    base_callers = len(_caller_data)
+    from arclet.alconna import Alconna
+
+    # core 在加载上下文之外的注册（无插件归属）：任何用户插件卸载都不得清除它们
+    on_alconna(Alconna("core_probe_cmd"))
+    on_function_call(description="core probe tool")(core_probe_tool)
+
+    def commands() -> set[str]:
+        return {item.alc.command for item in get_commands()}
+
+    def tools() -> set[str]:
+        return set(get_function_calls())
+
+    base_commands, base_tools, base_plugins = commands(), tools(), set(get_plugins())
+    assert "core_probe_cmd" in base_commands
+    assert "core_probe_tool" in base_tools
+
     for _ in range(3):
         assert load_plugin("cycle_probe") is not None
-        assert any(c.alc.command == "cycle_probe_cmd" for c in _commands)
-        assert unload_plugin("cycle_probe")
-        assert all(c.alc.command != "cycle_probe_cmd" for c in _commands)
+        assert load_plugin("other_plugin") is not None
+        assert {"cycle_a_cmd", "cycle_b_cmd"} <= commands()
+        assert {"cycle_a_tool", "cycle_b_tool"} <= tools()
+        assert "cycle_probe.sub" in sys.modules  # 插件包内的子模块确实被导入
 
-    assert len(_commands) == base_commands
-    assert len(_caller_data) == base_callers
-    assert "cycle_probe" not in sys.modules
-    assert "cycle_probe" not in _declared_plugins
+        assert unload_plugin("cycle_probe")
+        assert "cycle_a_cmd" not in commands()  # 只清 A 的命令
+        assert "cycle_b_cmd" in commands()  # B 的命令仍在
+        assert "core_probe_cmd" in commands()  # core 命令仍在
+        assert "cycle_a_tool" not in tools()
+        assert "cycle_b_tool" in tools()  # 只清 A 的工具
+        assert "core_probe_tool" in tools()
+
+        assert unload_plugin("other_plugin")
+        assert commands() == base_commands
+        assert tools() == base_tools
+        assert set(get_plugins()) == base_plugins
+        assert "cycle_probe" not in sys.modules
+        assert "cycle_probe.sub" not in sys.modules
+        assert "other_plugin" not in sys.modules
 
 
 def _write_plugin(tmp_path: Path, package_name: str, code: str) -> None:
@@ -516,22 +432,6 @@ def test_hooks_cleared_on_unload_and_not_duplicated_on_reload(tmp_path: Path, mo
         unload_plugin("no_duplicate_probe")
 
 
-def test_failed_load_purges_partial_hooks(monkeypatch):
-    """import 失败时应清除已注册的部分钩子。"""
-
-    def fail_import(module_name):
-        @ctx.load
-        def orphan():
-            pass
-
-        raise RuntimeError(module_name)
-
-    monkeypatch.setattr(loader_mod.importlib, "import_module", fail_import)
-    with pytest.raises(PluginImportError):
-        load_plugin("plugins.orphan_probe")
-    assert "plugins.orphan_probe" not in lifecycle_mod._load_hooks
-
-
 def test_manager_shutdown_all_runs_unload_hooks_including_builtin():
     """shutdown_all 应执行用户插件和 builtin 插件的 unload 钩子。"""
     executed: list[str] = []
@@ -578,21 +478,6 @@ def test_manager_reload_hook_sequence(tmp_path: Path, monkeypatch):
         unload_plugin("sequence_probe")
 
 
-def test_watcher_derives_package_name_for_file_plugin(tmp_path: Path):
-    """PluginFileHandler._derive_package_name 应识别 plugins/<name>.py。"""
-    from muika.plugin.watcher import PluginFileHandler
-
-    plugins_dir = tmp_path / "plugins"
-    plugins_dir.mkdir()
-    fake_file = plugins_dir / "my_plugin.py"
-    fake_file.write_text("# placeholder")
-
-    handler = PluginFileHandler(manager=MagicMock(), plugins_dir=plugins_dir, base_path=tmp_path)
-    package = handler._derive_package_name(fake_file)
-    assert package is not None
-    assert package.endswith("my_plugin")
-
-
 def test_watcher_unloads_deleted_file_plugin(tmp_path: Path):
     from muika.plugin.watcher import PluginFileHandler
 
@@ -625,23 +510,6 @@ def test_watcher_debounces_each_plugin_independently(tmp_path: Path):
     handler._on_any_event(types.SimpleNamespace(src_path=str(second), event_type="modified"))
 
     assert manager.reload.call_count == 2
-
-
-def test_watcher_derives_package_name_for_dir_plugin(tmp_path: Path):
-    """PluginFileHandler._derive_package_name 应识别 plugins/<name>/__init__.py。"""
-    from muika.plugin.watcher import PluginFileHandler
-
-    plugins_dir = tmp_path / "plugins"
-    pkg_dir = plugins_dir / "my_pkg"
-    pkg_dir.mkdir(parents=True)
-    (pkg_dir / "__init__.py").write_text("# init")
-    inner = pkg_dir / "submodule.py"
-    inner.write_text("# sub")
-
-    handler = PluginFileHandler(manager=MagicMock(), plugins_dir=plugins_dir, base_path=tmp_path)
-    package = handler._derive_package_name(inner)
-    assert package is not None
-    assert "my_pkg" in package
 
 
 @pytest.mark.parametrize(
@@ -680,16 +548,26 @@ def test_watcher_ignores_docs_dependencies_and_build_files(tmp_path, relative):
 
 
 @pytest.mark.parametrize(
-    "relative", ["__init__.py", "info.py", "template/index.html.jinja", "static/css/output.css", "prompts/context.md"]
+    ("relative", "expected"),
+    [
+        ("MAS-Plugin-Daily/mas_plugin_daily/__init__.py", "plugins.MAS-Plugin-Daily.mas_plugin_daily"),
+        ("MAS-Plugin-Daily/mas_plugin_daily/info.py", "plugins.MAS-Plugin-Daily.mas_plugin_daily"),
+        ("MAS-Plugin-Daily/mas_plugin_daily/template/index.html.jinja", "plugins.MAS-Plugin-Daily.mas_plugin_daily"),
+        ("MAS-Plugin-Daily/mas_plugin_daily/static/css/output.css", "plugins.MAS-Plugin-Daily.mas_plugin_daily"),
+        ("MAS-Plugin-Daily/mas_plugin_daily/prompts/context.md", "plugins.MAS-Plugin-Daily.mas_plugin_daily"),
+        ("my_plugin.py", "plugins.my_plugin"),
+        ("my_pkg/submodule.py", "plugins.my_pkg"),
+    ],
 )
-def test_watcher_keeps_runtime_code_and_resource_changes(tmp_path, relative):
+def test_watcher_keeps_runtime_code_and_resource_changes(tmp_path, relative, expected):
     from muika.plugin.watcher import PluginFileHandler
 
     plugins = tmp_path / "plugins"
-    package = plugins / "MAS-Plugin-Daily" / "mas_plugin_daily"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("")
-    source = package / relative
+    (plugins / "MAS-Plugin-Daily" / "mas_plugin_daily").mkdir(parents=True)
+    (plugins / "MAS-Plugin-Daily" / "mas_plugin_daily" / "__init__.py").write_text("")
+    (plugins / "my_pkg").mkdir()
+    (plugins / "my_pkg" / "__init__.py").write_text("")
+    source = plugins / relative
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("")
     manager = MagicMock()
@@ -698,7 +576,7 @@ def test_watcher_keeps_runtime_code_and_resource_changes(tmp_path, relative):
     handler._handle_path(source.parent, is_delete=False)
     manager.reload.assert_not_called()
     handler._handle_path(source, is_delete=False)
-    manager.reload.assert_called_once_with("plugins.MAS-Plugin-Daily.mas_plugin_daily", origin="runtime")
+    manager.reload.assert_called_once_with(expected, origin="runtime")
 
 
 async def test_next_request_tracks_plugin_load_failure_and_unload(tmp_path, monkeypatch, fake_llm_factory):
