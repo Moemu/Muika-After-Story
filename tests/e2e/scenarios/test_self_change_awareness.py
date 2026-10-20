@@ -98,13 +98,14 @@ async def test_active_self_change_transaction_finishes_before_cleanup(
     await app.stop()
     assert app.sent == []
     if trigger == "shutdown_observation":
-        from muika.core.self_mod.fingerprint import compute_plugin_digest
-
+        plugin_file = tmp_plugin[1]
+        expected = hashlib.sha256()
+        expected.update(plugin_file.name.encode("utf-8"))
+        expected.update(b"\0")
+        expected.update(plugin_file.read_bytes())
+        expected.update(b"\0")
         state = read_self_change_state()
-        assert (
-            state["fingerprints"]["user_plugins"]["e2e_selfchg_plugin"]
-            == compute_plugin_digest({"e2e_selfchg_plugin": tmp_plugin[0]})["e2e_selfchg_plugin"]
-        )
+        assert state["fingerprints"]["user_plugins"]["e2e_selfchg_plugin"] == expected.hexdigest()
     app.recorder.record("self_change_cleanup", trigger=trigger, transaction_finished=True, cancelled=False)
 
 
@@ -842,15 +843,23 @@ async def test_queued_receipt_parks_until_adapter_online(core_app_factory, fast_
     assert len(dispatches) == 1
 
 
-async def test_self_change_exemption_verifies_content(core_app_factory, fast_self_change, monkeypatch):
+async def test_self_change_exemption_verifies_content(core_app_factory, fast_self_change, monkeypatch, tmp_path):
     """自改豁免必须核对内容：旧的重启记录不能屏蔽其后的外部修改。"""
-    kernel_root_path = Path(muika.__file__).resolve().parent
-    target = kernel_root_path / "agreement.py"
-    original = target.read_bytes()
+    # 不写真实仓库源码：把启动指纹的 kernel 根指向临时副本，目标文件名仍是 agreement.py。
+    kernel_root = tmp_path / "kernel" / "muika"
+    kernel_root.mkdir(parents=True)
+    target = kernel_root / "agreement.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
     proposal_file = Path(mas_config.data_dir) / "test_proposal.json"
 
     def sha256_text(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def current_kernel() -> dict[str, str]:
+        return {target.name: sha256_text(target.read_text(encoding="utf-8"))}
+
+    monkeypatch.setattr("muika.core.self_change.kernel_root", lambda: kernel_root)
+    monkeypatch.setattr("muika.core.self_change.compute_kernel_files", current_kernel)
 
     def make_record(status: str, expected: str) -> dict:
         proposal_file.write_text(
@@ -880,27 +889,23 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     await app.run_boot_self_change_check()
     try:
         # 她自改了 agreement.py，提案预期 = 磁盘现状 → 豁免且基线推进
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write("\n# her own edit\n")
+        target.write_text("VALUE = 1\n# her own edit\n", encoding="utf-8")
         modified = target.read_text(encoding="utf-8")
         await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
         assert read_self_change_state()["pending"] == []
 
         # 玩家随后又改了同一文件：旧提案的 sha256_after 不再匹配 → 外部入账
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write("\n# master's later edit\n")
+        target.write_text("VALUE = 1\n# her own edit\n# master's later edit\n", encoding="utf-8")
         await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
 
         # 状态不是 started（提案未真正应用）：即使内容与提案一致也不豁免
         clear_pending_keep_baseline()
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write("\n# another edit, proposal claims this\n")
+        target.write_text("VALUE = 1\n# her own edit\n# master's later edit\n# another edit\n", encoding="utf-8")
         claimed = target.read_text(encoding="utf-8")
         await app.run_boot_self_change_check(make_record("failed", sha256_text(claimed)))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
     finally:
-        target.write_bytes(original)
         proposal_file.unlink(missing_ok=True)
 
 

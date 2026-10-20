@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("daytime_initiative")
+pytestmark = [pytest.mark.e2e, pytest.mark.usefixtures("daytime_initiative")]
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -62,8 +62,13 @@ async def test_foreground_summary_does_not_hide_other_branch(memory_process):
     await pc.command(action="material", kind="user", text="前台单独的经历。")
     summarized = await pc.command(action="summary")
     restored = await server.command(action="apply", entries=summarized["entries"])
+    fresh = await memory_process("fresh")
+    without_summary = await fresh.command(action="status")
     assert "摘要没有包括的远端经历。" in restored["experiences"]
-    assert restored["summary"] == "Saved foreground conversation summary."
+    # harness 的 summary 命令直接写 snapshot；这里断言摘要确实随同步到达，
+    # 且不是未写入摘要的节点上的默认值。
+    assert restored["summary"]
+    assert restored["summary"] != without_summary["summary"]
 
 
 async def test_same_external_input_merges_sources_but_keeps_independent_outputs(memory_process):

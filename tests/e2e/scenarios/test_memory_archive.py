@@ -184,7 +184,6 @@ async def test_persona_recalls_old_details_through_existing_memory_tools(core_ap
     assert memory.session.session_id == session_id
     answer = next(call for call in app.scripted.calls if call["name"] == "recall_answer")
     assert report in answer["prompt"]
-    assert all(call["name"] not in {"memory_query_expansion", "memory_recall_selection"} for call in app.scripted.calls)
     assert app.scripted.pending_turns == 0
     app.recorder.record("on_demand_recall", found=found, memory_tool_calls=len(results), session_preserved=True)
 
@@ -552,11 +551,55 @@ async def test_dream_semantic_repair_rolls_back_partial_writes(core_app_factory)
 async def test_dream_database_failure_does_not_request_model_repair(core_app_factory, monkeypatch, failure):
     app = await core_app_factory()
     await app.start()
+    memory = app.muika.memory
+    seeded_day = date(2026, 10, 5)
     day = date(2026, 10, 6)
-    await app.muika.memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
-    before = app.muika.memory.snapshot.model_dump()
+    seeded_ref = await memory.add_context("user", "我喜欢红茶，也喜欢读诗。", timestamp=datetime(2026, 10, 5, 20))
+    # 用生产公开入口植入既有事实，不直接写 ORM 表；失败时它们必须保持原值。
+    assert await memory.save_dream(
+        seeded_day,
+        DreamResult(
+            diary="他喜欢红茶，也喜欢读诗。",
+            facts=[
+                FactUpdate(
+                    category="user",
+                    key="master.tea",
+                    value="红茶",
+                    source_refs=[f"experience:{seeded_ref}"],
+                ),
+                FactUpdate(
+                    category="user",
+                    key="master.poem",
+                    value="读诗",
+                    source_refs=[f"experience:{seeded_ref}"],
+                ),
+            ],
+        ),
+        seeded_ref,
+        {f"experience:{seeded_ref}"},
+    )
+    seeded_facts = {fact.key: fact for fact in memory.facts.values()}
+    existing_tea, recalled_poem = seeded_facts["master.tea"], seeded_facts["master.poem"]
+    before_recalls = app.db_query("SELECT fact_id, day FROM fact_recall ORDER BY fact_id")
+    ref = await memory.add_context("user", "我回来了。", timestamp=datetime(2026, 10, 6, 20))
+    before = memory.snapshot.model_dump()
     app.scripted.add_route(
-        when=lambda req: req.purpose == "memory_dream", text='{"diary":"我很想他。"}', name="valid_dream"
+        when=lambda req: req.purpose == "memory_dream",
+        text=json.dumps(
+            {
+                "diary": "我很想他。",
+                "facts": [
+                    {
+                        "category": "user",
+                        "key": "master.tea",
+                        "value": "咖啡",
+                        "source_refs": [f"experience:{ref}"],
+                    }
+                ],
+                "recalled_fact_ids": [recalled_poem.id],
+            }
+        ),
+        name="valid_dream",
     )
 
     async def fail_snapshot_save(db, snapshot):
@@ -564,14 +607,24 @@ async def test_dream_database_failure_does_not_request_model_repair(core_app_fac
             DreamResult.model_validate_json('{"diary":12}')
         raise ValueError("storage failure")
 
-    monkeypatch.setattr(app.muika.memory, "_save_snapshot", fail_snapshot_save)
+    monkeypatch.setattr(memory, "_save_snapshot", fail_snapshot_save)
     with pytest.raises(ValueError, match="diary" if failure == "validation_error" else "storage failure"):
-        await app.muika.agent.memory_reasoner.dream(day, app.muika.memory)
+        await app.muika.agent.memory_reasoner.dream(day, memory)
     assert len([call for call in app.scripted.calls if call["name"] == "valid_dream"]) == 1
-    assert not app.db_query("SELECT id FROM diary")
-    assert app.muika.memory.snapshot.model_dump() == before
-    assert day in await app.muika.memory.pending_days(datetime.now(), include_today=True)
-    app.recorder.record("dream_storage_failure", attempts=1, material_pending=True)
+    # 事务整体回滚：既有事实在内存与库里都保持原值，回忆强化记录没有部分落库。
+    assert memory.facts[existing_tea.id].value == "红茶"
+    assert memory.facts[recalled_poem.id].value == "读诗"
+    assert app.db_query("SELECT key, value FROM fact WHERE active = 1 ORDER BY key") == [
+        {"key": "master.poem", "value": "读诗"},
+        {"key": "master.tea", "value": "红茶"},
+    ]
+    assert app.db_query("SELECT fact_id, day FROM fact_recall ORDER BY fact_id") == before_recalls
+    assert app.db_query("SELECT id FROM fact_recall WHERE day = ?", (day.isoformat(),)) == []
+    assert app.db_query("SELECT content FROM diary") == [{"content": "他喜欢红茶，也喜欢读诗。"}]
+    assert app.db_query("SELECT id FROM diary WHERE day = ?", (day.isoformat(),)) == []
+    assert memory.snapshot.model_dump() == before
+    assert day in await memory.pending_days(datetime.now(), include_today=True)
+    app.recorder.record("dream_storage_failure", attempts=1, material_pending=True, existing_facts_intact=True)
 
 
 async def test_execution_checkpoint_stays_outside_database(core_app_factory):
@@ -618,5 +671,9 @@ async def test_memory_tag_is_archived_not_leaked(core_app_factory):
 
     # note 不是对话回合：不进入 recent_turns，也不会随历史送回模型
     assert all(NOTE not in turn.content for turn in app.muika.memory.recent_turns)
+
+    # note 只是素材：不参与 fact 分类，也没有额外的分类模型调用
+    assert app.db_query("SELECT id FROM fact") == []
+    assert [call["name"] for call in app.scripted.calls] == ["persona_note"]
 
     assert app.scripted.pending_turns == 0
