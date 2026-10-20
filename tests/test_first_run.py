@@ -16,7 +16,7 @@ def test_agreement_uses_package_resource_from_another_working_directory(tmp_path
     content = first_run.load_agreement_content()
     assert content.title != "old override"
     assert content.text != "old text"
-    assert content.updated == "2026-02-01"
+    assert content.updated != "2099-01-01"  # 旧覆盖的版本不生效
     assert legacy_file.exists()
 
 
@@ -53,7 +53,7 @@ def test_acceptance_creates_data_directory(tmp_path):
     path = tmp_path / "new" / "data" / "user_agreement.json"
     agreement = first_run.UserAgreement(path)
     assert agreement.status().needs_acceptance
-    state = agreement.accept("2026-02-01")
+    state = agreement.accept(first_run.load_agreement_content().updated)
     assert json.loads(path.read_text(encoding="utf-8")) == asdict(state)
     assert not agreement.status().needs_acceptance
 
@@ -94,7 +94,7 @@ def test_failed_replacement_preserves_old_record(tmp_path, monkeypatch):
 
     monkeypatch.setattr(type(path), "replace", fail_replace)
     with pytest.raises(PermissionError):
-        first_run.UserAgreement(path).accept("2026-02-01")
+        first_run.UserAgreement(path).accept(first_run.load_agreement_content().updated)
     assert path.read_text() == "old record"
     assert list(tmp_path.iterdir()) == [path]
 
@@ -102,7 +102,8 @@ def test_failed_replacement_preserves_old_record(tmp_path, monkeypatch):
 def test_cli_uses_instance_data_settings(tmp_path, monkeypatch, capsys):
     (tmp_path / ".env").write_text('data_dir="from dotenv"\nMASTER_ID=\nIPC_SECRET=\n')
     monkeypatch.delenv("DATA_DIR", raising=False)
-    assert main(["accept", "--version", "2026-02-01"]) == 0
+    current_version = first_run.load_agreement_content().updated  # 随发布版本动态取值
+    assert main(["accept", "--version", current_version]) == 0
     assert (tmp_path / "from dotenv" / "user_agreement.json").exists()
     monkeypatch.setenv("DATA_DIR", "from environment")
     assert main(["status"]) == 0

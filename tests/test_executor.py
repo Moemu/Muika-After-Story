@@ -3,7 +3,9 @@
 import asyncio
 from unittest.mock import AsyncMock
 
-from muika.core.executor import Executor
+import pytest
+
+from muika.core.executor import Executor, SendReceipt
 
 # ---------------------------------------------------------------------------
 # _split_message —— 纯静态方法
@@ -68,3 +70,29 @@ async def test_send_message_empty_uses_single_segment(monkeypatch):
 
     await executor.send_message("")
     assert sent == [("", None, None)]
+
+
+@pytest.mark.parametrize(
+    ("receipts", "expected"),
+    [
+        ([SendReceipt.WRITTEN], SendReceipt.WRITTEN),
+        ([SendReceipt.WRITTEN, SendReceipt.WRITTEN], SendReceipt.WRITTEN),
+        ([SendReceipt.QUEUED], SendReceipt.QUEUED),
+        ([SendReceipt.WRITTEN, SendReceipt.QUEUED], SendReceipt.QUEUED),
+        ([SendReceipt.FAILED, SendReceipt.QUEUED], SendReceipt.FAILED),
+        ([SendReceipt.WRITTEN, SendReceipt.FAILED], SendReceipt.FAILED),
+        ([None, None], SendReceipt.WRITTEN),
+    ],
+)
+async def test_send_message_aggregates_segment_receipts(monkeypatch, receipts, expected):
+    """任一段 FAILED 即 FAILED，否则任一段 QUEUED 即 QUEUED，缺省回执按 WRITTEN。"""
+    deliveries = iter(receipts)
+
+    async def send_func(msg, resources, target):
+        return next(deliveries)
+
+    executor = Executor(asyncio.Queue(), send_func)
+    monkeypatch.setattr("muika.core.executor.asyncio.sleep", AsyncMock())
+
+    message = "\n\n".join(f"segment {index}" for index in range(len(receipts)))
+    assert await executor.send_message(message) is expected

@@ -357,6 +357,7 @@ async def test_unavailable_validation_requires_explicit_override(core_workspace,
 
     with pytest.raises(CoreProposalError, match="unavailable"):
         await manager.approve(patch_id)
+    with pytest.raises(CoreProposalError, match="not ready"):
         await manager.apply(patch_id)
     await manager.approve(patch_id, allow_unvalidated=True)
     report = await manager.apply(patch_id)
@@ -375,6 +376,7 @@ async def test_failed_validation_cannot_be_overridden(core_workspace, monkeypatc
 
     with pytest.raises(CoreProposalError, match="validation failed"):
         await manager.approve(patch_id, allow_unvalidated=True)
+    with pytest.raises(CoreProposalError, match="not ready"):
         await manager.apply(patch_id)
 
 
@@ -388,6 +390,7 @@ async def test_candidate_probe_error_cannot_be_overridden(core_workspace, monkey
 
     with pytest.raises(CoreProposalError, match="validation failed"):
         await manager.approve(patch_id, allow_unvalidated=True)
+    with pytest.raises(CoreProposalError, match="not ready"):
         await manager.apply(patch_id)
 
 
@@ -638,7 +641,6 @@ def test_maintenance_command_subset(raw, allowed):
 
 @pytest.mark.asyncio
 async def test_maintenance_loop_gate_does_not_start_persona_work(core_workspace, monkeypatch):
-    _, manager = core_workspace
     engine = Muika.__new__(Muika)
     engine.is_alive = True
     engine._is_collecting_event = False
@@ -654,4 +656,5 @@ async def test_maintenance_loop_gate_does_not_start_persona_work(core_workspace,
 
     await engine.loop()
 
-    assert manager.list_proposals() == []
+    # 正常 user_message 路径首先通知行动任务；维护门禁命中时这条路径必须不被走到。
+    engine.agent_tasks.notify_pending.assert_not_awaited()

@@ -9,7 +9,6 @@ from muika.llm._retry import (
     LLMRequestError,
     RequestRetry,
     _congestion_states,
-    _defer_congestion,
     error_from_status,
 )
 
@@ -65,23 +64,34 @@ async def test_congestion_uses_ten_total_attempts(monkeypatch):
 
 
 async def test_congestion_delay_is_shared(monkeypatch):
-    _congestion_states.clear()
-    now = 100.0
-    delays = []
+    """一次 congestion 失败后，同 provider/host/model 的下一次请求复用共享退避。"""
+    delays: list[float] = []
 
     async def sleep(delay: float):
         delays.append(delay)
 
-    monkeypatch.setattr("muika.llm._retry.time.monotonic", lambda: now)
+    monkeypatch.setattr("muika.llm._retry.time.monotonic", lambda: 100.0)
     monkeypatch.setattr("muika.llm._retry.asyncio.sleep", sleep)
-    config = _config()
-    key = (config.provider, config.api_host, config.model_name)
-    _defer_congestion(key, 4.0)
+    monkeypatch.setattr("muika.llm._retry._retry_delay", lambda error, attempt: 4.0)
+    config = _config(model_name="shared-congestion-probe", congestion_retry_attempts=2)
 
-    result = await RequestRetry(config).run(lambda: _return("ok"))
+    async def congested():
+        raise error_from_status(529, "overloaded")
 
-    assert result == "ok"
-    assert delays == [4.0]
+    try:
+        # 第一次请求以 529 失败两次，其间记录共享退避，并等待它
+        with pytest.raises(LLMRequestError) as exc_info:
+            await RequestRetry(config).run(congested)
+        assert exc_info.value.kind == "congestion"
+        assert delays == pytest.approx([4.0, 4.0])  # 重试等待 + 下一次尝试前的共享退避
+
+        first_request_delays = len(delays)
+        # 第二次请求自身立刻成功，仍须等完上一次请求记录的退避
+        assert await RequestRetry(config).run(lambda: _return("ok")) == "ok"
+        assert len(delays) == first_request_delays + 1
+        assert delays[-1] == pytest.approx(4.0)
+    finally:
+        _congestion_states.clear()
 
 
 async def test_request_retry_propagates_cancellation():

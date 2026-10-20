@@ -40,9 +40,14 @@ def test_split_preserves_original_without_exceeding_budget():
     assert all(estimate_tokens(chunk) <= 700 for chunk in chunks)
 
 
-def test_fitting_multiline_source_does_not_create_a_tiny_extra_summary_request():
+def test_source_is_only_split_after_it_exceeds_the_budget():
+    """预算恰好等于全文时不切块；少一 token 才切块，避免为尾部碎片多发摘要请求。"""
     source = "First observation.\n" + "A verified action result. " * 10 + "\nLast line."
-    assert split_text(source, estimate_tokens(source)) == [source]
+    fitting = estimate_tokens(source)
+    assert split_text(source, fitting) == [source]
+    chunks = split_text(source, fitting - 1)
+    assert len(chunks) > 1
+    assert "".join(chunks) == source
 
 
 async def test_tool_group_compaction_keeps_pairing_signatures_and_original_output(
@@ -134,17 +139,23 @@ async def test_oversized_current_prompt_warns_and_reaches_provider_unchanged(mon
     assert sent[0].prompt == "当前请求" * 5000
 
 
-async def test_model_switch_recompresses_saved_summary(redirect_get_session):
+async def test_new_model_budget_recompresses_saved_summary(redirect_get_session):
     memory = MemoryManager()
-    memory.snapshot.working_summary = "old context " * 3000
+    for index in range(12):
+        await memory.add_context("user" if index % 2 == 0 else "muika", f"Turn {index}: " + "long thought " * 200)
+    memory.snapshot.working_summary = "The earlier saved summary."
     compactor = AsyncMock(spec=ContextCompactor)
     compactor.summarize.return_value = "A shorter source-backed working summary."
     model = SimpleNamespace(
-        config=ModelConfig(provider="_echo", context_window=4096, max_tokens=1024), compactor=compactor
+        config=ModelConfig(provider="_echo", context_window=8192, max_tokens=1024), compactor=compactor
     )
-    request, _ = await memory.prepare_context(model, ModelRequest("new question"), [])
-    assert "new question" == request.prompt
+    request = ModelRequest(prompt="new question", system="Muika", history=list(memory.recent_turns))
+    prepared, history = await memory.prepare_context(model, request, [])
+    assert prepared.prompt == "new question"
     assert memory.snapshot.working_summary == "A shorter source-backed working summary."
+    assert len(history) < len(request.history)
+    assert compactor.summarize.await_count == 1
+    assert "The earlier saved summary." in compactor.summarize.await_args.args[0]
 
 
 @pytest.mark.parametrize("stream", [False, True])

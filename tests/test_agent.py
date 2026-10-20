@@ -48,7 +48,8 @@ def test_build_request_system_assembly(fake_llm_factory):
     agent._skill_manager = cast(Any, SimpleNamespace(render_prompt_section=lambda: "SKILLS"))
     memory = MemoryManager()
     memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
-    with _cmd_patches()[0], _cmd_patches()[1]:
+    patches = _cmd_patches()
+    with patches[0], patches[1]:
         request = agent.build_request("cmd", MuikaState(memory=memory))
     system = request.system
     assert system.startswith("SYSTEM\n[Remembered context]")
@@ -71,7 +72,8 @@ def test_named_models_refresh_at_request_boundary_including_summary_only_changes
         return model
 
     monkeypatch.setattr("muika.llm.loader.load_model", load)
-    with _cmd_patches()[0], _cmd_patches()[1]:
+    patches = _cmd_patches()
+    with patches[0], patches[1]:
         agent.build_request("unchanged")
         assert agent.model is action and agent.summarize_model is summary
         configs["summary"] = summary.config.model_copy(update={"context_window": 200000})

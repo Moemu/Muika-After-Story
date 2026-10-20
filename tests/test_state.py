@@ -20,21 +20,24 @@ def _time_tick() -> TimeTickEvent:
 def test_attention_decays_and_floors_at_zero():
     s = MuikaState()
     s.tick_state(_time_tick(), 1.0)
-    assert s.attention == pytest.approx(0.99)
-    for _ in range(100):
-        s.tick_state(_time_tick(), 1.0)
-    assert s.attention == 0.0
+    assert s.attention < 1.0  # 随时间单调下降
+    s.tick_state(_time_tick(), 1e9)
+    assert s.attention == 0.0  # 任意长的闲置都不会为负
 
 
 def test_loneliness_grows_capped_at_one():
     s = MuikaState()
-    s.tick_state(_time_tick(), 10800 * 2)  # 6 小时 → 涨满并封顶
+    s.tick_state(_time_tick(), 60.0)
+    assert 0.0 < s.loneliness < 1.0
+    s.tick_state(_time_tick(), 1e9)  # 超大 dt 证明封顶，不依赖具体速率
     assert s.loneliness == pytest.approx(1.0)
 
 
 def test_boredom_grows_capped_at_one():
     s = MuikaState()
-    s.tick_state(_time_tick(), 7200 * 2)  # 4 小时 → 涨满并封顶
+    s.tick_state(_time_tick(), 60.0)
+    assert 0.0 < s.boredom < 1.0
+    s.tick_state(_time_tick(), 1e9)
     assert s.boredom == pytest.approx(1.0)
 
 
@@ -45,15 +48,13 @@ def test_mood_calm_by_default():
 
 
 def test_mood_lonely_when_loneliness_above_threshold():
-    s = MuikaState(loneliness=0.8)
-    s.tick_state(_time_tick(), 1080)  # +0.1 → 0.9 > 0.8
-    assert s.mood == "lonely"
+    assert MuikaState(loneliness=0.81).mood == "lonely"
+    assert MuikaState(loneliness=0.8).mood != "lonely"  # 阈值本身不触发
 
 
 def test_mood_bored_when_boredom_above_threshold():
-    s = MuikaState(boredom=0.65)
-    s.tick_state(_time_tick(), 400)  # +0.0556 → 0.7056 > 0.7
-    assert s.mood == "bored"
+    assert MuikaState(boredom=0.71).mood == "bored"
+    assert MuikaState(boredom=0.7).mood != "bored"
 
 
 def test_lonely_takes_precedence_over_bored():

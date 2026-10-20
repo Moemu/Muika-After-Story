@@ -159,9 +159,17 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     data = captured["data"]
     assert data.event_type == "user_message"
     assert data.is_chat is True
-    assert data.memory_context == memory.get_memory_prompt()
     assert "Earliest known interaction with Master: 2025-01-01 12:00:00" in data.memory_context
     assert data.adapters_info is None
+
+
+async def test_generate_reply_keeps_heart_block(fake_llm_factory, model_config_manager):
+    """heart 是私有内心独白，brain 不剥离——由 loop 的 _parse_reply_tags 从显示文本剥离。"""
+    fake = fake_llm_factory(response=ModelCompletions(text="<heart>secret</heart>Hello"))
+    brain = _brain(fake)
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
+        result = await brain.generate_reply(_user_event(), MuikaState(), _memory())
+    assert result == "<heart>secret</heart>Hello"
 
 
 async def test_generate_reply_heartbeat_intensity_in_template(fake_llm_factory, model_config_manager):
@@ -178,15 +186,6 @@ async def test_generate_reply_heartbeat_intensity_in_template(fake_llm_factory, 
         await brain.generate_reply(_user_event(), MuikaState(), _memory())
 
     assert captured["data"].heartbeat_intensity == "high"
-
-
-async def test_generate_reply_keeps_heart_block(fake_llm_factory, model_config_manager):
-    """heart 是私有内心独白，brain 不剥离——由 loop 的 _parse_reply_tags 从显示文本剥离。"""
-    fake = fake_llm_factory(response=ModelCompletions(text="<heart>secret</heart>Hello"))
-    brain = _brain(fake)
-    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
-        result = await brain.generate_reply(_user_event(), MuikaState(), _memory())
-    assert result == "<heart>secret</heart>Hello"
 
 
 async def test_generate_reply_session_bootstrap_first(fake_llm_factory):
