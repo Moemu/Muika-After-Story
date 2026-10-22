@@ -8,7 +8,7 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from muika.config import mas_config
 from muika.core.events import (
@@ -28,6 +28,27 @@ from muika.plugin.command import CommandDispatcher
 
 from .scripted_llm import ScriptedLLM, ScriptedTurn
 from .trace import TraceRecorder
+
+SCENARIO_STEP_TIMEOUT_SECONDS = 60
+"""单个真实生命周期步骤（建库、加载记忆、启动变更检查）的等待上限。"""
+TEARDOWN_TIMEOUT_SECONDS = 30
+"""单次清理等待上限；超时说明上一用例泄漏了任务或子进程。"""
+
+
+async def _await_bounded(awaitable: Awaitable[Any], seconds: float, label: str) -> None:
+    """在有限时间内等待一步真实生命周期操作，超时抛出带归因提示的错误。
+
+    :param awaitable: 待等待的协程或任务
+    :param seconds: 最长等待秒数
+    :param label: 步骤名，写入超时信息
+    :raises TimeoutError: 步骤未在时限内完成
+    """
+    try:
+        await asyncio.wait_for(awaitable, seconds)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(
+            f"{label} did not finish within {seconds}s; a previous scenario likely leaked a task or subprocess"
+        ) from exc
 
 
 def _summarize_event(event: Event) -> str:
@@ -148,11 +169,11 @@ class CoreApp:
         previous_cwd = Path.cwd()
         os.chdir(repo_root)
         try:
-            await init_db()
+            await _await_bounded(init_db(), SCENARIO_STEP_TIMEOUT_SECONDS, "init_db")
         finally:
             os.chdir(previous_cwd)
         self.muika = Muika(self.executor, self._queue)
-        await self.muika.memory.load()
+        await _await_bounded(self.muika.memory.load(), SCENARIO_STEP_TIMEOUT_SECONDS, "memory.load")
         original_process = self.muika._process_event
 
         async def traced_process(event: Event, dt: float) -> None:
@@ -170,17 +191,20 @@ class CoreApp:
         self._recorder.record("lifecycle", action="start")
 
     async def stop(self) -> None:
-        """停止核心任务、释放数据库，并记录各表行数快照。幂等。"""
+        """停止核心任务、释放数据库，并记录各表行数快照。幂等。
+
+        每一步都有等待上限：上一用例若泄漏任务或子进程，这里报错而不是无限挂起。
+        """
         if self._stopped:
             return
         self._stopped = True
         if self.muika is not None:
-            await self.muika.stop()
+            await _await_bounded(self.muika.stop(), TEARDOWN_TIMEOUT_SECONDS, "Muika.stop")
             self.muika = None
         if self._self_change_attached:
             from muika.core.self_change import aclose_self_change
 
-            await aclose_self_change()
+            await _await_bounded(aclose_self_change(), TEARDOWN_TIMEOUT_SECONDS, "aclose_self_change")
             self._self_change_attached = False
         await close_db()
         self._recorder.record("lifecycle", action="stop")
@@ -260,7 +284,11 @@ class CoreApp:
         assert self.muika is not None, "call start() first"
         from muika.core.self_change import run_boot_self_change_check
 
-        await run_boot_self_change_check(self.muika, restart_record)
+        await _await_bounded(
+            run_boot_self_change_check(self.muika, restart_record),
+            SCENARIO_STEP_TIMEOUT_SECONDS,
+            "run_boot_self_change_check",
+        )
 
     def fail_next_sends(self, count: int) -> None:
         """让接下来 *count* 次外发返回 failed 回执，模拟传输失败。"""

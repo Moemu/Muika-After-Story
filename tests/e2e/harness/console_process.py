@@ -15,6 +15,9 @@ from muika.ipc.supervisor import stop_tree
 if sys.platform == "win32":
     import win32console
 
+STARTUP_TIMEOUT_SECONDS = 60
+"""Core 冷启动与重启的等待上限；Windows 冷缓存下启动可达 20s 以上，固定 20s 会误报超时。"""
+
 
 async def run(directory: Path, port: int, mode: str) -> None:
     result: dict = {
@@ -38,7 +41,7 @@ async def run(directory: Path, port: int, mode: str) -> None:
             async with aiohttp.ClientSession() as session:
 
                 async def wait_ready() -> None:
-                    deadline = time.monotonic() + 20
+                    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         if process.poll() is not None:
                             raise RuntimeError(f"Core exited before readiness: {process.returncode}")
@@ -59,7 +62,7 @@ async def run(directory: Path, port: int, mode: str) -> None:
                 ) as ws:
                     await ws.send_json({"type": "command", "raw": ".restart"})
                     path = directory / "data" / "restart.json"
-                    deadline = time.monotonic() + 20
+                    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         if path.is_file() and json.loads(path.read_text(encoding="utf-8"))["status"] == "started":
                             result["restarted"] = True

@@ -65,6 +65,8 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --cov=muika --cov-report=term-missing"
+# 单个测试超过该秒数时由 faulthandler 向 stderr 打印全部线程栈，用于定位跨用例挂起。
+faulthandler_timeout = 180
 markers = [
     "e2e: end-to-end scenario tests driving the real core loop with a scripted LLM",
 ]
