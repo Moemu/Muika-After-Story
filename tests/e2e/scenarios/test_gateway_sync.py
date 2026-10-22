@@ -416,7 +416,9 @@ async def node_process(tmp_path, recorder):
 
 
 async def wait_node(node, **expected):
-    for _ in range(120):
+    deadline = time.monotonic() + 60
+    state: dict = {}
+    while time.monotonic() < deadline:
         state = await node.command(action="status")
         synchronized = not expected.get("connected") or state.get("ready", True)
         if synchronized and all(state[key] == value for key, value in expected.items()):
@@ -745,8 +747,15 @@ async def test_cold_sync_large_existing_history(gateway_process, node_process, m
     await wait_node(pc, active=True, connected=True)
     server, _ = await node_process("server", base)
     await wait_node(server, active=False, connected=True)
-    with sqlite3.connect(tmp_path / "server" / "muika.db") as db:
-        copied = db.execute("SELECT count(*) FROM experience WHERE content=?", ("旧记忆" * 500,)).fetchone()[0]
+    # 冷同步 1200 条经历需要时间：轮询真实 DB 直到同步完成，而不是假设它在就绪瞬间完成。
+    deadline = time.monotonic() + 120
+    copied = 0
+    while time.monotonic() < deadline:
+        with sqlite3.connect(tmp_path / "server" / "muika.db") as db:
+            copied = db.execute("SELECT count(*) FROM experience WHERE content=?", ("旧记忆" * 500,)).fetchone()[0]
+        if copied == 1200:
+            break
+        await asyncio.sleep(0.2)
     assert copied == 1200
     assert (await server.command(action="status"))["conversations"] == 0
     recorder.record("cold_sync_measurement", experiences=copied, elapsed_seconds=time.monotonic() - started)

@@ -82,13 +82,16 @@ async def test_merged_active_dialogue_defers_reading(core_app_factory, memory_pr
         )
     store = SyncStore("pc")
     await store.initialize()
+    # 远端活动发生在本测试启动远端进程之后；时间窗从此刻开始，避免依赖固定秒数预算。
+    sync_started = datetime.now()
     remote = await memory_process("server")
     branch = await remote.command(action="material", kind="user", text="另一设备上正在聊的话。")
     session_id = memory.session.session_id
     for entry in branch["entries"]:
         await store.apply(SyncEntry.model_validate(entry), preserve_state=True)
     await memory.load(record_activity=False)
-    assert memory.last_dialogue_at >= datetime.now() - timedelta(seconds=5)
+    # 合并后必须反映这次远端活动，且不能是未来时间。
+    assert sync_started <= memory.last_dialogue_at <= datetime.now()
     topic = EventTopic(id="merged-reading", source=TopicSource.EVENT, category="literature", content="阅读种子")
     app.muika.topic_manager.enqueue_event(topic)
     app.muika.state.boredom = 0.9
