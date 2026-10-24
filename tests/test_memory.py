@@ -22,6 +22,7 @@ from muika.core.memory_models import (
     Fact,
     FactUpdate,
     Intention,
+    IntentionUpdate,
     PersistentState,
 )
 from muika.database.orm_models import (
@@ -228,7 +229,7 @@ async def test_action_relief_is_small_and_task_link_is_idempotent():
     memory = MemoryManager()
     memory.persistent.dissonance = 0.8
     await memory.update_state(
-        StateUpdate(reason="I want to learn", intentions=[Intention(id="poem", description="Read a poem")])
+        StateUpdate(reason="I want to learn", intentions=[IntentionUpdate(id="poem", description="Read a poem")])
     )
     await memory.link_intention("poem", "task1")
     await memory.link_intention("poem", "task1")
@@ -257,22 +258,74 @@ async def test_action_relief_is_small_and_task_link_is_idempotent():
 @pytest.mark.parametrize("task_status", ["completed", "cancelled", "failed"])
 async def test_task_result_preserves_closed_intention_and_explicit_reopening(intention_status, task_status):
     memory = MemoryManager()
-    intention = Intention(id="poem", description="Read a poem")
-    await memory.update_state(StateUpdate(reason="I want to read", intentions=[intention]))
+    await memory.update_state(
+        StateUpdate(reason="I want to read", intentions=[IntentionUpdate(id="poem", description="Read a poem")])
+    )
     await memory.link_intention("poem", "task1")
-    intention.status = intention_status
-    await memory.update_state(StateUpdate(reason="I changed my mind", intentions=[intention]))
+    await memory.update_state(
+        StateUpdate(
+            reason="I changed my mind",
+            intentions=[IntentionUpdate(id="poem", description="Read a poem", status=intention_status)],
+        )
+    )
     closed = memory.persistent.intentions[0].model_copy(deep=True)
     await memory.record_task_result("task1", task_status)
     restored = MemoryManager()
     await restored.load()
     assert restored.persistent.intentions[0] == closed
     assert closed.task_id == "task1"
-    intention.status = "open"
-    await restored.update_state(StateUpdate(reason="I want to revisit it", intentions=[intention]))
+    await restored.update_state(
+        StateUpdate(
+            reason="I want to revisit it",
+            intentions=[IntentionUpdate(id="poem", description="Read a poem", status="open")],
+        )
+    )
     await restored.load()
     assert restored.persistent.intentions[0].status == "open"
     assert restored.persistent.intentions[0].task_id == "task1"
+
+
+async def test_status_only_intention_update_keeps_existing_fields():
+    memory = MemoryManager()
+    await memory.update_state(
+        StateUpdate(
+            reason="I want to know",
+            intentions=[IntentionUpdate(id="wish", description="等沐沐回答", source_refs=["fact:82"])],
+        )
+    )
+    await memory.link_intention("wish", "task1")
+    await memory.update_state(
+        StateUpdate(reason="It is settled", intentions=[IntentionUpdate(id="wish", status="resolved")])
+    )
+    item = memory.persistent.intentions[0]
+    assert item.status == "resolved"
+    assert item.description == "等沐沐回答"
+    assert item.source_refs == ["fact:82"]
+    assert item.task_id == "task1"
+
+
+async def test_intention_update_without_status_keeps_previous_state():
+    memory = MemoryManager()
+    await memory.update_state(
+        StateUpdate(
+            reason="I want to read",
+            intentions=[IntentionUpdate(id="poem", description="Read a poem", status="resolved")],
+        )
+    )
+    await memory.update_state(
+        StateUpdate(reason="Better wording", intentions=[IntentionUpdate(id="poem", description="Read a poem aloud")])
+    )
+    item = memory.persistent.intentions[0]
+    assert item.status == "resolved"
+    assert item.description == "Read a poem aloud"
+
+
+async def test_new_intention_without_description_is_dropped():
+    memory = MemoryManager()
+    await memory.update_state(
+        StateUpdate(reason="A vague wish", intentions=[IntentionUpdate(id="fresh", status="open")])
+    )
+    assert memory.persistent.intentions == []
 
 
 @pytest.mark.parametrize("known_first_conversation", [False, True])

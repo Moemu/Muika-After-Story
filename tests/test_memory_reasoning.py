@@ -5,7 +5,7 @@ from datetime import date, datetime
 import pytest
 
 from muika.core.memory import MemoryManager
-from muika.core.memory_models import DreamResult, Intention, StateUpdate
+from muika.core.memory_models import DreamResult, IntentionUpdate, StateUpdate
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.llm import ModelCompletions, ModelConfig
 from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
@@ -42,7 +42,7 @@ async def test_open_intentions_keep_their_text_and_source_yields_budget(fake_llm
     await memory.update_state(
         StateUpdate(
             reason="The wish is still open.",
-            intentions=[Intention(id=f"wish-{index}", description=description) for index in range(15)],
+            intentions=[IntentionUpdate(id=f"wish-{index}", description=description) for index in range(15)],
         )
     )
 

@@ -13,7 +13,12 @@ from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
 from muika.core.agent.task_store import CallRecord, TaskRecord, TaskStore
-from muika.core.memory_models import DreamResult, FactUpdate, Intention, StateUpdate
+from muika.core.memory_models import (
+    DreamResult,
+    FactUpdate,
+    IntentionUpdate,
+    StateUpdate,
+)
 from muika.ipc.sync_models import Activity
 from muika.ipc.sync_store import SyncStore
 from muika.llm._schema import ModelMessage, ToolCall, ToolResult
@@ -192,7 +197,7 @@ async def test_cancelled_wish_can_be_considered_again_after_restart(core_app_fac
     app = await core_app_factory()
     await app.start()
     await app.muika.memory.update_state(
-        StateUpdate(reason="I am curious.", intentions=[Intention(id="read_poem", description="想读一首诗。")])
+        StateUpdate(reason="I am curious.", intentions=[IntentionUpdate(id="read_poem", description="想读一首诗。")])
     )
     old = TaskRecord(instruction="读诗", original_request="自己的兴趣", intention_id="read_poem", status="cancelled")
     await TaskStore().save(old)
@@ -303,8 +308,8 @@ async def test_dream_uses_personal_experiences_without_execution_state(core_app_
             mood="private-runtime-marker",
             reason="private-stack-trace",
             intentions=[
-                Intention(id="fix_resignation_date", description="把日报日期改对。"),
-                Intention(id="old_note", description="这不是还要做的事。", status="abandoned"),
+                IntentionUpdate(id="fix_resignation_date", description="把日报日期改对。"),
+                IntentionUpdate(id="old_note", description="这不是还要做的事。", status="abandoned"),
             ],
         )
     )

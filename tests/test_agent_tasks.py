@@ -16,7 +16,7 @@ from muika.core.agent.tasks import AgentTasks, TaskContextPreparer
 from muika.core.code_review import ReviewRecord, get_code_reviewer
 from muika.core.events import AgentTaskEvent
 from muika.core.memory import MemoryManager, MemoryQuery, StateUpdate
-from muika.core.memory_models import Intention
+from muika.core.memory_models import IntentionUpdate
 from muika.core.state import MuikaState
 from muika.llm import ModelCompletions, ModelConfig, ModelRequest
 from muika.llm._execution import step as model_step
@@ -530,7 +530,9 @@ async def test_completed_call_stays_in_task_files_after_restart(factory, redirec
 
 async def test_same_intention_does_not_submit_duplicate_task_after_restart(factory, redirect_get_session):
     memory = MemoryManager()
-    await memory.update_state(StateUpdate(reason="I am curious", intentions=[Intention(id="poem", description="Read")]))
+    await memory.update_state(
+        StateUpdate(reason="I am curious", intentions=[IntentionUpdate(id="poem", description="Read")])
+    )
     manager = factory([])
     manager.state.memory = memory
     task = await manager.submit("Read", "Read", intention_id="poem")

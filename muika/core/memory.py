@@ -70,6 +70,7 @@ from .memory_models import (
     DreamValidationError,
     Experience,
     Fact,
+    Intention,
     MemoryCategory,
     MemoryQuery,
     MemorySnapshot,
@@ -570,11 +571,22 @@ class MemoryManager:
             previous = by_id.get(change.id)
             if previous is not None and cutoff is not None and previous.updated_at > cutoff:
                 continue
-            item = change.model_copy(deep=True)
+            description = change.description or (previous.description if previous else None)
+            if not description:
+                logger.warning(f"[Memory] Dropped intention entry without description | id={change.id}")
+                continue
+            status = change.status or (previous.status if previous else "open")
+            if status in {"acting", "awaiting_feedback"}:
+                # acting/awaiting_feedback 由真实任务结果写入，模型声明不生效。
+                status = previous.status if previous else "open"
+            item = Intention(
+                id=change.id,
+                description=description,
+                status=status,
+                source_refs=change.source_refs or (previous.source_refs if previous else []),
+            )
             item.updated_at = now
             item.task_id = previous.task_id if previous else None
-            if item.status in {"acting", "awaiting_feedback"}:
-                item.status = previous.status if previous else "open"
             by_id[item.id] = item
         state.intentions = list(by_id.values())
 

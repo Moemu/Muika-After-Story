@@ -141,6 +141,21 @@ class Intention(BaseModel):
     """最近一次状态变更的本地时间，由保存逻辑更新。"""
 
 
+class IntentionUpdate(BaseModel):
+    """描述白天 `<state>` 更新或夜间做梦对单条心愿的部分更新，省略字段在合并时保留原值。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=100)
+    """目标心愿的稳定标识；引用已有心愿时只需 id。"""
+    description: str | None = Field(default=None, min_length=1, max_length=1200)
+    """新的心愿正文；None 表示保留现有描述，新建心愿必须提供。"""
+    status: Literal["open", "acting", "awaiting_feedback", "resolved", "abandoned"] | None = None
+    """新的状态；None 表示保留现有状态，新建心愿默认 open。"""
+    source_refs: list[str] = Field(default_factory=list)
+    """更新依据的经历引用；为空且心愿已存在时保留原引用。"""
+
+
 class StateUpdate(BaseModel):
     """表示主人格回复或日记整理提交的局部状态更新。"""
 
@@ -150,8 +165,8 @@ class StateUpdate(BaseModel):
     """新的持续情绪描述；None 表示保留现有情绪。"""
     reason: str = Field(min_length=1, max_length=1200)
     """本次情绪或心愿变化的原因。"""
-    intentions: list[Intention] = Field(default_factory=list, max_length=20)
-    """按 id 合并的心愿更新；空列表不会清空已有心愿。"""
+    intentions: list[IntentionUpdate] = Field(default_factory=list, max_length=20)
+    """按 id 合并的心愿部分更新；空列表不会清空已有心愿。"""
 
 
 PROMPT_LASTING_TOKENS = 520
