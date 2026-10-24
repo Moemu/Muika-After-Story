@@ -4,6 +4,7 @@
 services:
   gateway:
     networks:
+      default: {}
       edge:
         aliases:
           - mas-gateway
