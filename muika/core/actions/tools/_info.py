@@ -1,53 +1,17 @@
 from __future__ import annotations
 
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
-from aiohttp import ClientSession, ClientTimeout
 from pydantic import BaseModel, Field
 
-from muika.config import mas_config
 from muika.core.state import MuikaState
 from muika.plugin.func_call import on_function_call
 from muika.utils.logger import logger
 
-from .rss import AVAILABLE_RSS_SOURCES, RSS_SOURCES, extract_web_content
-from .rss import fetch_web_content as fetch_rss_content
-from .rss import parse_rss_feed
+from .rss import extract_web_content
 
-
-class CheckRSSUpdateParams(BaseModel):
-    rss_source: str = Field(
-        ...,
-        description=f"RSS source identifier. Available sources: {AVAILABLE_RSS_SOURCES}",
-    )
-
-
-@on_function_call(
-    "Fetch and summarize updates from a configured RSS source.",
-    params=CheckRSSUpdateParams,
-)
-async def check_rss_update(rss_source: str, state: MuikaState) -> str:
-    """读取 RSS 更新，并更新好奇心和注意力。"""
-    rss = RSS_SOURCES.get(rss_source)
-    if not rss:
-        return f"Unknown RSS source: {rss_source!r}"
-
-    logger.debug(f"[CheckRSSUpdate] Fetching: {rss.url}")
-    feed_data = await fetch_rss_content(rss.url)
-    entries = parse_rss_feed(feed_data)
-
-    lines = [f"# RSS Feed Update from {rss.name}:"]
-    for entry in entries:
-        lines.append(
-            f"- title: {entry.title}; description: {entry.description};"
-            f" link: {entry.link}; published: {entry.published}"
-        )
-
-    state.boredom *= 0.3
-    state.curiosity = min(1.0, state.curiosity + 0.2)
-    state.attention = min(1.0, state.attention + 0.1)
-
-    return "\n".join(lines)
+_CURIOSITY_GAIN = 0.15
+"""成功读取网页后的好奇心增益；由时间衰减与话题管线消费。"""
 
 
 class FetchWebContentParams(BaseModel):
@@ -55,10 +19,10 @@ class FetchWebContentParams(BaseModel):
 
 
 @on_function_call(
-    "Extract plain text content from a web page.",
+    "Extract plain text content from a web page. Reading a page also satisfies a bit of your curiosity.",
     params=FetchWebContentParams,
 )
-async def fetch_web_content(url: str):
+async def fetch_web_content(url: str, state: MuikaState):
     """提取网页正文，拒绝不支持的 URL 协议。"""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -69,62 +33,5 @@ async def fetch_web_content(url: str):
 
     logger.debug(f"[FetchWebContent] Fetching: {url}")
     content = await extract_web_content(url)
+    state.curiosity = min(1.0, state.curiosity + _CURIOSITY_GAIN)
     return content
-
-
-class SearchWikipediaParams(BaseModel):
-    query: str = Field(..., description="Search term or article title to look up on Wikipedia.")
-    language: str = Field(
-        "zh",
-        description="Wikipedia language code, e.g. 'zh' for Chinese, 'en' for English, 'ja' for Japanese.",
-    )
-
-
-@on_function_call(
-    "Search Wikipedia and return a summary of the best matching article.",
-    params=SearchWikipediaParams,
-)
-async def search_wikipedia(query: str, state: MuikaState, language: str = "zh") -> str:
-    """检索维基百科摘要，并更新好奇心。"""
-    lang = language.strip().lower() or "zh"
-    q = query.strip()
-
-    search_url = (
-        f"https://{lang}.wikipedia.org/w/api.php"
-        f"?action=opensearch&search={quote(q)}&limit=1&namespace=0&format=json"
-    )
-    logger.debug(f"[SearchWikipedia] OpenSearch: {search_url}")
-    try:
-        async with ClientSession() as session:
-            async with session.get(search_url, timeout=ClientTimeout(total=10), proxy=mas_config.proxy) as resp:
-                result = await resp.json(content_type=None)
-    except Exception as e:
-        logger.error(f"[SearchWikipedia] Search failed: {e}")
-        return f"Wikipedia search failed: {e}"
-
-    titles: list[str] = result[1] if len(result) > 1 else []
-    if not titles:
-        return f"No Wikipedia article found for: {q!r}"
-
-    page_title = titles[0]
-
-    summary_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{quote(page_title)}"
-    logger.debug(f"[SearchWikipedia] Summary: {summary_url}")
-    try:
-        async with ClientSession() as session:
-            async with session.get(summary_url, timeout=ClientTimeout(total=10), proxy=mas_config.proxy) as resp:
-                data = await resp.json(content_type=None)
-    except Exception as e:
-        logger.error(f"[SearchWikipedia] Summary fetch failed: {e}")
-        return f"Failed to fetch Wikipedia summary: {e}"
-
-    title = data.get("title", page_title)
-    extract = data.get("extract", "")
-    page_url = data.get("content_urls", {}).get("desktop", {}).get("page", summary_url)
-
-    if not extract:
-        return f"Wikipedia article '{title}' has no summary available."
-
-    state.curiosity = min(1.0, state.curiosity + 0.15)
-
-    return f"# {title}\n\n{extract}\n\nSource: {page_url}"

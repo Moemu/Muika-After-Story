@@ -52,5 +52,3 @@ RSS_SOURCES = {
         digest=True,
     ),
 }
-
-AVAILABLE_RSS_SOURCES = "; ".join([f"{source.id}: {source.name}" for source in RSS_SOURCES.values()])
