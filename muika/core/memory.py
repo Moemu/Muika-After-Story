@@ -668,10 +668,12 @@ class MemoryManager:
                     .group_by(func.substr(ExperienceORM.occurred_at, 1, 10))
                 )
             ).all()
-            diaries = {
-                row.day: row.covered_through
-                for row in await db.scalars(select(DiaryORM).where(DiaryORM.source.like("dream:%")))
-            }
+            # 同一天可能并存本节点日记与 {origin}:dream: 前缀的同步日记，
+            # 覆盖判定取各份日记的最大 covered_through，先跨边界的节点做完即可止住另一节点。
+            diaries: dict[str, int] = {}
+            for row in await db.scalars(select(DiaryORM).where(DiaryORM.source.contains("dream:"))):
+                covered = diaries.get(row.day)
+                diaries[row.day] = row.covered_through if covered is None else max(covered, row.covered_through)
         return sorted(
             date.fromisoformat(day)
             for day, latest in days

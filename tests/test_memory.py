@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from muika.core.memory import (
     PROMPT_FACT_LIMIT,
@@ -93,6 +93,40 @@ async def test_dream_retry_and_duplicate_mentions_count_once(database):
     assert await database.scalar(select(func.count()).select_from(DiaryORM)) == 1
     assert await database.scalar(select(func.count()).select_from(FactRecallORM)) == 1
     assert await memory.pending_days(datetime(2026, 9, 2, 5)) == []
+
+
+async def test_pending_days_respect_synced_diaries_and_best_coverage(database):
+    memory = MemoryManager()
+    day = date(2026, 9, 1)
+    first = await memory.add_context("user", "Morning", timestamp=datetime(2026, 9, 1, 9))
+    last = await memory.add_context("user", "Night", timestamp=datetime(2026, 9, 1, 21))
+    created = datetime.now().isoformat()
+
+    async def add_diary(source: str, covered: int) -> None:
+        database.add(
+            DiaryORM(
+                source=source,
+                day=day.isoformat(),
+                created_at=created,
+                covered_through=covered,
+                content=f"diary of {source}",
+            )
+        )
+        await database.commit()
+
+    await add_diary(f"dream:{day.isoformat()}", first)
+    await add_diary(f"server-node:dream:{day.isoformat()}", last)
+    assert await memory.pending_days(datetime(2026, 9, 2, 5)) == []
+    await database.execute(
+        update(DiaryORM).where(DiaryORM.source == f"dream:{day.isoformat()}").values(covered_through=0)
+    )
+    await database.commit()
+    assert await memory.pending_days(datetime(2026, 9, 2, 5)) == []
+    await database.execute(
+        update(DiaryORM).where(DiaryORM.source == f"server-node:dream:{day.isoformat()}").values(covered_through=0)
+    )
+    await database.commit()
+    assert await memory.pending_days(datetime(2026, 9, 2, 5)) == [day]
 
 
 async def test_background_fact_input_does_not_gain_weight():
