@@ -1,11 +1,15 @@
+name: muika
+# 三个服务共用同一镜像；OneBot 之外的个人适配器通过 BOT_EXTRA_DEPENDENCIES 构建参数注入
 services:
   gateway:
     build:
       context: ..
-      dockerfile: deploy/multi-device.Dockerfile
-    image: mas-multi-device-local
+      dockerfile: deploy/Dockerfile
+      args:
+        BOT_EXTRA_DEPENDENCIES: ${BOT_EXTRA_DEPENDENCIES:-}
+    image: mas-runtime-local
     command: ["python", "-m", "muika.ipc.gateway", "--host", "0.0.0.0"]
-    env_file: ../.env.multi-device.local
+    env_file: ../.env
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -13,10 +17,10 @@ services:
     restart: unless-stopped
 
   core:
-    image: mas-multi-device-local
+    image: mas-runtime-local
     command: ["python", "-m", "muika.ipc.bootstrap"]
     stop_grace_period: 190s
-    env_file: ../.env.multi-device.local
+    env_file: ../.env
     environment:
       GATEWAY_URL: ws://gateway:8765/cores
       CORE_NODE_NAME: server
@@ -31,6 +35,20 @@ services:
     depends_on:
       - gateway
 
+  bot:
+    image: mas-runtime-local
+    command: ["python", "bot.py"]
+    env_file: ../.env
+    environment:
+      CORE_WS_URL: ws://gateway:8765/ws
+    volumes:
+      - bot-data:/app/data
+      - ../.env:/app/.env:ro
+    restart: unless-stopped
+    depends_on:
+      - gateway
+
 volumes:
   gateway-data:
   core-data:
+  bot-data:

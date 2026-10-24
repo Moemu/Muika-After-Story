@@ -2,9 +2,10 @@ services:
   muika-bot:
     build:
       context: ..
-      dockerfile: deploy/bot.Dockerfile
+      dockerfile: deploy/Dockerfile
       args:
         BOT_EXTRA_DEPENDENCIES: ${BOT_EXTRA_DEPENDENCIES:-}
+    image: mas-runtime-local
     restart: unless-stopped
     volumes:
       - ../.env:/app/.env:ro

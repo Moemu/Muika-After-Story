@@ -15,19 +15,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-# 先复制 pyproject.toml 以充分利用 Docker 层缓存
-COPY pyproject.toml uv.lock README.md ./
+# 先复制元数据以充分利用 Docker 层缓存
+COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY muika/ ./muika/
 
-# 安装 muika 包（含 nonebot 额外依赖）
+# 按 uv.lock 安装 muika 包（Core 所需的 standard 与 Bot 所需的 nonebot 额外依赖）
 RUN /usr/local/bin/pip install uv && \
-    uv export --frozen --extra nonebot --no-dev --no-hashes --no-emit-project -o /tmp/bot-requirements.txt && \
+    uv export --frozen --extra standard --extra nonebot --no-dev --no-hashes --no-emit-project -o /tmp/requirements.txt && \
     pip install --upgrade pip setuptools wheel && \
-    pip install -r /tmp/bot-requirements.txt ".[nonebot]"
+    pip install -r /tmp/requirements.txt ".[standard,nonebot]"
 
+# 个人适配器等额外依赖，用锁文件约束版本，避免覆盖默认依赖
 ARG BOT_EXTRA_DEPENDENCIES=""
 RUN if [ -n "$BOT_EXTRA_DEPENDENCIES" ]; then \
-    pip install -c /tmp/bot-requirements.txt ${BOT_EXTRA_DEPENDENCIES}; fi
+    pip install -c /tmp/requirements.txt ${BOT_EXTRA_DEPENDENCIES}; fi
 
 
 # ---- 运行阶段 ----
@@ -42,14 +43,13 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-# 复制 Bot 应用代码
+# 复制 Bot 应用代码（入口在容器内，Core/Gateway 由 Compose 覆盖命令）
 COPY muika_bot/ ./muika_bot/
-COPY deploy/docker-entrypoint.sh ./
 COPY bot.py ./
 
-# 创建运行时数据目录，赋予执行权限
-RUN chmod +x docker-entrypoint.sh && mkdir -p /app/data
+# 创建运行时数据目录
+RUN mkdir -p /app/data /app/configs /app/plugins
 
 EXPOSE 8080
 
-CMD ["sh", "docker-entrypoint.sh"]
+CMD ["python", "bot.py"]

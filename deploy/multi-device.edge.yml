@@ -1,0 +1,13 @@
+# 站点定制示例：把聊天入口接入外部 Caddy 反向代理网络。
+# 不使用 Caddy 或没有现成 edge 网络时无需此文件；
+# 其他反向代理复制本文件，替换网络名与别名即可。
+services:
+  gateway:
+    networks:
+      edge:
+        aliases:
+          - mas-gateway
+
+networks:
+  edge:
+    external: true

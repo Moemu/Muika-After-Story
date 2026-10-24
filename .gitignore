@@ -160,4 +160,3 @@ launcher/
 benchmarks/
 
 tests/e2e/artifacts/
-.env.multi-device.local
