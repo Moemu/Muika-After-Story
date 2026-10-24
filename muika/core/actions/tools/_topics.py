@@ -111,6 +111,17 @@ def _parse_tags(raw: str) -> list[str]:
     return tags
 
 
+def _topic_field_error(category: str, concept: str, cooldown_days: int) -> str | None:
+    """校验单条话题字段的最终状态，返回第一个错误的提示或 None。"""
+    if not concept.strip():
+        return "'concept' must not be empty."
+    if not _NAME_RE.match(category):
+        return f"Invalid category {category!r}: use lowercase letters and '_'."
+    if not 1 <= int(cooldown_days) <= 365:
+        return "cooldown_days must be between 1 and 365."
+    return None
+
+
 async def _apply_topics_change(new_text: str, reason: str, action: SelfModAction) -> str:
     """校验并写入用户话题库，随后刷新索引并记录审计。"""
     validate_topics(new_text)
@@ -143,7 +154,7 @@ def _disabled_or_reason_missing(reason: str) -> Optional[str]:
 class TopicListParams(BaseModel):
     category: str = Field(
         "",
-        description="Filter by category (relationship / philosophy / trivia / story / meta). Empty = all.",
+        description="Filter by category, e.g. relationship / philosophy / trivia / story / meta. Empty = all.",
     )
     keyword: str = Field("", description="Substring to search for in id / concept / tags.")
     limit: int = Field(30, description="Max number of entries to return.")
@@ -185,7 +196,9 @@ async def topic_list(category: str = "", keyword: str = "", limit: int = 30) -> 
 
 class TopicAddParams(BaseModel):
     id: str = Field(..., description="Unique snake_case id, e.g. 'octopus_three_hearts'. Lowercase letters/digits/_.")
-    category: str = Field(..., description="One of: relationship / philosophy / trivia / story / meta.")
+    category: str = Field(
+        ..., description="Lowercase category, e.g. relationship / philosophy / trivia / story / meta."
+    )
     concept: str = Field(..., description="The topic seed itself — one evocative sentence Muika can grow into a topic.")
     tags: str = Field("", description="Comma-separated tags, e.g. 'nature,curiosity'.")
     cooldown_days: int = Field(14, description="Days before this topic may be used again (1-365).")
@@ -218,12 +231,8 @@ async def topic_add(
         return ToolError(
             f"Invalid id {topic_id!r}: this word has a special meaning in YAML and cannot be used as a topic id."
         )
-    if not _NAME_RE.match(category.strip()):
-        return ToolError(f"Invalid category {category!r}: use lowercase letters and '_'.")
-    if not concept.strip():
-        return ToolError("'concept' must not be empty.")
-    if not 1 <= int(cooldown_days) <= 365:
-        return ToolError("cooldown_days must be between 1 and 365.")
+    if error := _topic_field_error(category.strip(), concept, cooldown_days):
+        return ToolError(error)
     try:
         tag_list = _parse_tags(tags)
     except SelfModError as e:
@@ -302,17 +311,12 @@ async def topic_update(
         new_concept = concept.strip() or str(current.get("concept", ""))
         new_category = (category.strip() or str(current.get("category", "misc"))).lower()
         new_cooldown = cooldown_days if cooldown_days is not None else int(current.get("cooldown_days", 7))
+        if error := _topic_field_error(new_category, new_concept, new_cooldown):
+            return ToolError(error)
         try:
             new_tags = _parse_tags(tags) if tags.strip() else list(current.get("tags") or [])
         except SelfModError as e:
             return ToolError(str(e))
-
-        if not new_concept:
-            return ToolError("'concept' cannot end up empty.")
-        if not _NAME_RE.match(new_category):
-            return ToolError(f"Invalid category {new_category!r}: use lowercase letters and '_'.")
-        if not 1 <= int(new_cooldown) <= 365:
-            return ToolError("cooldown_days must be between 1 and 365.")
 
         spans_dict = dict((tid, (start, end)) for tid, start, end in _entry_spans(text))
         if topic_id not in spans_dict:
