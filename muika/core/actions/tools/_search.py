@@ -142,7 +142,8 @@ def _format_results(query: str, results: list[SearchResult]) -> str:
 
 @on_function_call(
     "Search the web for current information. Returns ranked results with titles, URLs and snippets;"
-    " use fetch_web_content to read a full page.",
+    " follow a promising result with fetch_web_content to read the full page. Cite the sources you actually"
+    " used, and if search is unconfigured or returns nothing useful, say so plainly instead of inventing facts.",
     params=WebSearchParams,
     read_only=True,
 )

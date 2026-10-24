@@ -80,6 +80,14 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"
 
 
+def _feedback_error(record: ReviewRecord) -> ReviewError:
+    """组合审查反馈；可修复状态附带重试指引。"""
+    message = f"Review {record.id}: {record.status}. {record.error}"
+    if record.status in {"denied", "revise"}:
+        message += " Fix the concrete issues and retry; explain material choices in your report."
+    return ReviewError(message)
+
+
 class CodeReviewer:
     """保存动作批准记录并请求独立判断。"""
 
@@ -124,7 +132,7 @@ class CodeReviewer:
         if stored.status != "approved":
             if isinstance(context, ToolContext) and stored.status in {"pending", "ask_user", "unavailable", "denied"}:
                 context.review_id = stored.id
-            raise ReviewError(f"Review {stored.id}: {stored.status}. {stored.error}")
+            raise _feedback_error(stored)
         try:
             self._check_evidence(record)
         except ReviewError as exc:
@@ -139,7 +147,7 @@ class CodeReviewer:
                 context.review_id = latest.id
             raise
         if record.status != "approved":
-            raise ReviewError(f"Review {record.id}: {record.status}. {record.error}")
+            raise _feedback_error(record)
 
     async def authorize(
         self,

@@ -497,7 +497,11 @@ class ViewImageParams(BaseModel):
 
 
 @on_function_call(
-    "Read a local image for visual inspection in the next model step.", params=ViewImageParams, read_only=True
+    "Read a local image for visual inspection in the next model step. Verify visual changes by rendering "
+    "the result and inspecting the image here; parsing a template or counting tags does not verify its "
+    "appearance.",
+    params=ViewImageParams,
+    read_only=True,
 )
 async def view_image(path: str):
     try:

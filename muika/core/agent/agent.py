@@ -59,7 +59,7 @@ class Agent:
         system += (
             f"\n\nExecution environment: OS={platform.system()}; cwd={Path.cwd()}; "
             f"Python={sys.executable}. Default shell={'powershell' if sys.platform == 'win32' else 'bash'}. "
-            "Use this environment's syntax. A running process is not a completed check."
+            "Use this environment's syntax."
             f" Action permission={mas_config.action_permission}; code review={mas_config.code_review_mode}; "
             f"allowed file roots={mas_config.fs_allowed_paths}."
         )

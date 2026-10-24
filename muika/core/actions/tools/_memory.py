@@ -28,7 +28,11 @@ class MemoryParams(BaseModel):
 
 
 @on_function_call(
-    "Record a note for your next dream, recall memories by keyword, inspect original sources, or forget a fact.",
+    "Record a note for your next dream, recall memories by keyword, inspect original sources, or forget a fact. "
+    "Notes are not classified for permanent injection; keep observations, intentions, results and user feedback "
+    "distinct when you record. For recall, give related short terms and dates, then use source for the exact "
+    "wording and context, including earlier task outputs. A failed search does not prove an experience never "
+    "happened.",
     params=MemoryParams,
 )
 async def memory(

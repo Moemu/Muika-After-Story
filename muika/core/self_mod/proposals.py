@@ -29,6 +29,10 @@ from muika.utils.logger import logger
 
 _ALLOWED_DIRS = ("muika", "muika_bot", "tests")
 _ALLOWED_FILES = ("bot.py", "core_main.py")
+_READY_NOTE = (
+    " Report the proposal ID in your private summary and describe its intended effect naturally; "
+    "your speaking half chooses the restart moment."
+)
 _CONTROL_FILES = (
     "muika/core/code_review.py",
     "muika/core/self_mod/policy.py",
@@ -845,7 +849,7 @@ class CoreProposalManager:
             proposal = self.load(patch_id)
             if proposal["status"] == "ready" and not self.is_stale(proposal):
                 self.check_ready(patch_id)
-                return f"Core proposal {patch_id} is ready. Choose when to restart; normal conversation can continue."
+                return f"Core proposal {patch_id} is ready; active code is unchanged.{_READY_NOTE}"
             if proposal["status"] != "pending" or self.is_stale(proposal):
                 raise CoreProposalError("Only current pending proposals can be prepared; create a fresh proposal.")
             first_review = await self._review(proposal, human=human)
@@ -869,10 +873,7 @@ class CoreProposalManager:
             proposal["unvalidated_approval"] = report["status"] == "unavailable"
             self._save(proposal)
             logger.info(f"[CoreProposal] Prepared 1 change {patch_id}; active code is unchanged.")
-            return (
-                f"Core proposal {patch_id} is ready, not applied. "
-                "Choose when to restart; normal conversation can continue."
-            )
+            return f"Core proposal {patch_id} is ready, not applied; active code is unchanged.{_READY_NOTE}"
 
     def check_ready(self, patch_id: str) -> CoreProposal:
         """复核待应用提案及审查证据，不执行代码。"""
