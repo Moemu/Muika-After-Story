@@ -126,7 +126,6 @@ def _check_read_version(path: Path) -> None:
 
 class ReadFileParams(BaseModel):
     path: str = Field(..., description="Absolute or relative file path.")
-    encoding: str = Field("utf-8", description="File encoding.")
     max_chars: int = Field(4000, ge=1, description="Maximum source characters to read, excluding line numbers.")
     line_start: int | None = Field(
         None, ge=1, description="First line, 1-based. Specifying a line range shows line numbers."
@@ -145,7 +144,6 @@ class ReadFileParams(BaseModel):
 )
 async def read_file(
     path: str,
-    encoding: str = "utf-8",
     max_chars: int = 4000,
     line_start: int | None = None,
     line_end: int | None = None,
@@ -156,7 +154,7 @@ async def read_file(
         resolved = _resolve_and_check(path)
         if not resolved.is_file():
             return ToolError(f"File not found: {resolved}")
-        text = resolved.read_text(encoding=encoding)
+        text = resolved.read_text(encoding="utf-8")
         _remember_file(resolved)
         lines = text.splitlines(keepends=True)
         start = line_start or 1
@@ -201,7 +199,6 @@ class WriteFileParams(BaseModel):
         "overwrite",
         description="'overwrite' replaces the file; 'append' adds to the end.",
     )
-    encoding: str = Field("utf-8", description="File encoding, default utf-8.")
 
 
 @on_function_call(
@@ -209,7 +206,7 @@ class WriteFileParams(BaseModel):
     "Requires file-write permission enabled by the user.",
     params=WriteFileParams,
 )
-async def write_file(path: str, content: str, write_mode: str = "overwrite", encoding: str = "utf-8"):
+async def write_file(path: str, content: str, write_mode: str = "overwrite"):
     if not mas_config.fs_allowed_paths:
         return ToolError("File system tools are disabled by configuration.")
     if not mas_config.can_write:
@@ -224,7 +221,7 @@ async def write_file(path: str, content: str, write_mode: str = "overwrite", enc
     open_mode = "a" if write_mode == "append" else "w"
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        with resolved.open(open_mode, encoding=encoding) as f:
+        with resolved.open(open_mode, encoding="utf-8") as f:
             f.write(content)
         _remember_file(resolved)
         logger.debug(f"[WriteFile] Wrote {len(content):,} chars to {resolved} (mode={write_mode})")
@@ -267,7 +264,6 @@ class EditFileParams(BaseModel):
         None,
         description="Required for 'delete_lines'. Last line to delete (1-based, inclusive).",
     )
-    encoding: str = Field("utf-8", description="File encoding, default utf-8.")
 
 
 @on_function_call(
@@ -283,7 +279,6 @@ async def edit_file(
     line_number: Optional[int] = None,
     line_start: Optional[int] = None,
     line_end: Optional[int] = None,
-    encoding: str = "utf-8",
 ):
     if not mas_config.fs_allowed_paths:
         return ToolError("File system tools are disabled by configuration.")
@@ -302,7 +297,7 @@ async def edit_file(
         return ToolError(f"Not a file: {resolved}")
 
     try:
-        original = resolved.read_text(encoding=encoding)
+        original = resolved.read_text(encoding="utf-8")
     except Exception as e:
         return ToolError(f"Failed to read file: {e}")
 
@@ -312,7 +307,7 @@ async def edit_file(
         return ToolError(str(e))
 
     try:
-        resolved.write_text(result, encoding=encoding)
+        resolved.write_text(result, encoding="utf-8")
         _remember_file(resolved)
     except PermissionError:
         return ToolError(f"Permission denied: {resolved}")

@@ -27,6 +27,6 @@ async def test_missing_pywin32_does_not_break_tool_module_import(monkeypatch, mi
     monkeypatch.setattr(builtins, "__import__", import_without_pywin32)
     namespace = runpy.run_path(_system.__file__)
     assert missing_module in attempted
-    assert callable(namespace["list_processes"])
+    assert callable(namespace["get_system_status"])
     result = await namespace["get_focused_window"]()
     assert "pywin32 could not be loaded" in result

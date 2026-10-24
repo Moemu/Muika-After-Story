@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Optional
 
 import psutil
 from pydantic import BaseModel, Field
@@ -31,62 +30,6 @@ try:
     import pyperclip
 except ImportError:
     pyperclip = None
-
-
-class ListProcessesParams(BaseModel):
-    filter: Optional[str] = Field(None, description="Optional filter string for process names.")
-    limit: int = Field(50, description="Maximum number of processes to return.")
-    offset: int = Field(0, description="Number of processes to skip for pagination.")
-
-
-@on_function_call(
-    "List running processes with optional keyword filtering.",
-    params=ListProcessesParams,
-)
-async def list_processes(filter: Optional[str] = None, limit: int = 50, offset: int = 0) -> str:
-    """列出匹配的进程名称，并按偏移量分页。"""
-
-    ignored = (
-        {
-            "svchost.exe",
-            "System",
-            "Registry",
-            "smss.exe",
-            "csrss.exe",
-            "wininit.exe",
-            "services.exe",
-            "lsass.exe",
-        }
-        if sys.platform == "win32"
-        else {"kthreadd", "ksoftirqd", "kworker"}
-    )
-    try:
-        processes: set[str] = set()
-        for proc in psutil.process_iter(["name"]):
-            try:
-                name = proc.info["name"]
-                if name in ignored:
-                    continue
-                if filter and filter.lower() not in name.lower():
-                    continue
-                processes.add(name)
-                if len(processes) >= 500:
-                    break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
-
-        sorted_names = sorted(processes)
-        total = len(sorted_names)
-        page = sorted_names[offset : offset + limit]
-        out = f"Running Processes (Total unique: {total}):\n" + ", ".join(page)
-        if total > offset + limit:
-            remaining = total - offset - limit
-            next_offset = offset + limit
-            out += f"\n...and {remaining} more. Use offset={next_offset} to see more."
-        return out
-    except Exception as e:
-        logger.error(f"[ListProcesses] Failed: {e}")
-        return ToolError(f"Error listing processes: {e}")
 
 
 @on_function_call("Get the title and process of the currently focused window.")
