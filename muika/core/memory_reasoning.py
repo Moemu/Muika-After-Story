@@ -57,7 +57,9 @@ merging different people.
 For equivalent legacy facts, cite and supersede the old fact IDs. Keep the same value and category; this does
 not count as recall.
 The prompt lists each current open intention by id. Review that list against today's evidence.
-Review every listed id; do not drop one silently.
+Consider every listed id, but include an intention in state_update only when its id, description or status
+actually changes today; a wish unchanged by today's evidence needs no entry. Do not silently ignore
+evidence that ends a listed wish: mark that id resolved or abandoned.
 An open intention is something she still means to do, find out, or continue, and can later mark resolved or abandoned.
 What he said, or what remains unanswered, is a fact, not an intention.
 A way of speaking, a one-time reply, or a decision to stop is not a new intention. If that decision ends an
