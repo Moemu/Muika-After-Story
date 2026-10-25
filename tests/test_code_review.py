@@ -55,11 +55,12 @@ def test_new_defaults_and_legacy_dotenv(tmp_path):
 
 
 @pytest.mark.parametrize("path", ["templates/persona.jinja2", "configs/skills/self/SKILL.md", "plugins/new.py"])
-def test_ordinary_file_writes_cannot_bypass_self_tools(tmp_path, monkeypatch, path):
+def test_ordinary_file_writes_cannot_bypass_self_pipelines(tmp_path, monkeypatch, path):
     monkeypatch.setattr(mas_config, "action_permission", "write")
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
-    with pytest.raises(_filesystem._FSError, match="self_write"):
-        _filesystem._resolve_and_check(str(tmp_path / path), require_write=True)
+    resolved = _filesystem._resolve_and_check(str(tmp_path / path), require_write=True)
+    with pytest.raises(_filesystem._FSError, match="Self-modification is disabled"):
+        _filesystem._route_self_write(resolved, None)
     assert _filesystem._resolve_and_check(str(tmp_path / "note.txt"), require_write=True) == tmp_path / "note.txt"
 
 

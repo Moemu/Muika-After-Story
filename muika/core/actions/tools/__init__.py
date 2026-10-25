@@ -13,4 +13,5 @@ from . import (  # noqa: F401
     _skill,
     _system,
     _topics,
+    _workspace,
 )

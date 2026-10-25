@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import psutil
@@ -48,6 +48,114 @@ def write_json(path: Path, value: object) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+BOOT_TARGET_FILE = "boot_target.json"
+ROLLBACK_READY_FILE = "rollback_ready.json"
+
+PROMOTABLE_FILES = ("bot.py", "core_main.py")
+PROMOTABLE_PREFIXES = ("muika/", "muika_bot/", "tests/", "configs/", "templates/")
+REJECTED_PREFIXES = ("data/", ".git/", "plugins/")
+UNSUPPORTED_FILES = ("pyproject.toml", "uv.lock", "alembic.ini")
+"""可提升白名单与拒绝清单（P0-1）：编辑自由留在工作区树上，可提升性收在门上。"""
+
+ESCALATE_FILES = (
+    "muika/core/code_review.py",
+    "muika/core/self_mod/policy.py",
+    "muika/core/self_mod/manager.py",
+    "muika/core/self_mod/workspace.py",
+    "muika/core/self_mod/plugin_deployer.py",
+    "muika/core/self_mod/core_probe.py",
+    "muika/core/actions/tools/_executor.py",
+    "muika/core/actions/tools/_filesystem.py",
+    "muika/core/actions/tools/_workspace.py",
+    "muika/builtin_plugins/review.py",
+    "muika/builtin_plugins/restart.py",
+    "muika/builtin_plugins/patch.py",
+    "muika/ipc/supervisor.py",
+    "muika/ipc/bootstrap.py",
+    "muika/core/restart.py",
+    "muika/plugin/func_call/context.py",
+    "muika/config.py",
+    "muika/core/loop.py",
+    "core_main.py",
+    "tests/test_self_workspace.py",
+    "tests/test_supervisor_boot.py",
+)
+ESCALATE_PREFIXES = ("muika/migrations/", "tests/")
+"""升级清单：命中的工作区改动必须由玩家亲自批准（require_player 挂起）。"""
+
+ChangeClass = Literal["promotable", "escalated", "rejected", "unsupported"]
+
+
+def classify_change(rel_path: str) -> ChangeClass:
+    """裁决工作区变更类别：白名单外的路径一律拒绝提升。"""
+    normalized = PurePosixPath(rel_path.replace("\\", "/")).as_posix().strip("/")
+    if normalized in UNSUPPORTED_FILES:
+        return "unsupported"
+    if normalized == ".env" or normalized.startswith(".env."):
+        return "rejected"
+    if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in REJECTED_PREFIXES):
+        return "rejected"
+    promotable = normalized in PROMOTABLE_FILES or any(normalized.startswith(prefix) for prefix in PROMOTABLE_PREFIXES)
+    if not promotable:
+        return "rejected"
+    if normalized in ESCALATE_FILES or any(normalized.startswith(prefix) for prefix in ESCALATE_PREFIXES):
+        return "escalated"
+    return "promotable"
+
+
+def control_data_dir() -> Path:
+    """返回 supervisor 与 Core 共用的受管 data 目录（与注入子进程的 DATA_DIR 同源）。"""
+    return Path(os.environ.get("DATA_DIR", "data")).resolve()
+
+
+def boot_target_path() -> Path:
+    """返回 boot 指针文件路径。"""
+    return control_data_dir() / BOOT_TARGET_FILE
+
+
+def read_boot_target() -> Path | None:
+    """返回 boot 指针文件路径；无指针返回 None。"""
+    path = boot_target_path()
+    return path if path.is_file() else None
+
+
+def write_boot_target(workspace_id: str, manifest_hash: str, review_id: str, backup_path: str) -> None:
+    """写入 boot 指针（提交点）：下一次重启将运行该工作区树。"""
+    write_json(
+        boot_target_path(),
+        {
+            "workspace_id": workspace_id,
+            "manifest_hash": manifest_hash,
+            "review_id": review_id,
+            "backup_path": backup_path,
+        },
+    )
+
+
+def clear_boot_target() -> None:
+    """清除 boot 指针；下次重启回到默认树。"""
+    boot_target_path().unlink(missing_ok=True)
+
+
+def read_rollback_ready() -> dict | None:
+    """读取最近一次提升的回滚记录；不存在返回 None。"""
+    path = control_data_dir() / ROLLBACK_READY_FILE
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else None
+
+
+def write_rollback_ready(record: dict) -> None:
+    """写入（覆盖）回滚记录。"""
+    write_json(control_data_dir() / ROLLBACK_READY_FILE, record)
+
+
+def clear_rollback_ready() -> None:
+    """删除回滚记录（单级语义：随下次 promotion 顶替或回滚消费）。"""
+    (control_data_dir() / ROLLBACK_READY_FILE).unlink(missing_ok=True)
 
 
 def lifecycle_directory() -> Path | None:
