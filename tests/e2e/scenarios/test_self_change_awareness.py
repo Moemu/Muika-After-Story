@@ -850,7 +850,8 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     kernel_root.mkdir(parents=True)
     target = kernel_root / "agreement.py"
     target.write_text("VALUE = 1\n", encoding="utf-8")
-    proposal_file = Path(mas_config.data_dir) / "test_proposal.json"
+    ws_id = "00000000_000000_abc12345"
+    manifest_dir = Path(mas_config.data_dir) / "workspaces" / ws_id
 
     def sha256_text(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -862,15 +863,15 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     monkeypatch.setattr("muika.core.self_change.compute_kernel_files", current_kernel)
 
     def make_record(status: str, expected: str) -> dict:
-        proposal_file.write_text(
-            json.dumps({"changes": [{"path": "muika/agreement.py", "action": "modify", "sha256_after": expected}]}),
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "manifest.json").write_text(
+            json.dumps({"touched": [{"path": "muika/agreement.py", "action": "modify", "sha_after": expected}]}),
             encoding="utf-8",
         )
         return {
             "id": "restart-1",
-            "patch_id": "00000000_000000_abc12345",
+            "workspace_id": ws_id,
             "status": status,
-            "proposal_file": str(proposal_file),
         }
 
     def clear_pending_keep_baseline() -> None:
@@ -906,7 +907,9 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
         await app.run_boot_self_change_check(make_record("failed", sha256_text(claimed)))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
     finally:
-        proposal_file.unlink(missing_ok=True)
+        import shutil
+
+        shutil.rmtree(manifest_dir, ignore_errors=True)
 
 
 async def test_builtin_plugins_excluded_from_plugin_baseline(core_app_factory, fast_self_change, tmp_plugin):

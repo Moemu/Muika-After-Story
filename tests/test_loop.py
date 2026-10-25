@@ -45,14 +45,11 @@ def test_invalid_or_conflicting_restart_tags_do_not_fall_back_to_plain_restart(t
 
 
 async def test_prepared_change_allows_chat_then_restarts_after_farewell(engine, monkeypatch):
-    from muika.core import restart as restart_module
-
-    patch_id = "20260913_120000_abcdef12"
-    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: MagicMock())
     calls = []
+    ws_id = "20260913_120000_abcdef12"
 
-    async def restart(patch, trigger):
-        calls.append((patch, trigger))
+    async def restart(workspace_id, trigger, confirm_memory_loss=False):
+        calls.append((workspace_id, trigger, confirm_memory_loss))
         assert engine.executor.send_message.await_args.args[0] == "好哦，待会见。"
 
     engine.restart.handler = restart
@@ -60,7 +57,7 @@ async def test_prepared_change_allows_chat_then_restarts_after_farewell(engine, 
         side_effect=[
             "做好了。需要重新醒来才会生效，你想现在重启，还是再聊一会？",
             "嗯，那就再陪我一会。",
-            f'好哦，待会见。<restart patch_id="{patch_id}">',
+            f'好哦，待会见。<restart patch_id="{ws_id}">',
         ]
     )
     for message in ("按你说的做吧", "再聊一会"):
@@ -69,63 +66,45 @@ async def test_prepared_change_allows_chat_then_restarts_after_farewell(engine, 
     await engine._run_brain_pipeline(
         UserMessageEvent(UserMessagePayload(Message(message="现在就重启吧"))),
     )
-    assert calls == [(patch_id, "user_message: 好哦，待会见。")]
+    assert calls == [(ws_id, "user_message: 好哦，待会见。", False)]
     engine.agent.model.ask.assert_not_called()
 
 
-@pytest.mark.parametrize("patch_id", [None, "20260913_120000_abcdef12"])
-async def test_background_initiative_can_restart_after_saving_its_reply(engine, monkeypatch, patch_id):
-    from muika.core import restart as restart_module
-
-    manager = MagicMock()
-    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
+@pytest.mark.parametrize("ws_id", [None, "20260913_120000_abcdef12"])
+async def test_background_initiative_can_restart_after_saving_its_reply(engine, monkeypatch, ws_id):
     calls = []
 
-    async def restart(patch, trigger):
-        calls.append((patch, trigger))
+    async def restart(workspace_id, trigger, confirm_memory_loss=False):
+        calls.append((workspace_id, trigger, confirm_memory_loss))
         assert engine.memory.recent_turns[-1].content == "准备好了。"
 
     engine.restart.handler = restart
-    tag = f'<restart patch_id="{patch_id}">' if patch_id else "<restart>"
+    tag = f'<restart patch_id="{ws_id}">' if ws_id else "<restart>"
     engine.brain.generate_reply = AsyncMock(return_value=f"准备好了。{tag}")
     await engine._run_brain_pipeline(TimeTickEvent())
-    assert calls == [(patch_id, "time_tick: 准备好了。")]
+    assert calls == [(ws_id, "time_tick: 准备好了。", False)]
     engine.agent.model.ask.assert_not_called()
-    if patch_id:
-        manager.check_ready.assert_called_once_with(patch_id)
-    else:
-        manager.check_ready.assert_not_called()
 
 
 async def test_plain_restart_needs_no_confirmation_or_proposal(engine, monkeypatch):
     from muika.config import mas_config
-    from muika.core import restart as restart_module
 
     monkeypatch.setattr(mas_config, "action_permission", "read_only")
-    manager = MagicMock()
-    manager.check_ready.side_effect = ValueError("Stale proposal")
-    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
     engine.restart.handler = AsyncMock()
     engine.brain.generate_reply = AsyncMock(return_value="待会见。<restart>")
     message = "刚才那个插件好像影响了你的状态。"
     await engine._run_brain_pipeline(UserMessageEvent(UserMessagePayload(Message(message=message))))
-    manager.check_ready.assert_not_called()
-    engine.restart.handler.assert_awaited_once_with(None, "user_message: 待会见。")
+    engine.restart.handler.assert_awaited_once_with(None, "user_message: 待会见。", False)
     engine.agent.model.ask.assert_not_called()
 
 
-async def test_autonomous_restart_keeps_candidate_checks_and_reports_failure(engine, monkeypatch):
-    from muika.core import restart as restart_module
-
-    manager = MagicMock()
-    manager.check_ready.side_effect = ValueError("Candidate changed during conversation.")
-    monkeypatch.setattr(restart_module, "get_core_proposal_manager", lambda: manager)
-    engine.restart.handler = AsyncMock()
+async def test_autonomous_restart_reports_handler_failure(engine, monkeypatch):
+    engine.restart.handler = AsyncMock(side_effect=ValueError("This Core was not started through a supervised entry."))
     engine.brain.generate_reply = AsyncMock(return_value='准备好了。<restart patch_id="20260913_120000_abcdef12">')
     await engine._run_brain_pipeline(TimeTickEvent())
-    engine.restart.handler.assert_not_awaited()
+    engine.restart.handler.assert_awaited_once_with("20260913_120000_abcdef12", "time_tick: 准备好了。", False)
     event = engine.event_queue.get_nowait()
-    assert event.task_id == "control-error" and "Candidate changed" in event.report
+    assert event.task_id == "control-error" and "Restart did not start" in event.report
 
 
 @pytest.mark.parametrize("action", ["complete", "cancel"])
@@ -139,7 +118,7 @@ async def test_restart_saves_task_control_before_handoff(engine, action):
     )
     snapshots = []
 
-    async def restart(patch_id, trigger):
+    async def restart(workspace_id, trigger, confirm_memory_loss=False):
         saved = next(item for item in await engine.agent_tasks.store.load() if item.id == task.id)
         snapshots.append(saved)
 

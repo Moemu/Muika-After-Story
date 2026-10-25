@@ -750,27 +750,35 @@ async def _observe(
 
 
 def _proposal_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[set[str], Optional[str]]:
-    """从重启记录关联的提案中确认本次自改实际落地的内核文件集合。
+    """从重启记录关联的工作区清单确认本次自改实际落地的内核文件集合。
 
-    只有本次重启（status=started）且**当前文件内容与提案预期结果一致**的路径
+    只有本次重启（status=started）且**当前文件内容与清单预期结果一致**的路径
     才豁免入账——旧的自改记录、被玩家再次修改的文件，都不能屏蔽外部变更。
-    提案读不到时保守返回空集合：宁可让已知的自改走一遍账本，
+    清单优先取 rollback_ready 内嵌副本（不依赖工作区目录存活），退回清单文件；
+    都读不到时保守返回空集合：宁可让已知的自改走一遍账本，
     也不把并存的外部修改整批吞掉。
     """
-    if not restart_record or not restart_record.get("patch_id") or restart_record.get("status") != "started":
+    if not restart_record or not restart_record.get("workspace_id") or restart_record.get("status") != "started":
         return set(), None
     restart_id = restart_record.get("id")
-    proposal_file = restart_record.get("proposal_file")
-    if not proposal_file:
-        return set(), restart_id
-    try:
-        proposal = json.loads(Path(proposal_file).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.warning("[SelfChange] Restart proposal file unreadable; kernel diff stays external.")
-        return set(), restart_id
+    ws_id = str(restart_record.get("workspace_id"))
+    from muika.ipc.supervisor import read_rollback_ready
+
+    changes: list[Any]
+    record = read_rollback_ready()
+    if record is not None and record.get("workspace_id") == ws_id:
+        changes = list(record.get("touched", []))
+    else:
+        manifest_path = Path(mas_config.data_dir).resolve() / "workspaces" / ws_id / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("[SelfChange] Workspace manifest unreadable; kernel diff stays external.")
+            return set(), restart_id
+        changes = list(manifest.get("touched", []))
     package_name = kernel_root().name
     paths: set[str] = set()
-    for change in proposal.get("changes", []):
+    for change in changes:
         parts = PurePosixPath(str(change.get("path", ""))).parts
         if not parts or parts[0] != package_name:
             continue
@@ -782,12 +790,12 @@ def _proposal_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[s
 
 
 def _self_change_landed(path: Path, change: Mapping[str, Any]) -> bool:
-    """核对提案变更是否就是磁盘上的现状（摘要语义与提案体系一致：utf-8 文本）。"""
+    """核对清单变更是否就是磁盘上的现状（摘要语义与提案体系一致：utf-8 文本）。"""
     try:
         text = path.read_text(encoding="utf-8") if path.is_file() else None
     except (OSError, ValueError):
         return False
-    expected = change.get("sha256_after")
+    expected = change.get("sha_after")
     if expected is None:
         # delete 变更：文件确已消失才算落地
         return text is None

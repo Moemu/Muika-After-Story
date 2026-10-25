@@ -1,36 +1,47 @@
-"""处理 Core 重启，以及可选的提案应用。"""
+"""处理 Core 重启：转交生命周期请求，并描述待生效的工作区版本。"""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 
 from muika.config import mas_config
 
-from .self_mod.proposals import get_core_proposal_manager
+RestartHandler = Callable[[str | None, str, bool], Awaitable[None]]
+"""宿主提供的重启入口：(workspace_id, trigger, confirm_memory_loss)。
+
+实现：``ipc/bootstrap.py::CoreBootstrap.request_restart``。
+"""
 
 
 class RestartController:
-    """转交生命周期请求，并复核要应用的提案。"""
+    """转交生命周期请求；指针生效、回滚与回退由父进程执行。"""
 
     def __init__(self) -> None:
-        self.handler: Callable[[str | None, str], Awaitable[None]] | None = None
+        self.handler: RestartHandler | None = None
 
     def describe(self) -> str:
-        """给主人格提供真实的待应用状态。"""
+        """给主人格提供真实的待重启状态。"""
         if self.handler is None or not mas_config.can_self_modify:
             return ""
-        manager = get_core_proposal_manager()
-        ready = manager.list_proposals("ready")
-        return "\n".join(
-            f"Prepared Core proposal {p['patch_id']}: {p['reason']}; stale={manager.is_stale(p)}. "
-            "Still running the old code. Choose when to apply it and restart in the context of your conversation."
-            for p in ready
+        from muika.ipc import supervisor
+
+        pointer = supervisor.read_boot_target()
+        if pointer is None:
+            return ""
+        try:
+            boot = json.loads(pointer.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        ws_id = str(boot.get("workspace_id", ""))
+        manifest = supervisor.load_workspace_manifest(ws_id) or {}
+        return (
+            f"Workspace {ws_id} passed the gate: {manifest.get('reason', '')}. "
+            "Still running the old code. Choose when to restart in the context of your conversation."
         )
 
-    async def request(self, patch_id: str | None, trigger: str) -> None:
-        """提交重启及其来源，仅在指定提案时复核并应用变更。"""
+    async def request(self, workspace_id: str | None, trigger: str, confirm_memory_loss: bool = False) -> None:
+        """提交重启及其来源；待生效版本由 boot 指针决定。"""
         if self.handler is None:
             raise ValueError("This Core was not started through a supervised entry point; restart manually.")
-        if patch_id is not None:
-            get_core_proposal_manager().check_ready(patch_id)
-        await self.handler(patch_id, trigger)
+        await self.handler(workspace_id, trigger, confirm_memory_loss)

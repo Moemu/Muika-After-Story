@@ -198,20 +198,35 @@ class CoreBootstrap:
         directory = lifecycle_directory()
         restart_record: Optional[RestartRecord] = None
         if directory is not None:
-            write_json(directory / "ready.json", {"pid": os.getpid()})
+            import muika
+
+            write_json(
+                directory / "ready.json",
+                {
+                    "pid": os.getpid(),
+                    "running_root": str(Path(muika.__file__).resolve().parents[1]),
+                    "nonce": os.environ.get("MUIKA_BOOT_NONCE", ""),
+                },
+            )
             record_path = mas_config.data_dir.resolve() / "restart.json"
             if record_path.is_file():
                 try:
                     for _ in range(30):
                         record = json.loads(record_path.read_text(encoding="utf-8"))
-                        if record.get("status") in {"started", "restored", "failed"}:
+                        if record.get("status") in {
+                            "started",
+                            "restored",
+                            "failed",
+                            "rolled_back",
+                            "auto_rolled_back",
+                        }:
                             restart_record = record
                             await self._muika.memory.add_material(
                                 "agent",
                                 f"Core restart outcome: {record['status']}. "
                                 f"Purpose: {record.get('reason', '')}. "
                                 "Startup readiness is not full feature verification.",
-                                source=f"restart:{record.get('id') or record['patch_id']}:{record['status']}",
+                                source=f"restart:{record.get('id') or record.get('workspace_id')}:{record['status']}",
                             )
                             break
                         await asyncio.sleep(0.1)
@@ -229,35 +244,28 @@ class CoreBootstrap:
         else:
             self._muika.start()
 
-    async def request_restart(self, patch_id: str | None, trigger: str) -> None:
-        """暂停行动，按需应用指定提案，再请求父进程重启。"""
+    async def request_restart(self, workspace_id: str | None, trigger: str, confirm_memory_loss: bool = False) -> None:
+        """暂停行动并请求父进程重启；指针生效与回滚由父进程执行。"""
         if self._restart_task is not None and not self._restart_task.done():
             raise ValueError("A restart is already pending.")
         directory = lifecycle_directory()
         if directory is None:
             raise ValueError("A supervisor is required to restart Core.")
-        manager = get_core_proposal_manager()
-        proposal = manager.check_ready(patch_id) if patch_id is not None else None
         record_path = mas_config.data_dir.resolve() / "restart.json"
         record: RestartRecord = {
             "id": uuid.uuid4().hex,
-            "patch_id": patch_id,
-            "reason": proposal["reason"] if proposal is not None else trigger,
+            "workspace_id": workspace_id,
+            "reason": trigger,
             "trigger": trigger,
-            "proposal_file": str(manager.proposals_root / patch_id / "proposal.json") if patch_id is not None else None,
             "record_path": str(record_path),
-            "status": "preparing",
+            "status": "restarting",
         }
+        if confirm_memory_loss:
+            record["confirm_memory_loss"] = True
 
         async def restart() -> None:
             try:
                 await self._muika.agent_tasks.handoff()
-                if patch_id is not None:
-                    manager.check_ready(patch_id)
-                write_json(record_path, record)
-                if patch_id is not None:
-                    await manager.apply(patch_id)
-                record["status"] = "restarting"
                 write_json(record_path, record)
                 write_json(directory / "restart.json", record)
                 self.restart_requested = True
