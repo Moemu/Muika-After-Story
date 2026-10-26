@@ -21,23 +21,23 @@ pytestmark = pytest.mark.usefixtures("daytime_initiative")
 
 
 def test_restart_tag_is_private_and_never_taken_from_inner_monologue():
-    tag = '<restart patch_id="20260913_120000_abcdef12">'
-    assert Muika._parse_reply_tags(f"<heart>{tag}</heart>继续聊吧。").restart_patch_id is None
+    tag = '<restart workspace_id="20260913_120000_abcdef12">'
+    assert Muika._parse_reply_tags(f"<heart>{tag}</heart>继续聊吧。").restart_workspace_id is None
     parsed = Muika._parse_reply_tags(f"待会见。{tag}")
     assert parsed.clean_reply == "待会见。"
-    assert parsed.restart_patch_id == "20260913_120000_abcdef12"
+    assert parsed.restart_workspace_id == "20260913_120000_abcdef12"
 
 
 @pytest.mark.parametrize("tag", ["<restart>", "<restart/>", "<restart />"])
 def test_plain_restart_tag_is_distinct_from_no_restart(tag):
     parsed = Muika._parse_reply_tags(f"待会见。{tag}")
-    assert parsed.restart_requested and parsed.restart_patch_id is None
+    assert parsed.restart_requested and parsed.restart_workspace_id is None
     assert parsed.clean_reply == "待会见。"
     assert not Muika._parse_reply_tags(f"<heart>{tag}</heart>继续聊吧。").restart_requested
 
 
 @pytest.mark.parametrize(
-    "tag", ['<restart patch_id="invalid">', '<restart><restart patch_id="20260913_120000_abcdef12">']
+    "tag", ['<restart workspace_id="invalid">', '<restart><restart workspace_id="20260913_120000_abcdef12">']
 )
 def test_invalid_or_conflicting_restart_tags_do_not_fall_back_to_plain_restart(tag):
     parsed = Muika._parse_reply_tags(f"待会见。{tag}")
@@ -57,7 +57,7 @@ async def test_prepared_change_allows_chat_then_restarts_after_farewell(engine, 
         side_effect=[
             "做好了。需要重新醒来才会生效，你想现在重启，还是再聊一会？",
             "嗯，那就再陪我一会。",
-            f'好哦，待会见。<restart patch_id="{ws_id}">',
+            f'好哦，待会见。<restart workspace_id="{ws_id}">',
         ]
     )
     for message in ("按你说的做吧", "再聊一会"):
@@ -79,7 +79,7 @@ async def test_background_initiative_can_restart_after_saving_its_reply(engine, 
         assert engine.memory.recent_turns[-1].content == "准备好了。"
 
     engine.restart.handler = restart
-    tag = f'<restart patch_id="{ws_id}">' if ws_id else "<restart>"
+    tag = f'<restart workspace_id="{ws_id}">' if ws_id else "<restart>"
     engine.brain.generate_reply = AsyncMock(return_value=f"准备好了。{tag}")
     await engine._run_brain_pipeline(TimeTickEvent())
     assert calls == [(ws_id, "time_tick: 准备好了。", False)]
@@ -100,7 +100,7 @@ async def test_plain_restart_needs_no_confirmation_or_proposal(engine, monkeypat
 
 async def test_autonomous_restart_reports_handler_failure(engine, monkeypatch):
     engine.restart.handler = AsyncMock(side_effect=ValueError("This Core was not started through a supervised entry."))
-    engine.brain.generate_reply = AsyncMock(return_value='准备好了。<restart patch_id="20260913_120000_abcdef12">')
+    engine.brain.generate_reply = AsyncMock(return_value='准备好了。<restart workspace_id="20260913_120000_abcdef12">')
     await engine._run_brain_pipeline(TimeTickEvent())
     engine.restart.handler.assert_awaited_once_with("20260913_120000_abcdef12", "time_tick: 准备好了。", False)
     event = engine.event_queue.get_nowait()

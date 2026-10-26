@@ -28,7 +28,6 @@ from muika.core.self_mod.fingerprint import (
     compute_plugin_digest,
     kernel_root,
 )
-from muika.core.self_mod.proposals import is_core_maintenance_active
 from muika.database.db import get_session
 from muika.database.orm_models import SystemStateORM
 from muika.plugin.loader import get_plugins
@@ -533,7 +532,7 @@ class SelfChangeDispatcher:
         if not mas_config.self_change_awareness_enabled or not self._muika.is_alive:
             return
         if self.boot_change is not None and not self.boot_greeting_pending:
-            if not (self._can_send() and not is_core_maintenance_active()):
+            if not self._can_send():
                 self.wake(SELF_CHANGE_RETRY_BASE_SECONDS)
                 return
             payload = await self.take_boot_change()
@@ -575,7 +574,7 @@ class SelfChangeDispatcher:
             return
         now = time.time()
         # 硬条件前置：新投递与重投都必须能真的发出去
-        if not (self._can_send() and not is_core_maintenance_active()):
+        if not self._can_send():
             self.wake(SELF_CHANGE_RETRY_BASE_SECONDS)
             return
         in_flight = state["delivery"].get("in_flight")
@@ -749,7 +748,7 @@ async def _observe(
     dispatcher.wake()
 
 
-def _proposal_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[set[str], Optional[str]]:
+def _workspace_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[set[str], Optional[str]]:
     """从重启记录关联的工作区清单确认本次自改实际落地的内核文件集合。
 
     只有本次重启（status=started）且**当前文件内容与清单预期结果一致**的路径
@@ -816,7 +815,7 @@ async def run_boot_self_change_check(muika: "Muika", restart_record: Optional[Ma
     ledger, dispatcher = _ledger, _dispatcher
     try:
         async with dispatcher._check_lock:
-            self_paths, restart_id = _proposal_self_paths(restart_record)
+            self_paths, restart_id = _workspace_self_paths(restart_record)
             entries = await ledger.observe_kernel_boot(restart_id=restart_id, self_paths=self_paths)
             dispatcher.boot_change = None
             if mas_config.self_change_awareness_enabled:

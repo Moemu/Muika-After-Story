@@ -14,7 +14,6 @@ import pytest
 
 from muika.builtin_plugins import plugins as plugins_command
 from muika.config import mas_config
-from muika.core.actions.tools import _self_edit
 from muika.core.actions.tools._plugin import plugin_load
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.self_mod import SelfModError
@@ -387,11 +386,12 @@ def test_feature_switch_rejects_plugin_writes(deploy_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stale_preview_is_rejected(deploy_env):
-    _, plugins, _ = deploy_env
+async def test_drifted_source_is_rejected(deploy_env):
+    import hashlib
+
+    deployer, plugins, _ = deploy_env
     target = plugins / "preview.py"
     target.write_text("value = 1\n", encoding="utf-8")
-    await _self_edit.self_edit(str(target), "replace", "1", "2", reason="preview")
-    target.write_text("value = 3\n", encoding="utf-8")
-    report = await _self_edit.self_edit_confirm(str(target))
-    assert "changed after the preview" in report
+    stale_hash = hashlib.sha256(b"value = 9\n").hexdigest()
+    with pytest.raises(SelfModError):
+        await deployer.deploy_if_unchanged(str(target), "value = 2\n", "stale base", stale_hash)

@@ -1,5 +1,4 @@
 from . import (  # noqa: F401
-    _core_proposal,
     _device,
     _executor,
     _filesystem,

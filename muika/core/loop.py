@@ -46,7 +46,6 @@ from .processes import get_process_manager
 from .reflection import ReflectionAgent
 from .restart import RestartController
 from .self_change import SelfChangeDispatcher
-from .self_mod.proposals import is_core_maintenance_active
 from .state import ActiveTopicState, MuikaState
 from .topic_manager import EventTopic, TopicManager
 
@@ -81,7 +80,7 @@ class ParsedReply:
     agent_errors: list[str] = field(default_factory=list)
     state_updates: list[StateUpdate] = field(default_factory=list)
     intention_ids: list[str | None] = field(default_factory=list)
-    restart_patch_id: str | None = None
+    restart_workspace_id: str | None = None
     restart_requested: bool = False
 
 
@@ -226,11 +225,6 @@ class Muika:
         :param dt: 距上次循环的秒数
         """
         self._log_event(event)
-        if is_core_maintenance_active():
-            if isinstance(event, AgentTaskEvent):
-                self.agent_tasks.defer_event(event)
-            logger.debug(f"[Loop] Maintenance mode rejected new {event.type} work.")
-            return
         if event.type in {"user_message", "adapter_online"}:
             await self.agent_tasks.notify_pending()
         if isinstance(event, AgentTaskEvent):
@@ -439,18 +433,18 @@ class Muika:
         restart_tags = re.findall(r"<restart\b[^>]*>", clean_reply)
         restart_match = (
             re.fullmatch(
-                r"<restart(?:\s+patch_id=[\"\']([0-9]{8}_[0-9]{6}_[0-9a-f]{8})[\"\'])?\s*/?>",
+                r"<restart(?:\s+workspace_id=[\"\']([0-9]{8}_[0-9]{6}_[0-9a-f]{8})[\"\'])?\s*/?>",
                 restart_tags[0],
             )
             if len(restart_tags) == 1
             else None
         )
-        restart_patch_id = restart_match.group(1) if restart_match else None
+        restart_workspace_id = restart_match.group(1) if restart_match else None
         clean_reply = re.sub(r"<restart\b[^>]*>", "", clean_reply).strip()
 
         return ParsedReply(
             restart_requested=restart_match is not None,
-            restart_patch_id=restart_patch_id,
+            restart_workspace_id=restart_workspace_id,
             clean_reply=clean_reply,
             memory_contents=[c.strip() for c in memory_contents if c.strip()],
             agent_commands=agent_commands,
@@ -632,7 +626,7 @@ class Muika:
                     parsed.agent_errors.append(f"Task control failed: {exc}")
             if parsed.restart_requested:
                 try:
-                    await self.restart.request(parsed.restart_patch_id, f"{event.type}: {parsed.clean_reply}")
+                    await self.restart.request(parsed.restart_workspace_id, f"{event.type}: {parsed.clean_reply}")
                     return
                 except (OSError, ValueError) as exc:
                     parsed.agent_errors.append(f"Restart did not start: {exc}")

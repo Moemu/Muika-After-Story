@@ -15,7 +15,7 @@ from muika.core import code_review
 from muika.core.agent.task_store import TaskRecord, TaskStore
 from muika.core.code_review import CodeReviewer, ReviewError, ReviewRecord
 from muika.core.events import CoreChangeEvent
-from muika.core.self_mod import proposals
+from muika.core.self_mod.workspace import get_self_workspace_manager
 from muika.core.state import MuikaState
 from muika.llm import ModelRequest
 from muika.llm._execution import dispatch_call
@@ -369,23 +369,19 @@ async def test_handoff_approval_preserves_execution_owner(core_app_factory, reco
     recorder.record("handoff_approval", decision=decision, task_status=task.status, executed=marker.exists())
 
 
-@pytest.mark.parametrize("kind", ["plugin", "core"])
+@pytest.mark.parametrize("kind", ["plugin", "workspace"])
 async def test_self_mod_approval_survives_error_conversion(core_app_factory, recorder, monkeypatch, tmp_path, kind):
-    """插件和 Core 的异常转换保留批准 ID，候选失败不修改正式文件。"""
+    """插件和工作区提交的异常转换保留批准 ID，候选失败不修改正式文件。"""
+
     monkeypatch.setattr(mas_config, "code_review_mode", "auto")
     monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     monkeypatch.setattr(mas_config, "plugins_dir", "plugins")
     (tmp_path / "plugins").mkdir()
-    (tmp_path / "muika").mkdir()
-    monkeypatch.setattr(proposals, "_manager", proposals.CoreProposalManager(tmp_path))
     monkeypatch.setattr(CodeReviewer, "assess", AsyncMock(side_effect=ReviewError("Approval service unavailable")))
-    app = await core_app_factory()
-    await app.start()
-    assert app.muika is not None
     if kind == "plugin":
         call = ToolCall(
             id="plugin",
-            name="self_write",
+            name="write_file",
             arguments=json.dumps(
                 {
                     "path": "plugins/toy.py",
@@ -398,17 +394,24 @@ async def test_self_mod_approval_survives_error_conversion(core_app_factory, rec
         )
         target = tmp_path / "plugins/toy.py"
     else:
+        manager = get_self_workspace_manager()
+        monkeypatch.setattr(manager, "_runtime_root", tmp_path)
+        (tmp_path / "muika").mkdir(exist_ok=True)
+        (tmp_path / "tests").mkdir(exist_ok=True)
+        (tmp_path / "pyproject.toml").write_text("[project]" + chr(10) + "name = 'fixture'" + chr(10), encoding="utf-8")
+        ws_id = manager.open("Try a small change.")
+        toy = manager.tree_root(ws_id) / "muika" / "toy.py"
+        toy.parent.mkdir(parents=True, exist_ok=True)
+        toy.write_text("VALUE = 1\n", encoding="utf-8")
         call = ToolCall(
-            id="core",
-            name="propose_core_change",
-            arguments=json.dumps(
-                {
-                    "changes": [{"action": "create", "path": "muika/toy.py", "content": "VALUE = 1\n"}],
-                    "reason": "Try a small change.",
-                }
-            ),
+            id="workspace",
+            name="self_workspace_submit",
+            arguments=json.dumps({"ws_id": ws_id, "reason": "Try a small change."}),
         )
         target = tmp_path / "muika/toy.py"
+    app = await core_app_factory()
+    await app.start()
+    assert app.muika is not None
     with tool_context(app.muika.state, app.executor, task_id=f"{kind}-approval"):
         result = await dispatch_call(call, {tool.name: tool for tool in get_tool_list()})
     assert result.is_error and result.review_id

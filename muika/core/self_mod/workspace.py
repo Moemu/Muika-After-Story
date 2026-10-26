@@ -541,6 +541,47 @@ class SelfWorkspaceManager:
         logger.info(f"[SelfWorkspace] Discarded 1 workspace {ws_id}.")
         return f"Workspace {ws_id} discarded; nothing about the running you changed."
 
+    async def request_rollback(self, confirm_memory_loss: bool) -> str:
+        """Core 侧回滚门：核对记忆损失确认后返回待回滚的 workspace id。
+
+        :raises SelfWorkspaceError: 无可回滚记录，或需 ``--confirm-memory-loss`` 而未确认
+        """
+        from muika.ipc import supervisor
+
+        capability = self._deployment_capability()
+        if capability is not None:
+            raise SelfWorkspaceError(capability)
+        ready = supervisor.read_rollback_ready()
+        if ready is None or ready.get("status") != "ready":
+            raise SelfWorkspaceError("No promoted version is rollback-ready; nothing to undo.")
+        if (
+            ready.get("touched_migrations")
+            and not confirm_memory_loss
+            and await self._promoted_version_has_memories(ready)
+        ):
+            raise SelfWorkspaceError(
+                "该版本包含数据库迁移；回滚会丢弃升级后的对话记忆（执行前会归档数据库）。"
+                "确认请使用 .patch rollback --confirm-memory-loss。"
+            )
+        return str(ready.get("workspace_id", ""))
+
+    async def _promoted_version_has_memories(self, ready: dict) -> bool:
+        """提升之后是否产生了新的对话记忆；读不到时保守返回 True。"""
+        promoted_at = str(ready.get("promoted_at", ""))
+        if not promoted_at:
+            return True
+        try:
+            from sqlalchemy import func, select
+
+            from muika.database.db import get_session
+            from muika.database.orm_models import ExperienceORM
+
+            async with get_session() as session:
+                last = await session.scalar(select(func.max(ExperienceORM.occurred_at)))
+        except Exception:  # noqa: BLE001 - 数据库不可读时保守要求确认
+            return True
+        return last is not None and str(last) >= promoted_at
+
     def show_diff(self, ws_id: str, page: int = 1) -> str:
         """分页展示工作区与运行树的差异。"""
         manifest = self.load_manifest(ws_id)

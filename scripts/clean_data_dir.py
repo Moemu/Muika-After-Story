@@ -29,7 +29,6 @@ PROTECTED_NAMES = {
     "tmp",
     "plugin",
     "reviews",
-    "core_proposals",
 }
 
 

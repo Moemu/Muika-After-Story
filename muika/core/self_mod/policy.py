@@ -68,7 +68,6 @@ def is_protected_path(resolved: Path) -> bool:
         data / name
         for name in (
             "reviews",
-            "core_proposals",
             "restart.json",
             "agent_tasks",
             "agent_processes",

@@ -152,7 +152,9 @@ async def test_player_can_revoke_an_approval_while_validation_runs(approved_revi
         reviewer.check(approved)
 
 
-@pytest.mark.parametrize("path", ["reviews/request.json", "core_proposals/candidate.json", "restart.json"])
+@pytest.mark.parametrize(
+    "path", ["reviews/request.json", "workspaces/00000000_000000_abcd1234/manifest.json", "restart.json"]
+)
 def test_ordinary_writes_cannot_forge_runtime_approvals(tmp_path, monkeypatch, path):
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(tmp_path)])
     monkeypatch.setattr(mas_config, "action_permission", "self_modify")

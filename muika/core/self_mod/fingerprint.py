@@ -2,8 +2,8 @@
 
 指纹描述"磁盘上的定义"，只在启动时与运行中的代码保证一致；运行期的
 核心代码编辑在重启前对感知不可见。这是自我变更感知（``muika.core.self_change``）
-的检测基础，与 Core 提案体系的 :meth:`CoreProposalManager.workspace_fingerprint`
-互不复用——后者的范围包含测试工作区，且只输出整体摘要。
+的检测基础，与版本工作区的 ``workspace_fingerprint`` 互不复用——
+后者的范围包含测试工作区，且只输出整体摘要。
 """
 
 from __future__ import annotations

@@ -41,8 +41,8 @@ async def _approve(review_id: str, muika: Muika) -> str:
         record = get_code_reviewer().decide(review_id, True)
         if record.owner:
             instruction = (
-                f"Continue prepare_core_change(patch_id={record.payload['patch_id']!r}); do not create a new proposal."
-                if record.kind == "core"
+                f"Continue self_workspace_submit; the workspace review {record.id} is approved."
+                if record.kind == "workspace"
                 else ""
             )
             await muika.agent_tasks.record_review_decision(record.owner, record.id, instruction)

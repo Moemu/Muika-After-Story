@@ -39,12 +39,6 @@ from muika.core.self_change import (
     run_boot_self_change_check,
     setup_self_change,
 )
-from muika.core.self_mod.proposals import (
-    core_maintenance_message,
-    get_core_proposal_manager,
-    is_core_maintenance_active,
-    is_maintenance_command_allowed,
-)
 from muika.database.crud import local_time
 from muika.database.db import close_db, get_session, init_db
 from muika.database.orm_models import ExperienceORM
@@ -383,26 +377,6 @@ class CoreBootstrap:
         if source and not isinstance(event, IpcUserMessageEvent):
             await self._muika.memory.add_material("note", f"Adapter event: {event.type}", source=source)
 
-        if is_core_maintenance_active():
-            if isinstance(event, IpcCommandEvent) and is_maintenance_command_allowed(event.raw):
-                pass
-            elif isinstance(event, IpcUserMessageEvent):
-                self._ws_server.set_triggering_adapter(client_name)
-                await self._ws_server.send_to_bot(SendMessage(content=core_maintenance_message()), target=client_name)
-                return ActionResponse(action=event.type, status="maintenance")
-            elif isinstance(event, IpcCommandEvent):
-                self._ws_server.set_triggering_adapter(client_name)
-                await self._ws_server.send_to_bot(
-                    CommandResult(content="[System] Core 正在等待重启。当前命令在维护模式中不可用。"),
-                    target=client_name,
-                )
-                return ActionResponse(action=event.type, status="maintenance")
-            else:
-                if isinstance(event, IpcSessionBootstrapEvent):
-                    self._ws_server.mark_bootstrapped(client_name)
-                    self.is_bootstraped = True
-                return ActionResponse(action=event.type, status="maintenance")
-
         if isinstance(event, IpcUserMessageEvent):
             self._ws_server.set_triggering_adapter(client_name)
             resources = []
@@ -491,9 +465,6 @@ async def run_core(
     try:
         logger.debug("Loading Database...")
         await init_db()
-        recovered = get_core_proposal_manager().recover_incomplete()
-        if recovered:
-            logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
         logger.info(f"[Permissions] {mas_config.action_permission}; code review: {mas_config.code_review_mode}.")
 
         if MCP_CONFIG_PATH.exists():

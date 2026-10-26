@@ -85,10 +85,9 @@ Do not import configured blocked modules. Default blocked modules include
 ## Safe workflow
 
 1. Read this scaffold.
-2. Call `self_write` to validate and stage a new plugin.
-3. Call `self_edit` to preview a change.
+2. Call `write_file("plugins/<name>.py", <content>, reason=<why>)` to validate and stage a new plugin.
 4. Check the preview before you continue.
-5. Call `self_edit_confirm` to validate and stage the changed plugin.
+4. Call `edit_file("plugins/<name>.py", ..., reason=<why>)` to validate and stage the changed plugin.
 6. Call `plugin_load(name)` to activate the staged candidate.
 7. Call `self_revert` to discard staging or undo an active deployment.
 8. Report the quarantine ID and failure cause after a validation failure.

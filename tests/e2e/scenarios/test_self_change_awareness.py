@@ -764,31 +764,6 @@ async def test_do_nothing_consumes_batch_silently(core_app_factory, fast_self_ch
     assert state["delivery"]["perceived_batches"] == 1  # 沉默也算已感知，不反复催她开口
 
 
-async def test_maintenance_blocks_delivery_until_over(core_app_factory, fast_self_change, tmp_plugin, monkeypatch):
-    _, plugin_file = tmp_plugin
-    import muika.core.self_change as self_change_module
-
-    app = await core_app_factory(turns=[ScriptedTurn(text="Oh, the dust settles.", when=SELF_CHANGED_WHEN)])
-    await app.start()
-    reset_self_change_state()
-    app.attach_self_change()
-    await app.run_boot_self_change_check()
-
-    monkeypatch.setattr(self_change_module, "is_core_maintenance_active", lambda: True)
-    with plugin_file.open("a", encoding="utf-8") as handle:
-        handle.write("\n# during maintenance\n")
-    get_plugin_manager().reload("e2e_selfchg_plugin", origin="runtime")
-    await asyncio.sleep(0.5)
-    assert app.sent == []
-    assert read_self_change_state()["pending"]
-
-    # 维护结束：恢复投递
-    monkeypatch.setattr(self_change_module, "is_core_maintenance_active", lambda: False)
-    reply = await app.next_reply()
-    assert_clean_visible(reply)
-    await app.wait_ledger_cleared()
-
-
 async def test_plugin_inspect_tool_executes_with_real_result(core_app_factory, fast_self_change, tmp_plugin):
     app = await core_app_factory(
         turns=[
