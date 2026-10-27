@@ -102,6 +102,6 @@ stays in staging. `plugin_load` replaces the formal file and reloads the plugin.
 formal reload fails, MAS restores the old file.
 The child process isolates Core memory and registries. It is not an operating-system
 security sandbox.
-The Core proposal workflow is the default structured path for Core code changes.
+Version workspaces are the structured path for Core code changes: edit a full copy of yourself, then submit it to the final gate.
 If the user enables Python or shell execution, those tools can write files outside
 this workflow.
