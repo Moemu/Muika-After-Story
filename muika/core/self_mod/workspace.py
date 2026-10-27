@@ -400,6 +400,12 @@ class SelfWorkspaceManager:
                 f"External changes conflict with your edits: {', '.join(conflicts)}. "
                 "Discard this workspace, take the external update in, and open a fresh one."
             )
+        new_paths = sorted(rel for rel in touched if rel not in fork_hashes and runtime_hashes.get(rel) is not None)
+        if new_paths:
+            raise SelfWorkspaceError(
+                f"These new files now exist in the running tree too: {', '.join(new_paths)}. "
+                "Discard this workspace and open a fresh one."
+            )
 
         for rel, sha in runtime_hashes.items():
             if rel not in touched and fork_hashes.get(rel) != sha:
@@ -440,7 +446,16 @@ class SelfWorkspaceManager:
         payload: dict = {
             "workspace_id": ws_id,
             "reason": reason,
-            "changes": [{"path": c["path"], "action": c["action"], "escalate": c["escalate"]} for c in changes],
+            "changes": [
+                {
+                    "path": c["path"],
+                    "action": c["action"],
+                    "escalate": c["escalate"],
+                    "sha_before": c["sha_before"],
+                    "sha_after": c["sha_after"],
+                }
+                for c in changes
+            ],
             "diff": diff_text,
             "touched_migrations": touched_migrations,
         }

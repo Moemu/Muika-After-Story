@@ -67,6 +67,7 @@ def write_json(path: Path, value: object) -> None:
 
 BOOT_TARGET_FILE = "boot_target.json"
 ROLLBACK_READY_FILE = "rollback_ready.json"
+ROLLBACK_TRIGGER = "rollback"
 
 PROMOTABLE_FILES = ("bot.py", "core_main.py")
 PROMOTABLE_PREFIXES = ("muika/", "muika_bot/", "tests/", "configs/", "templates/")
@@ -94,6 +95,7 @@ ESCALATE_FILES = (
     "muika/plugin/func_call/context.py",
     "muika/config.py",
     "muika/core/loop.py",
+    "muika/database/db.py",
     "core_main.py",
     "tests/test_self_workspace.py",
     "tests/test_supervisor_boot.py",
@@ -107,6 +109,8 @@ ChangeClass = Literal["promotable", "escalated", "rejected", "unsupported"]
 def classify_change(rel_path: str) -> ChangeClass:
     """裁决工作区变更类别：白名单外的路径一律拒绝提升。"""
     normalized = PurePosixPath(rel_path.replace("\\", "/")).as_posix().strip("/")
+    if normalized in {"", "."} or ".." in normalized.split("/") or normalized.startswith("/"):
+        return "rejected"
     if normalized in UNSUPPORTED_FILES:
         return "unsupported"
     if normalized == ".env" or normalized.startswith(".env."):
@@ -308,8 +312,17 @@ def verify_review(review_id: str, ws_id: str, changes: list[dict]) -> None:
     payload = value.get("payload", {})
     if not isinstance(payload, dict) or payload.get("workspace_id") != ws_id:
         raise ValueError("The approved review does not match this workspace.")
-    reviewed = {(str(c.get("path")), str(c.get("action"))) for c in payload.get("changes", [])}
-    expected = {(str(c.get("path")), str(c.get("action"))) for c in changes}
+
+    def _identity(change: dict) -> tuple:
+        return (
+            str(change.get("path")),
+            str(change.get("action")),
+            str(change.get("sha_before")),
+            str(change.get("sha_after")),
+        )
+
+    reviewed = {_identity(c) for c in payload.get("changes", [])}
+    expected = {_identity(c) for c in changes}
     if reviewed != expected:
         raise ValueError("The approved review no longer matches the submitted diff.")
 
@@ -367,7 +380,8 @@ def promote_workspace(ws_id: str, default_root: Path) -> dict:
                 raise ValueError(f"Promotion conflict, default tree drifted: {rel}")
     except Exception:
         pending = read_rollback_ready() or record
-        restore_workspace(pending, default_root)
+        archive_dir = control_data_dir() / "backups" / f"promotion-failed-{datetime.now():%Y%m%d-%H%M%S-%f}"
+        restore_workspace(pending, default_root, archive_after_dir=archive_dir)
         raise
 
     clear_boot_target()
@@ -444,6 +458,15 @@ def _execute_rollback(restart: RestartRecord, default_root: Path) -> None:
         )
         write_json(Path(str(restart["record_path"])), restart)
         return
+    if not _default_matches_promoted(ready, default_root):
+        restart["status"] = "failed"
+        restart["error"] = (
+            "Rollback refused: the default tree no longer matches the promoted version "
+            "(external changes). Manual recovery required."
+        )
+        write_json(Path(str(restart["record_path"])), restart)
+        logger.critical(f"[Supervisor] {restart['error']}")
+        return
     archive_note = _archive_database("rollback-discard")
     try:
         restored = restore_workspace(ready, default_root)
@@ -462,6 +485,15 @@ def _execute_rollback(restart: RestartRecord, default_root: Path) -> None:
     logger.info(f"[Supervisor] Rolled back workspace {ready.get('workspace_id')}: {len(restored)} file(s).")
 
 
+def _default_matches_promoted(record: dict, default_root: Path) -> bool:
+    """判断 default 树是否仍与提升后的版本一致（回滚守卫）。"""
+    for change in record.get("touched", []):
+        rel = PurePosixPath(str(change.get("path", ""))).as_posix()
+        if _sha256_file(default_root / rel) != change.get("sha_after"):
+            return False
+    return True
+
+
 def _try_auto_rollback(default_root: Path) -> bool:
     """非指针态 default 未 ready 且仍是刚提升状态时自动回滚一次（有界）。
 
@@ -470,10 +502,7 @@ def _try_auto_rollback(default_root: Path) -> bool:
     ready = read_rollback_ready()
     if not ready or ready.get("status") not in {"pending", "ready"}:
         return False
-    if any(
-        _sha256_file(default_root / PurePosixPath(str(c.get("path", ""))).as_posix()) != c.get("sha_after")
-        for c in ready.get("touched", [])
-    ):
+    if not _default_matches_promoted(ready, default_root):
         logger.critical(
             "[Supervisor] Default tree drifted from the promoted version; automatic rollback refused. "
             "Manual recovery required."
@@ -636,7 +665,7 @@ def supervise(argv: list[str]) -> int:
                     restart = cast(RestartRecord, json.loads(request_file.read_text(encoding="utf-8")))
                     request_file.unlink()
                     restored = False
-                    if restart.get("trigger") == "rollback":
+                    if restart.get("trigger") == ROLLBACK_TRIGGER:
                         _execute_rollback(restart, _default_root())
                         restart = None
                     continue

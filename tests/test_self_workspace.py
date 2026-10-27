@@ -353,3 +353,15 @@ async def test_runtime_read_scope_excludes_sensitive_files(monkeypatch):
 
     denied = await fs.read_file(str(repo / ".env"), max_chars=50)
     assert "denied" in denied or "protected" in denied
+
+
+async def test_runtime_read_scope_excludes_models_config(monkeypatch):
+    from muika.core.actions.tools import _filesystem as fs
+    from muika.core.self_mod.policy import _runtime_source_root
+
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
+    monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
+    repo = _runtime_source_root()
+
+    denied = await fs.read_file(str(repo / "configs" / "models.yml"), max_chars=50)
+    assert "denied" in denied or "protected" in denied

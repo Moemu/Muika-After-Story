@@ -62,12 +62,14 @@ async def _show(ws_id: str, page: int = 1) -> str:
 async def _rollback(muika: Muika, arparma: Arparma) -> str:
     """回滚最近一次提升的版本；破坏性动作由父进程执行。"""
     confirm = arparma.query("rollback.confirm_memory_loss") is not None
+    from muika.ipc import supervisor
+
     try:
         ws_id = await get_self_workspace_manager().request_rollback(confirm)
     except SelfWorkspaceError as exc:
         return f"[System] 回滚被拒绝：{exc}"
     try:
-        await muika.restart.request(ws_id, ".patch rollback", confirm_memory_loss=confirm)
+        await muika.restart.request(ws_id, supervisor.ROLLBACK_TRIGGER, confirm_memory_loss=confirm)
     except (OSError, ValueError) as exc:
         return f"[System] 无法回滚：{exc}"
     return "[System] 已请求回滚，保存进度并重启后旧版本会回来。"

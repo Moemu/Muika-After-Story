@@ -59,6 +59,8 @@ def _runtime_read_allowed(resolved: Path, root: Path) -> bool:
         return False
     if resolved.name.startswith(".env"):
         return False
+    if relative.as_posix() in {"configs/models.yml", "configs/mcp.json"}:
+        return False
     return not any(part in _RUNTIME_READ_EXCLUDED_DIRS for part in relative.parts)
 
 

@@ -59,7 +59,16 @@ def _workspace(data_dir: Path, ws_id: str, *, touched: list[dict], review_status
             "kind": "workspace",
             "payload": {
                 "workspace_id": ws_id,
-                "changes": [{"path": c["path"], "action": c["action"], "escalate": False} for c in touched],
+                "changes": [
+                    {
+                        "path": c["path"],
+                        "action": c["action"],
+                        "escalate": False,
+                        "sha_before": c.get("sha_before"),
+                        "sha_after": c.get("sha_after"),
+                    }
+                    for c in touched
+                ],
             },
             "status": review_status,
         },
@@ -391,3 +400,52 @@ def test_promoted_default_failure_auto_rolls_back_once(data_dir: Path, tmp_path:
     assert record and record["status"] == "consumed"
     restart = json.loads((data_dir / "restart.json").read_text(encoding="utf-8"))
     assert restart["status"] == "auto_rolled_back"
+
+
+def test_classify_change_rejects_dotdot_paths():
+    assert classify_change("muika/../data/x") == "rejected"
+
+
+def test_rollback_restart_trigger_matches_patch_command():
+    from muika.builtin_plugins import patch as patch_plugin
+
+    assert supervisor.ROLLBACK_TRIGGER == "rollback"
+    source = Path(patch_plugin.__file__).read_text(encoding="utf-8")
+    assert "supervisor.ROLLBACK_TRIGGER" in source
+
+
+def test_execute_rollback_refuses_drifted_default(data_dir: Path, tmp_path: Path):
+    default = tmp_path / "default"
+    (default / "muika").mkdir(parents=True)
+    (default / "muika" / "x.py").write_bytes(b"DRIFTED\n")
+    before_dir = tmp_path / "before"
+    (before_dir / "muika").mkdir(parents=True)
+    (before_dir / "muika" / "x.py").write_bytes(b"X0\n")
+    record = {
+        "workspace_id": "20261025_000000_00000008",
+        "touched": [{"path": "muika/x.py", "action": "modify", "sha_before": _sha("X0\n"), "sha_after": _sha("X1\n")}],
+        "touched_migrations": False,
+        "backup_path": "",
+        "before_dir": str(before_dir),
+        "status": "ready",
+    }
+    write_rollback_ready(record)
+    restart = cast(
+        "RestartRecord",
+        {
+            "id": "r2",
+            "workspace_id": record["workspace_id"],
+            "reason": "rollback",
+            "trigger": "rollback",
+            "record_path": str(data_dir / "restart.json"),
+            "status": "restarting",
+        },
+    )
+
+    _execute_rollback(restart, default)
+
+    saved = json.loads((data_dir / "restart.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "failed"
+    assert "no longer matches" in saved["error"] or "drift" in saved["error"].lower()
+    assert (default / "muika" / "x.py").read_text(encoding="utf-8") == "DRIFTED\n"
+    assert read_rollback_ready() is not None
