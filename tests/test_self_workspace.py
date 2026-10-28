@@ -443,11 +443,14 @@ def test_tree_hashes_skips_dependency_and_cache_paths(tmp_path):
 
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__" / "core.cpython.pyc").write_bytes(b"pyc")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "dep.js").write_text("x", encoding="utf-8")
     assert set(workspace_module._tree_hashes(tmp_path)) == {"muika/core.py"}
     assert set(workspace_module._tree_hashes(tmp_path, skip=workspace_module._RUN_ARTIFACT_PATTERNS)) == {
         ".venv/lib.py",
         "data/muika.db",
         "muika/core.py",
+        "node_modules/dep.js",
     }
 
 

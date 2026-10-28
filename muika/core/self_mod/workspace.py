@@ -47,6 +47,7 @@ WORKSPACE_IGNORE_PATTERNS = (
     ".venv-review",
     "logs",
     "dist",
+    "node_modules",
     ".env*",
 )
 """fork 排除清单：受管数据、依赖目录与凭据绝不进工作区树。"""

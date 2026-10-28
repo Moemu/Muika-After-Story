@@ -1,4 +1,8 @@
-"""由版本工作区门禁启动的 pytest 子进程探针；exit 5（无测试）由门禁的 test_count==0 阻断兜住。"""
+"""由版本工作区门禁启动的 pytest 子进程探针；exit 5（无测试）由门禁的 test_count==0 阻断兜住。
+
+跳过 ``tests/e2e``：e2e 需要多进程、端口与时序环境，超出探针预算（PROBE_TIMEOUT_SECONDS），
+其失败不代表候选改动有问题；e2e 在 CI 或本地单独运行。
+"""
 
 from __future__ import annotations
 
@@ -66,7 +70,7 @@ def main() -> None:
     plugin = _ProbePlugin()
     try:
         sys.path.insert(0, str(Path.cwd()))
-        exit_code = int(pytest.main(["-q", "-o", "addopts="], plugins=[plugin]))
+        exit_code = int(pytest.main(["-q", "-o", "addopts=", "--ignore=tests/e2e"], plugins=[plugin]))
         status = "unavailable" if exit_code in {2, 3, 4} and not plugin.errors else "completed"
         result = {
             "status": status,
