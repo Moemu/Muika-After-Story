@@ -83,7 +83,7 @@ def _workspace(data_dir: Path, ws_id: str, *, touched: list[dict], review_status
             "created_at": "2026-10-25T00:00:00",
             "fork_hashes": {},
             "touched": [{k: v for k, v in c.items() if not k.startswith("_")} for c in touched],
-            "touched_migrations": any(c["path"].startswith("muika/migrations/") for c in touched),
+            "schema_changed": any(c["path"].startswith("muika/migrations/") for c in touched),
             "backup_path": "",
             "review_id": review_id,
             "submitted_at": "2026-10-25T00:00:01",
@@ -253,7 +253,7 @@ def test_restore_workspace_restores_archives_and_database(data_dir: Path, tmp_pa
             {"path": "muika/x.py", "action": "modify", "sha_before": _sha("X0\n"), "sha_after": _sha("X1\n")},
             {"path": "muika/new.py", "action": "create", "sha_before": None, "sha_after": _sha("N1\n")},
         ],
-        "touched_migrations": True,
+        "schema_changed": True,
         "backup_path": str(backup),
         "before_dir": str(before_dir),
         "status": "ready",
@@ -280,7 +280,7 @@ def test_execute_rollback_gates_on_memory_loss(data_dir: Path, tmp_path: Path):
     record = {
         "workspace_id": "20261025_000000_00000006",
         "touched": [{"path": "muika/x.py", "action": "modify", "sha_before": _sha("X0\n"), "sha_after": _sha("X1\n")}],
-        "touched_migrations": True,
+        "schema_changed": True,
         "backup_path": "",
         "before_dir": str(before_dir),
         "status": "ready",
@@ -325,7 +325,7 @@ def test_try_auto_rollback_only_for_matching_promoted_state(data_dir: Path, tmp_
     record = {
         "workspace_id": "20261025_000000_00000007",
         "touched": [{"path": "muika/x.py", "action": "modify", "sha_before": _sha("X0\n"), "sha_after": _sha("X1\n")}],
-        "touched_migrations": False,
+        "schema_changed": False,
         "backup_path": "",
         "before_dir": str(before_dir),
         "status": "ready",
@@ -386,7 +386,7 @@ def test_promoted_default_failure_auto_rolls_back_once(data_dir: Path, tmp_path:
         {
             "workspace_id": "20261025_000000_00000010",
             "touched": [],
-            "touched_migrations": False,
+            "schema_changed": False,
             "backup_path": "",
             "before_dir": str(before_dir),
             "status": "ready",
@@ -426,7 +426,7 @@ def test_execute_rollback_refuses_drifted_default(data_dir: Path, tmp_path: Path
     record = {
         "workspace_id": "20261025_000000_00000008",
         "touched": [{"path": "muika/x.py", "action": "modify", "sha_before": _sha("X0\n"), "sha_after": _sha("X1\n")}],
-        "touched_migrations": False,
+        "schema_changed": False,
         "backup_path": "",
         "before_dir": str(before_dir),
         "status": "ready",

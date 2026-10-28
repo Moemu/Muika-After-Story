@@ -82,7 +82,8 @@ class WorkspaceManifest(WorkspaceManifestBase, total=False):
     """工作区清单：open 时落基础字段，submit 时补全提交字段。"""
 
     touched: list[WorkspaceChange]
-    touched_migrations: bool
+    schema_changed: bool
+    schema_head: str
     backup_path: str
     review_id: str
     submitted_at: str
@@ -176,6 +177,24 @@ def workspace_fingerprint(root: Path) -> str:
             digest.update((_sha256_file(path) or "").encode("ascii"))
             digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _alembic_heads(tree: Path) -> list[str] | None:
+    """返回工作区树的 alembic heads；无迁移目录返回 []，无法解析返回 None（保守视为有变化）。"""
+    migrations = tree / "muika" / "migrations"
+    if not (migrations / "versions").is_dir():
+        return []
+    try:
+        from alembic.config import Config as AlembicConfig
+        from alembic.script import ScriptDirectory
+    except ImportError:
+        return None
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(migrations))
+    try:
+        return list(ScriptDirectory.from_config(config).get_heads())
+    except Exception:  # noqa: BLE001 - 迁移脚本损坏时保守处理
+        return None
 
 
 def _run_probe(tree: Path) -> dict:
@@ -493,7 +512,16 @@ class SelfWorkspaceManager:
             )
 
         escalate_any = any(change["escalate"] for change in changes)
-        touched_migrations = any(change["path"].startswith("muika/migrations/") for change in changes)
+        heads = _alembic_heads(tree)
+        if heads is not None and len(heads) > 1:
+            raise SelfWorkspaceError(
+                f"The workspace migration chain has {len(heads)} heads: {', '.join(heads)}. "
+                "Merge them into one revision before submitting."
+            )
+        db_path = mas_config.data_dir.resolve() / "muika.db"
+        schema_head = supervisor.read_schema_head(db_path) if db_path.is_file() else None
+        # 她或上游带来任何未应用的迁移，boot 都会推进真实库的 schema
+        schema_changed = heads is None or (bool(heads) and (schema_head is None or set(heads) != {schema_head}))
         diff_text = self._unified_diff(changes, tree, strict=True)
 
         payload: dict = {
@@ -510,10 +538,10 @@ class SelfWorkspaceManager:
                 for c in changes
             ],
             "diff": diff_text,
-            "touched_migrations": touched_migrations,
+            "schema_changed": schema_changed,
         }
-        if touched_migrations:
-            payload["warning"] = "回滚此改动将丢失此后对话记忆（回滚前会归档数据库）。"
+        if schema_changed:
+            payload["warning"] = "该版本（含上游更新）改变了数据库结构；回滚将丢失此后对话记忆（回滚前会归档数据库）。"
 
         from muika.core.code_review import ReviewError, get_code_reviewer
 
@@ -557,14 +585,14 @@ class SelfWorkspaceManager:
             if source.is_file():
                 self._copy_into_tree(source, before_dir / change["path"])
 
-        db_path = mas_config.data_dir.resolve() / "muika.db"
         backup_path = str(backup_database(db_path, label="workspace")) if db_path.is_file() else ""
 
         manifest.update(
             {
                 "status": "submitted",
                 "touched": changes,
-                "touched_migrations": touched_migrations,
+                "schema_changed": schema_changed,
+                "schema_head": schema_head or "",
                 "backup_path": backup_path,
                 "review_id": review.id,
                 "submitted_at": datetime.now().isoformat(),
@@ -622,13 +650,9 @@ class SelfWorkspaceManager:
         ready = supervisor.read_rollback_ready()
         if ready is None or ready.get("status") != "ready":
             raise SelfWorkspaceError("No promoted version is rollback-ready; nothing to undo.")
-        if (
-            ready.get("touched_migrations")
-            and not confirm_memory_loss
-            and await self._promoted_version_has_memories(ready)
-        ):
+        if ready.get("schema_changed") and not confirm_memory_loss and await self._promoted_version_has_memories(ready):
             raise SelfWorkspaceError(
-                "该版本包含数据库迁移；回滚会丢弃升级后的对话记忆（执行前会归档数据库）。"
+                "该版本（含上游更新）改变了数据库结构；回滚会丢弃升级后的对话记忆（执行前会归档数据库）。"
                 "确认请使用 .patch rollback --confirm-memory-loss。"
             )
         return str(ready.get("workspace_id", ""))

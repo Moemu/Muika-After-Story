@@ -127,7 +127,7 @@ async def test_submit_escalate_suspends_for_player(manager: SelfWorkspaceManager
     record = records[-1]
     assert record.require_player is True
     payload = record.payload
-    assert payload["touched_migrations"] is True
+    assert payload["schema_changed"] is True
     assert "记忆" in str(payload.get("warning", ""))
 
 
@@ -449,3 +449,34 @@ def test_tree_hashes_skips_dependency_and_cache_paths(tmp_path):
         "data/muika.db",
         "muika/core.py",
     }
+
+
+async def test_submit_flags_schema_change_from_upstream_migration(manager, passing_probe, approved_review, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(mas_config.data_dir.resolve()))
+    ws_id = manager.open("before upstream migration")
+    versions = manager._runtime_root / "muika" / "migrations" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "001_upstream.py").write_text(
+        "revision = '001_upstream'\ndown_revision = None\n\n\ndef upgrade():\n    pass\n",
+        encoding="utf-8",
+    )
+    (manager.tree_root(ws_id) / "muika" / "core.py").write_text("CORE = 2\n", encoding="utf-8")
+
+    await manager.submit(ws_id, "absorb an upstream migration")
+
+    manifest = manager.load_manifest(ws_id)
+    assert manifest["schema_changed"] is True
+
+
+async def test_submit_rejects_multiple_alembic_heads(manager):
+    ws_id = manager.open("two heads")
+    versions = manager.tree_root(ws_id) / "muika" / "migrations" / "versions"
+    versions.mkdir(parents=True)
+    for name in ("001_a.py", "002_b.py"):
+        (versions / name).write_text(
+            f"revision = '{name[:3]}'\ndown_revision = None\n\n\ndef upgrade():\n    pass\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(workspace_module.SelfWorkspaceError, match="heads"):
+        await manager.submit(ws_id, "forked migration chain")

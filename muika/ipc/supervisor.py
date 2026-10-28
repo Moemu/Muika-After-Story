@@ -168,6 +168,28 @@ def read_rollback_ready() -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def read_schema_head(db_path: Path) -> str | None:
+    """读取 SQLite 数据库记录的 alembic 版本；无库或无版本表返回 None。"""
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def _warn_schema_drift(record: dict) -> None:
+    """恢复提交时备份前，记录数据库 schema 是否已离开备份版本。"""
+    expected = str(record.get("schema_head") or "")
+    if not expected:
+        return
+    current = read_schema_head(control_data_dir() / "muika.db")
+    if current and current != expected:
+        logger.critical(
+            f"[Supervisor] Database schema moved {expected}->{current}; " "restoring the submit-time backup."
+        )
+
+
 def write_rollback_ready(record: dict) -> None:
     """写入（覆盖）回滚记录。"""
     write_json(control_data_dir() / ROLLBACK_READY_FILE, record)
@@ -345,7 +367,8 @@ def promote_workspace(ws_id: str, default_root: Path) -> dict:
         "workspace_id": ws_id,
         "reason": str(manifest.get("reason", "")),
         "touched": changes,
-        "touched_migrations": bool(manifest.get("touched_migrations")),
+        "schema_changed": bool(manifest.get("schema_changed")),
+        "schema_head": str(manifest.get("schema_head", "")),
         "backup_path": str(manifest.get("backup_path", "")),
         "review_id": str(manifest.get("review_id", "")),
         "before_dir": str(workspace_root / "before"),
@@ -411,7 +434,7 @@ def restore_workspace(
 ) -> list[str]:
     """把 default 树还原到 before 状态；可选归档将被丢弃的 after 内容。
 
-    :param include_db: touched_migrations 时是否恢复数据库备份；调用方须保证
+    :param include_db: schema_changed 时是否恢复数据库备份；调用方须保证
         此时已无存活子进程持有该库
     :raises ValueError: 回滚资料缺失或哈希不符（还原中止，已还原文件保持 before 态）
     """
@@ -434,7 +457,8 @@ def restore_workspace(
             raise ValueError(f"Rollback material missing or drifted: {rel}")
         _atomic_write_bytes(target, content)
         restored.append(rel)
-    if include_db and record.get("touched_migrations") and record.get("backup_path"):
+    if include_db and record.get("schema_changed") and record.get("backup_path"):
+        _warn_schema_drift(record)
         backup = Path(str(record["backup_path"])).resolve()
         if not backup.is_relative_to(control_data_dir().resolve()):
             raise ValueError(f"Rollback backup is outside the managed data directory: {backup}")
@@ -472,7 +496,7 @@ def _execute_rollback(restart: RestartRecord, default_root: Path) -> None:
         restart["error"] = "No rollback record survived; nothing to roll back."
         write_json(Path(str(restart["record_path"])), restart)
         return
-    if ready.get("touched_migrations") and not restart.get("confirm_memory_loss"):
+    if ready.get("schema_changed") and not restart.get("confirm_memory_loss"):
         restart["status"] = "failed"
         restart["error"] = (
             "This rollback discards memories made after the update; " "repeat with --confirm-memory-loss to proceed."
@@ -720,12 +744,13 @@ def supervise(argv: list[str]) -> int:
                         )
                         manifest = load_workspace_manifest(str((boot or {}).get("workspace_id", "")))
                         clear_boot_target()
-                        if manifest and manifest.get("touched_migrations") and manifest.get("backup_path"):
+                        if manifest and manifest.get("schema_changed") and manifest.get("backup_path"):
                             try:
                                 archive_note = _archive_database("boot-failure-discard")
                                 backup = Path(str(manifest["backup_path"])).resolve()
                                 if not backup.is_relative_to(control_data_dir().resolve()):
                                     raise OSError(f"Backup outside managed data directory: {backup}")
+                                _warn_schema_drift(manifest)
                                 _restore_database(backup)
                                 logger.info(
                                     "[Supervisor] Database restored after failed boot; "
