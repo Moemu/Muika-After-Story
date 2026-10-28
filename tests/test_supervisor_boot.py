@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import textwrap
 from pathlib import Path
 from typing import cast
@@ -451,3 +452,77 @@ def test_execute_rollback_refuses_drifted_default(data_dir: Path, tmp_path: Path
     assert "no longer matches" in saved["error"] or "drift" in saved["error"].lower()
     assert (default / "muika" / "x.py").read_text(encoding="utf-8") == "DRIFTED\n"
     assert read_rollback_ready() is not None
+
+
+# ---------- 复审修复回归 ----------
+
+
+def test_pointer_rejected_when_manifest_drifts(data_dir: Path, tmp_path: Path, monkeypatch):
+    good = tmp_path / "good_default"
+    _stub_package(good, "good")
+    ws = _workspace(data_dir, "20261025_000000_00000011", touched=[])
+    _stub_package(ws / "tree", "good")
+    manifest_path = ws / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["reason"] = "tampered after pointer was written"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    code = _run_supervise(monkeypatch, good)
+
+    assert code == 0
+    assert read_boot_target() is None
+    assert read_rollback_ready() is None
+    assert not (data_dir / "restart.json").exists()
+
+
+def test_restore_workspace_rejects_escaping_paths(data_dir: Path, tmp_path: Path):
+    default = tmp_path / "default"
+    default.mkdir()
+    record = {
+        "workspace_id": "x",
+        "before_dir": "",
+        "touched_migrations": False,
+        "backup_path": "",
+        "touched": [{"path": "../evil.py", "action": "create", "sha_before": None, "sha_after": None}],
+    }
+    with pytest.raises(ValueError, match="Invalid rollback path"):
+        restore_workspace(record, default)
+    assert not (tmp_path / "evil.py").exists()
+
+
+def test_boot_failure_archives_database_before_restore(data_dir: Path, tmp_path: Path, monkeypatch):
+    good = tmp_path / "good_default"
+    _stub_package(good, "good")
+
+    def _seed_db(path: Path, marker: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS note (text TEXT)")
+            conn.execute("DELETE FROM note")
+            conn.execute("INSERT INTO note VALUES (?)", (marker,))
+
+    backup = data_dir / "backups" / "ws.db"
+    _seed_db(backup, "pre-submit")
+    db = data_dir / "muika.db"
+    _seed_db(db, "memories-after-submit")
+    ws = _workspace(data_dir, "20261025_000000_00000012", touched=[])
+    _stub_package(ws / "tree", "bad")
+    manifest_path = ws / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_changed"] = True
+    manifest["backup_path"] = str(backup)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    # manifest 被改过，重写指针保持校验一致
+    write_boot_target("20261025_000000_00000012", digest, manifest["review_id"], str(backup))
+
+    code = _run_supervise(monkeypatch, good)
+
+    assert code == 0
+    assert read_boot_target() is None
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT text FROM note").fetchone()[0] == "pre-submit"
+    archives = list((data_dir / "backups").glob("boot-failure-discard-*.db"))
+    assert archives
+    with sqlite3.connect(archives[0]) as conn:
+        assert conn.execute("SELECT text FROM note").fetchone()[0] == "memories-after-submit"
