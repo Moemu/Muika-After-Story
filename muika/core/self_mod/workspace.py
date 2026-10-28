@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal, Optional, TypedDict, cast
 
 from muika.config import mas_config
+from muika.core.self_mod.policy import runtime_source_root
 from muika.database.db import backup_database
 from muika.utils.logger import logger
 
@@ -52,7 +53,7 @@ WORKSPACE_IGNORE_PATTERNS = (
 )
 """fork 排除清单：受管数据、依赖目录与凭据绝不进工作区树。"""
 
-WorkspaceStatus = Literal["open", "submitted", "promoted", "failed", "discarded", "rolled_back"]
+WorkspaceStatus = Literal["open", "submitted", "discarded"]
 ChangeAction = Literal["modify", "create", "delete"]
 
 
@@ -71,7 +72,6 @@ class WorkspaceChange(TypedDict):
 
 
 class WorkspaceManifestBase(TypedDict):
-    schema_version: int
     ws_id: str
     reason: str
     status: WorkspaceStatus
@@ -101,23 +101,6 @@ def _sha256_file(path: Path) -> Optional[str]:
     if not path.is_file():
         return None
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _runtime_tree_root() -> Path:
-    """返回当前进程运行的源码树根（muika 包的父目录）。"""
-    import muika
-
-    return Path(muika.__file__).resolve().parents[1]
-
-
-def _copy_workspace(source_root: Path, destination: Path) -> None:
-    """复制源码树到工作区目录。"""
-    shutil.copytree(
-        source_root,
-        destination,
-        ignore=shutil.ignore_patterns(*WORKSPACE_IGNORE_PATTERNS),
-        dirs_exist_ok=True,
-    )
 
 
 _RUN_ARTIFACT_PATTERNS = ("__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache")
@@ -211,42 +194,40 @@ def _run_probe(tree: Path) -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         capped = ((exc.stdout or b"") + (exc.stderr or b""))[-PROBE_OUTPUT_CAP_BYTES:]
-        return {
-            "status": "failed",
-            "reason": f"Validation timed out after {PROBE_TIMEOUT_SECONDS} seconds.",
-            "timed_out": True,
-            "output": capped.decode("utf-8", errors="replace"),
-            "failures": [],
-            "errors": [],
-            "test_count": 0,
-        }
+        return _probe_failure(
+            "failed",
+            f"Validation timed out after {PROBE_TIMEOUT_SECONDS} seconds.",
+            capped.decode("utf-8", errors="replace"),
+            timed_out=True,
+        )
     output_bytes = (completed.stdout or b"") + (completed.stderr or b"")
     output = output_bytes[-PROBE_OUTPUT_CAP_BYTES:].decode("utf-8", errors="replace")
     marker_line = next((line for line in reversed(output.splitlines()) if line.startswith(_PROBE_MARKER)), None)
     if marker_line is None:
-        return {
-            "status": "unavailable",
-            "reason": f"Validation probe did not return structured output (exit {completed.returncode}).",
-            "timed_out": False,
-            "output": output,
-            "failures": [],
-            "errors": [],
-            "test_count": 0,
-        }
+        return _probe_failure(
+            "unavailable",
+            f"Validation probe did not return structured output (exit {completed.returncode}).",
+            output,
+        )
     try:
         result = json.loads(marker_line[len(_PROBE_MARKER) :])
     except json.JSONDecodeError as exc:
-        return {
-            "status": "unavailable",
-            "reason": f"Validation probe returned invalid JSON: {exc}",
-            "timed_out": False,
-            "output": output,
-            "failures": [],
-            "errors": [],
-            "test_count": 0,
-        }
+        return _probe_failure("unavailable", f"Validation probe returned invalid JSON: {exc}", output)
     result["output"] = output
     return result
+
+
+def _probe_failure(status: str, reason: str, output: str, *, timed_out: bool = False) -> dict:
+    """构造探针失败报告（超时 / 无结构化输出 / JSON 损坏共用）。"""
+    return {
+        "status": status,
+        "reason": reason,
+        "timed_out": timed_out,
+        "output": output,
+        "failures": [],
+        "errors": [],
+        "test_count": 0,
+    }
 
 
 def _deployment_probe_environment() -> Optional[str]:
@@ -258,6 +239,7 @@ def _deployment_probe_environment() -> Optional[str]:
 
 def _baseline_report(fingerprint: str) -> dict:
     """读取或测量运行树的基线探针报告（按指纹缓存）。"""
+    environment_error = _deployment_probe_environment()
     cache = mas_config.workspaces_dir / "_baseline" / f"{fingerprint}.json"
     if cache.is_file():
         try:
@@ -267,10 +249,9 @@ def _baseline_report(fingerprint: str) -> dict:
         if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
             report = cached.get("report")
             if isinstance(report, dict):
-                expired = report.get("status") == "unavailable" and _deployment_probe_environment() is None
+                expired = report.get("status") == "unavailable" and environment_error is None
                 if not expired:
                     return report
-    environment_error = _deployment_probe_environment()
     if environment_error:
         report = {
             "status": "unavailable",
@@ -281,9 +262,9 @@ def _baseline_report(fingerprint: str) -> dict:
             "test_count": 0,
         }
     else:
-        report = _run_probe(_runtime_tree_root())
+        report = _run_probe(runtime_source_root())
     trustworthy = report.get("status") == "completed" or (
-        report.get("status") == "unavailable" and _deployment_probe_environment() is not None
+        report.get("status") == "unavailable" and environment_error is not None
     )
     if trustworthy:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +283,7 @@ class SelfWorkspaceManager:
     """管理版本工作区的 open/submit/discard 与清单读写。"""
 
     def __init__(self, runtime_root: Optional[Path] = None) -> None:
-        self._runtime_root = (runtime_root or _runtime_tree_root()).resolve()
+        self._runtime_root = (runtime_root or runtime_source_root()).resolve()
 
     # ---------- 路径与清单 ----------
 
@@ -411,10 +392,14 @@ class SelfWorkspaceManager:
         tree = self.tree_root(ws_id)
         if tree.exists():
             raise SelfWorkspaceError(f"Workspace id collision: {ws_id}.")
-        _copy_workspace(self._runtime_root, tree)
+        shutil.copytree(
+            self._runtime_root,
+            tree,
+            ignore=shutil.ignore_patterns(*WORKSPACE_IGNORE_PATTERNS),
+            dirs_exist_ok=True,
+        )
 
         manifest: WorkspaceManifest = {
-            "schema_version": 1,
             "ws_id": ws_id,
             "reason": reason,
             "status": "open",
@@ -528,16 +513,7 @@ class SelfWorkspaceManager:
         payload: dict = {
             "workspace_id": ws_id,
             "reason": reason,
-            "changes": [
-                {
-                    "path": c["path"],
-                    "action": c["action"],
-                    "escalate": c["escalate"],
-                    "sha_before": c["sha_before"],
-                    "sha_after": c["sha_after"],
-                }
-                for c in changes
-            ],
+            "changes": changes,
             "diff": diff_text,
             "schema_changed": schema_changed,
         }
@@ -617,11 +593,6 @@ class SelfWorkspaceManager:
         if capability is not None:
             raise SelfWorkspaceError(capability)
         manifest = self.load_manifest(ws_id)
-        if manifest["status"] == "promoted":
-            raise SelfWorkspaceError(
-                f"Workspace {ws_id} already runs as part of the default tree; use `.patch rollback` instead."
-            )
-
         pointer = supervisor.read_boot_target()
         if pointer is not None:
             try:

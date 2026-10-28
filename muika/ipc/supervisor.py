@@ -97,8 +97,6 @@ ESCALATE_FILES = (
     "muika/core/loop.py",
     "muika/database/db.py",
     "core_main.py",
-    "tests/test_self_workspace.py",
-    "tests/test_supervisor_boot.py",
 )
 ESCALATE_PREFIXES = ("muika/migrations/", "tests/")
 """升级清单：命中的工作区改动必须由玩家亲自批准（require_player 挂起）。"""
@@ -254,9 +252,14 @@ def _default_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _workspace_root(ws_id: str) -> Path:
+    """返回受管工作区目录（受管数据卷内的 workspaces/<id>）。"""
+    return control_data_dir() / "workspaces" / ws_id
+
+
 def load_workspace_manifest(ws_id: str) -> dict | None:
     """读取工作区清单；不可读返回 None（调用方保守处理）。"""
-    path = control_data_dir() / "workspaces" / ws_id / "manifest.json"
+    path = _workspace_root(ws_id) / "manifest.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -361,7 +364,7 @@ def promote_workspace(ws_id: str, default_root: Path) -> dict:
     changes = list(manifest.get("touched", []))
     verify_review(str(manifest.get("review_id", "")), ws_id, changes)
 
-    workspace_root = control_data_dir() / "workspaces" / ws_id
+    workspace_root = _workspace_root(ws_id)
     tree = workspace_root / "tree"
     record: dict = {
         "workspace_id": ws_id,
@@ -487,39 +490,41 @@ def _archive_database(label: str) -> str:
     return str(archive)
 
 
+def _fail_restart(restart: RestartRecord, message: str, *, critical: bool = False) -> None:
+    """记录一次失败的重启/回滚；调用方负责随后返回。"""
+    restart["status"] = "failed"
+    restart["error"] = message
+    write_json(Path(str(restart["record_path"])), restart)
+    if critical:
+        logger.critical(f"[Supervisor] {message}")
+
+
 def _execute_rollback(restart: RestartRecord, default_root: Path) -> None:
     """父进程执行玩家回滚：清指针 → 归档 DB → flag 复核 → before/ 还原 → 条件恢复。"""
     clear_boot_target()
     ready = read_rollback_ready()
     if ready is None:
-        restart["status"] = "failed"
-        restart["error"] = "No rollback record survived; nothing to roll back."
-        write_json(Path(str(restart["record_path"])), restart)
+        _fail_restart(restart, "No rollback record survived; nothing to roll back.")
         return
     if ready.get("schema_changed") and not restart.get("confirm_memory_loss"):
-        restart["status"] = "failed"
-        restart["error"] = (
-            "This rollback discards memories made after the update; " "repeat with --confirm-memory-loss to proceed."
+        _fail_restart(
+            restart,
+            "This rollback discards memories made after the update; repeat with --confirm-memory-loss to proceed.",
         )
-        write_json(Path(str(restart["record_path"])), restart)
         return
     if not _default_matches_promoted(ready, default_root):
-        restart["status"] = "failed"
-        restart["error"] = (
+        _fail_restart(
+            restart,
             "Rollback refused: the default tree no longer matches the promoted version "
-            "(external changes). Manual recovery required."
+            "(external changes). Manual recovery required.",
+            critical=True,
         )
-        write_json(Path(str(restart["record_path"])), restart)
-        logger.critical(f"[Supervisor] {restart['error']}")
         return
     archive_note = _archive_database("rollback-discard")
     try:
         restored = restore_workspace(ready, default_root)
     except Exception as exc:  # noqa: BLE001 - 记录后由默认树重启兜底
-        restart["status"] = "failed"
-        restart["error"] = f"Rollback failed: {exc}"
-        write_json(Path(str(restart["record_path"])), restart)
-        logger.critical(f"[Supervisor] {restart['error']}")
+        _fail_restart(restart, f"Rollback failed: {exc}", critical=True)
         return
     clear_rollback_ready()
     restart["status"] = "rolled_back"
@@ -641,7 +646,7 @@ def supervise(argv: list[str]) -> int:
                         )
                         candidate = None
                     tree = (
-                        control_data_dir() / "workspaces" / str(candidate.get("workspace_id", "")) / "tree"
+                        _workspace_root(str(candidate.get("workspace_id", ""))) / "tree"
                         if isinstance(candidate, dict)
                         else None
                     )

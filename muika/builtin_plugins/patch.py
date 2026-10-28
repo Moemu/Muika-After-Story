@@ -6,6 +6,7 @@ from arclet.alconna import Alconna, Args, Arparma, CommandMeta, Option, Subcomma
 
 from muika.core.loop import Muika
 from muika.core.self_mod.workspace import SelfWorkspaceError, get_self_workspace_manager
+from muika.ipc import supervisor
 from muika.plugin.command import on_alconna
 from muika.plugin.models import PluginMetadata
 
@@ -62,8 +63,6 @@ async def _show(ws_id: str, page: int = 1) -> str:
 async def _rollback(muika: Muika, arparma: Arparma) -> str:
     """回滚最近一次提升的版本；破坏性动作由父进程执行。"""
     confirm = arparma.query("rollback.confirm_memory_loss") is not None
-    from muika.ipc import supervisor
-
     try:
         ws_id = await get_self_workspace_manager().request_rollback(confirm)
     except SelfWorkspaceError as exc:
@@ -78,8 +77,6 @@ async def _rollback(muika: Muika, arparma: Arparma) -> str:
 @patch_cmd.assign("restart")
 async def _restart(muika: Muika) -> str:
     """重启并让等待中的新版本生效。"""
-    if muika.restart.handler is None:
-        return "[System] 当前宿主未提供重启管理，请通过启动入口手动重启 Core。"
     await muika.executor.send_message("好哦，我会保存进度再重新醒来，待会见。")
     await muika.restart.request(None, ".patch restart")
     return "[System] 正在准备重启 Core。"

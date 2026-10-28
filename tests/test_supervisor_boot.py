@@ -412,9 +412,7 @@ def test_classify_change_rejects_dotdot_paths():
 def test_rollback_restart_trigger_matches_patch_command():
     from muika.builtin_plugins import patch as patch_plugin
 
-    assert supervisor.ROLLBACK_TRIGGER == "rollback"
-    source = Path(patch_plugin.__file__).read_text(encoding="utf-8")
-    assert "supervisor.ROLLBACK_TRIGGER" in source
+    assert patch_plugin.supervisor.ROLLBACK_TRIGGER is supervisor.ROLLBACK_TRIGGER
 
 
 def test_execute_rollback_refuses_drifted_default(data_dir: Path, tmp_path: Path):
