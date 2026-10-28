@@ -19,11 +19,12 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY muika/ ./muika/
 
-# 按 uv.lock 安装 muika 包（Core 所需的 standard 与 Bot 所需的 nonebot 额外依赖）
+# 按 uv.lock 安装 muika 包（Core 所需的 standard、Bot 所需的 nonebot，以及 dev 里的 pytest：
+# 容器以源码形态运行时，版本工作区的探针门禁需要 pytest）
 RUN /usr/local/bin/pip install uv && \
-    uv export --frozen --extra standard --extra nonebot --no-dev --no-hashes --no-emit-project -o /tmp/requirements.txt && \
+    uv export --frozen --extra standard --extra nonebot --extra dev --no-dev --no-hashes --no-emit-project -o /tmp/requirements.txt && \
     pip install --upgrade pip setuptools wheel && \
-    pip install -r /tmp/requirements.txt ".[standard,nonebot]"
+    pip install -r /tmp/requirements.txt ".[standard,nonebot,dev]"
 
 # 个人适配器等额外依赖，用锁文件约束版本，避免覆盖默认依赖
 ARG BOT_EXTRA_DEPENDENCIES=""
