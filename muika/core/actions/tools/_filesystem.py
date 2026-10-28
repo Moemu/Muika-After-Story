@@ -148,9 +148,6 @@ class ListDirectoryParams(BaseModel):
     read_only=True,
 )
 async def list_directory(path: str, show_hidden: bool = False):
-    if not mas_config.fs_allowed_paths:
-        return ToolError("File system tools are disabled by configuration.")
-
     try:
         resolved = _resolve_and_check(path)
     except _FSError as e:

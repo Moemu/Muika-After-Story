@@ -73,7 +73,7 @@ PROMOTABLE_FILES = ("bot.py", "core_main.py")
 PROMOTABLE_PREFIXES = ("muika/", "muika_bot/", "tests/", "configs/", "templates/")
 REJECTED_PREFIXES = ("data/", ".git/", "plugins/")
 UNSUPPORTED_FILES = ("pyproject.toml", "uv.lock", "alembic.ini")
-"""可提升白名单与拒绝清单（P0-1）：编辑自由留在工作区树上，可提升性收在门上。"""
+"""工作区变更的白名单分类：promotable / escalated（见 ESCALATE_*）/ rejected / unsupported。"""
 
 ESCALATE_FILES = (
     "configs/models.yml",
@@ -381,7 +381,9 @@ def promote_workspace(ws_id: str, default_root: Path) -> dict:
     except Exception:
         pending = read_rollback_ready() or record
         archive_dir = control_data_dir() / "backups" / f"promotion-failed-{datetime.now():%Y%m%d-%H%M%S-%f}"
-        restore_workspace(pending, default_root, archive_after_dir=archive_dir)
+        # 子进程仍在运行并持有数据库；此处只回填代码文件，DB 恢复由
+        # supervise 的指针态失败分支在子进程停止后归档并执行。
+        restore_workspace(pending, default_root, archive_after_dir=archive_dir, include_db=False)
         raise
 
     clear_boot_target()
@@ -392,15 +394,31 @@ def promote_workspace(ws_id: str, default_root: Path) -> dict:
     return record
 
 
-def restore_workspace(record: dict, default_root: Path, *, archive_after_dir: Path | None = None) -> list[str]:
+def _contained_rel_path(raw: str, default_root: Path) -> PurePosixPath:
+    """校验清单中的相对路径落在默认树内，拒绝绝对路径与目录跳出。"""
+    rel = PurePosixPath(str(raw).replace("\\", "/")).as_posix().strip("/")
+    parts = PurePosixPath(rel).parts
+    if not rel or any(part in ("", ".", "..") for part in parts) or Path(rel).is_absolute():
+        raise ValueError(f"Invalid rollback path: {raw!r}")
+    target = (default_root / rel).resolve()
+    if not target.is_relative_to(default_root.resolve()):
+        raise ValueError(f"Rollback path escapes the default tree: {raw!r}")
+    return PurePosixPath(rel)
+
+
+def restore_workspace(
+    record: dict, default_root: Path, *, archive_after_dir: Path | None = None, include_db: bool = True
+) -> list[str]:
     """把 default 树还原到 before 状态；可选归档将被丢弃的 after 内容。
 
+    :param include_db: touched_migrations 时是否恢复数据库备份；调用方须保证
+        此时已无存活子进程持有该库
     :raises ValueError: 回滚资料缺失或哈希不符（还原中止，已还原文件保持 before 态）
     """
     restored: list[str] = []
     before_dir = Path(str(record.get("before_dir", "")))
     for change in reversed(list(record.get("touched", []))):
-        rel = PurePosixPath(str(change.get("path", ""))).as_posix()
+        rel = _contained_rel_path(str(change.get("path", "")), default_root).as_posix()
         target = default_root / rel
         if archive_after_dir is not None and target.is_file():
             archived = archive_after_dir / rel
@@ -416,8 +434,11 @@ def restore_workspace(record: dict, default_root: Path, *, archive_after_dir: Pa
             raise ValueError(f"Rollback material missing or drifted: {rel}")
         _atomic_write_bytes(target, content)
         restored.append(rel)
-    if record.get("touched_migrations") and record.get("backup_path"):
-        _restore_database(Path(str(record["backup_path"])))
+    if include_db and record.get("touched_migrations") and record.get("backup_path"):
+        backup = Path(str(record["backup_path"])).resolve()
+        if not backup.is_relative_to(control_data_dir().resolve()):
+            raise ValueError(f"Rollback backup is outside the managed data directory: {backup}")
+        _restore_database(backup)
     return restored
 
 
@@ -573,6 +594,28 @@ def supervise(argv: list[str]) -> int:
                         candidate = json.loads(pointer.read_text(encoding="utf-8"))
                     except (OSError, ValueError):
                         candidate = None
+                    manifest = (
+                        load_workspace_manifest(str(candidate.get("workspace_id", "")))
+                        if isinstance(candidate, dict)
+                        else None
+                    )
+                    digest = (
+                        hashlib.sha256(
+                            json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                        ).hexdigest()
+                        if manifest is not None
+                        else None
+                    )
+                    if (
+                        manifest is None
+                        or manifest.get("ws_id") != candidate.get("workspace_id")
+                        or digest != candidate.get("manifest_hash")
+                    ):
+                        logger.critical(
+                            "[Supervisor] Boot pointer does not match its workspace manifest; "
+                            "falling back to the default tree."
+                        )
+                        candidate = None
                     tree = (
                         control_data_dir() / "workspaces" / str(candidate.get("workspace_id", "")) / "tree"
                         if isinstance(candidate, dict)
@@ -679,8 +722,16 @@ def supervise(argv: list[str]) -> int:
                         clear_boot_target()
                         if manifest and manifest.get("touched_migrations") and manifest.get("backup_path"):
                             try:
-                                _restore_database(Path(str(manifest["backup_path"])))
-                            except OSError as exc:
+                                archive_note = _archive_database("boot-failure-discard")
+                                backup = Path(str(manifest["backup_path"])).resolve()
+                                if not backup.is_relative_to(control_data_dir().resolve()):
+                                    raise OSError(f"Backup outside managed data directory: {backup}")
+                                _restore_database(backup)
+                                logger.info(
+                                    "[Supervisor] Database restored after failed boot; "
+                                    f"pre-restore state archived at {archive_note}."
+                                )
+                            except (OSError, sqlite3.Error) as exc:
                                 logger.critical(f"[Supervisor] Database restore after failed boot: {exc}")
                         if restart is not None:
                             restart["status"] = "restoring"

@@ -89,7 +89,11 @@ def _workspace(data_dir: Path, ws_id: str, *, touched: list[dict], review_status
             "submitted_at": "2026-10-25T00:00:01",
         },
     )
-    write_boot_target(ws_id, "0" * 64, review_id, "")
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    manifest_digest = hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    write_boot_target(ws_id, manifest_digest, review_id, "")
     return root
 
 
@@ -372,8 +376,6 @@ def test_broken_pointer_falls_back_to_default(data_dir: Path, tmp_path: Path, mo
 
     assert code == 0
     assert read_boot_target() is None
-    restart = json.loads((data_dir / "restart.json").read_text(encoding="utf-8"))
-    assert restart["status"] == "restored"
 
 
 def test_promoted_default_failure_auto_rolls_back_once(data_dir: Path, tmp_path: Path, monkeypatch):

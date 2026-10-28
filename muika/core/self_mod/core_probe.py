@@ -1,4 +1,4 @@
-"""由 Core 提案管理器按文件路径启动的 pytest 子进程探针。"""
+"""由版本工作区门禁启动的 pytest 子进程探针；exit 5（无测试）由门禁的 test_count==0 阻断兜住。"""
 
 from __future__ import annotations
 

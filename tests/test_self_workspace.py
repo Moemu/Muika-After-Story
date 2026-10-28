@@ -365,3 +365,69 @@ async def test_runtime_read_scope_excludes_models_config(monkeypatch):
 
     denied = await fs.read_file(str(repo / "configs" / "models.yml"), max_chars=50)
     assert "denied" in denied or "protected" in denied
+
+
+# ---------- 复审修复回归 ----------
+
+
+async def test_open_requires_self_modify(manager: SelfWorkspaceManager, monkeypatch):
+    monkeypatch.setattr(mas_config, "action_permission", "write")
+    with pytest.raises(workspace_module.SelfWorkspaceError, match="disabled"):
+        manager.open("should not fork")
+
+
+async def test_submit_requires_self_modify(manager: SelfWorkspaceManager, monkeypatch):
+    ws_id = manager.open("legit under self_modify")
+    monkeypatch.setattr(mas_config, "action_permission", "write")
+    with pytest.raises(workspace_module.SelfWorkspaceError, match="disabled"):
+        await manager.submit(ws_id, "downgraded before submit")
+
+
+async def test_submit_rejects_oversized_diff(manager: SelfWorkspaceManager, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(mas_config.data_dir.resolve()))
+    ws_id = manager.open("one huge line")
+    huge = "CORE = '" + "x" * 60_000 + "'\n"
+    (manager.tree_root(ws_id) / "muika" / "core.py").write_text(huge, encoding="utf-8")
+
+    with pytest.raises(workspace_module.SelfWorkspaceError, match="exceeds"):
+        await manager.submit(ws_id, "unreviewable size")
+
+
+async def test_baseline_cache_never_poisons_submit(monkeypatch, tmp_path):
+    monkeypatch.setattr(mas_config, "data_dir", tmp_path / "data")
+    calls = []
+
+    def fake_probe(tree):
+        calls.append(tree)
+        return _probe(status="failed", test_count=0) | {"timed_out": True, "reason": "timed out"}
+
+    monkeypatch.setattr(workspace_module, "_run_probe", fake_probe)
+    monkeypatch.setattr(workspace_module, "_deployment_probe_environment", lambda: None)
+    fingerprint = "test-fingerprint"
+
+    first = workspace_module._baseline_report(fingerprint)
+    assert first["timed_out"] is True
+    cache = mas_config.workspaces_dir / "_baseline" / f"{fingerprint}.json"
+    assert not cache.exists(), "timed-out baseline must not be cached"
+
+    # 环境缺失导致的 unavailable 会缓存；环境恢复后必须重测而不是永久拒绝
+    monkeypatch.setattr(workspace_module, "_deployment_probe_environment", lambda: "pytest missing")
+    unavailable = workspace_module._baseline_report(fingerprint)
+    assert unavailable["status"] == "unavailable"
+    assert cache.exists()
+
+    monkeypatch.setattr(workspace_module, "_deployment_probe_environment", lambda: None)
+    monkeypatch.setattr(workspace_module, "_run_probe", lambda tree: _probe())
+    recovered = workspace_module._baseline_report(fingerprint)
+    assert recovered["status"] == "completed"
+
+
+async def test_list_directory_covers_runtime_tree(monkeypatch):
+    from muika.core.actions.tools import _filesystem as fs
+    from muika.core.self_mod.policy import _runtime_source_root
+
+    monkeypatch.setattr(mas_config, "action_permission", "self_modify")
+    monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
+
+    result = await fs.list_directory(str(_runtime_source_root() / "muika"))
+    assert "DIR" in result or "FILE" in result

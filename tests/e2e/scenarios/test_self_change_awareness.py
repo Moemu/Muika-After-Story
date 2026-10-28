@@ -864,22 +864,21 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     app.attach_self_change(can_send=False)
     await app.run_boot_self_change_check()
     try:
-        # 她自改了 agreement.py，提案预期 = 磁盘现状 → 豁免且基线推进
+        # 她自改了 agreement.py，清单预期 = 磁盘原始字节 → 豁免且基线推进
         target.write_text("VALUE = 1\n# her own edit\n", encoding="utf-8")
-        modified = target.read_text(encoding="utf-8")
-        await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
+        her_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        await app.run_boot_self_change_check(make_record("started", her_sha))
         assert read_self_change_state()["pending"] == []
 
-        # 玩家随后又改了同一文件：旧提案的 sha256_after 不再匹配 → 外部入账
+        # 玩家随后又改了同一文件：旧清单的 sha_after 不再匹配 → 外部入账
         target.write_text("VALUE = 1\n# her own edit\n# master's later edit\n", encoding="utf-8")
-        await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
+        await app.run_boot_self_change_check(make_record("started", her_sha))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
 
         # 状态不是 started（提案未真正应用）：即使内容与提案一致也不豁免
         clear_pending_keep_baseline()
         target.write_text("VALUE = 1\n# her own edit\n# master's later edit\n# another edit\n", encoding="utf-8")
-        claimed = target.read_text(encoding="utf-8")
-        await app.run_boot_self_change_check(make_record("failed", sha256_text(claimed)))
+        await app.run_boot_self_change_check(make_record("failed", hashlib.sha256(target.read_bytes()).hexdigest()))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
     finally:
         import shutil

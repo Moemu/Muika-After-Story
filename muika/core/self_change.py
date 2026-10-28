@@ -789,18 +789,18 @@ def _workspace_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[
 
 
 def _self_change_landed(path: Path, change: Mapping[str, Any]) -> bool:
-    """核对清单变更是否就是磁盘上的现状（摘要语义与提案体系一致：utf-8 文本）。"""
+    """核对清单变更是否就是磁盘上的现状（工作区清单记录原始字节哈希）。"""
     try:
-        text = path.read_text(encoding="utf-8") if path.is_file() else None
-    except (OSError, ValueError):
+        content = path.read_bytes() if path.is_file() else None
+    except OSError:
         return False
     expected = change.get("sha_after")
     if expected is None:
         # delete 变更：文件确已消失才算落地
-        return text is None
-    if text is None:
+        return content is None
+    if content is None:
         return False
-    return hashlib.sha256(text.encode("utf-8")).hexdigest() == expected
+    return hashlib.sha256(content).hexdigest() == expected
 
 
 async def run_boot_self_change_check(muika: "Muika", restart_record: Optional[Mapping[str, Any]]) -> None:

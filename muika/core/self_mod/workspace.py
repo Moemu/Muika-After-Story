@@ -126,14 +126,37 @@ def _tree_hashes(root: Path) -> dict[str, str]:
     return hashes
 
 
+_FINGERPRINT_ROOTS = ("muika", "muika_bot", "tests", "configs", "templates")
+_FINGERPRINT_FILES = ("bot.py", "core_main.py", "pyproject.toml", "alembic.ini")
+_FINGERPRINT_SKIP_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache"}
+
+
 def workspace_fingerprint(root: Path) -> str:
-    """返回源码树的内容指纹（探针基线缓存键）。"""
+    """返回影响测试结果的源码指纹（探针基线缓存键）；跳过依赖与缓存目录。"""
     digest = hashlib.sha256()
-    for rel, sha in sorted(_tree_hashes(root).items()):
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(sha.encode("ascii"))
-        digest.update(b"\0")
+    for dirname in _FINGERPRINT_ROOTS:
+        base = root / dirname
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            relative = path.relative_to(root)
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or any(part in _FINGERPRINT_SKIP_DIRS for part in relative.parts)
+            ):
+                continue
+            digest.update(relative.as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update((_sha256_file(path) or "").encode("ascii"))
+            digest.update(b"\0")
+    for name in _FINGERPRINT_FILES:
+        path = root / name
+        if path.is_file() and not path.is_symlink():
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update((_sha256_file(path) or "").encode("ascii"))
+            digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -206,7 +229,9 @@ def _baseline_report(fingerprint: str) -> dict:
         if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
             report = cached.get("report")
             if isinstance(report, dict):
-                return report
+                expired = report.get("status") == "unavailable" and _deployment_probe_environment() is None
+                if not expired:
+                    return report
     environment_error = _deployment_probe_environment()
     if environment_error:
         report = {
@@ -219,8 +244,14 @@ def _baseline_report(fingerprint: str) -> dict:
         }
     else:
         report = _run_probe(_runtime_tree_root())
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"fingerprint": fingerprint, "report": report}, ensure_ascii=False), encoding="utf-8")
+    trustworthy = report.get("status") == "completed" or (
+        report.get("status") == "unavailable" and _deployment_probe_environment() is not None
+    )
+    if trustworthy:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps({"fingerprint": fingerprint, "report": report}, ensure_ascii=False), encoding="utf-8"
+        )
     return report
 
 
@@ -329,6 +360,8 @@ class SelfWorkspaceManager:
 
     def open(self, reason: str) -> str:
         """fork 当前运行树为新的可编辑工作区，返回工作区 id。"""
+        if not mas_config.can_self_modify:
+            raise SelfWorkspaceError("Self-modification is disabled by configuration.")
         capability = self._deployment_capability()
         if capability is not None:
             raise SelfWorkspaceError(capability)
@@ -356,6 +389,8 @@ class SelfWorkspaceManager:
 
     async def submit(self, ws_id: str, reason: str) -> str:
         """终审门：冲突检测 → 分类 → Review → 探针 → 快照 → 备份 → manifest → 指针。"""
+        if not mas_config.can_self_modify:
+            raise SelfWorkspaceError("Self-modification is disabled by configuration.")
         from muika.ipc import supervisor
 
         capability = self._deployment_capability()
@@ -441,7 +476,7 @@ class SelfWorkspaceManager:
 
         escalate_any = any(change["escalate"] for change in changes)
         touched_migrations = any(change["path"].startswith("muika/migrations/") for change in changes)
-        diff_text = self._unified_diff(changes, tree)
+        diff_text = self._unified_diff(changes, tree, strict=True)
 
         payload: dict = {
             "workspace_id": ws_id,
@@ -644,8 +679,8 @@ class SelfWorkspaceManager:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
-    def _unified_diff(self, changes: list[WorkspaceChange], tree: Path) -> str:
-        """生成触碰文件相对运行树的 unified diff（总量封顶）。"""
+    def _unified_diff(self, changes: list[WorkspaceChange], tree: Path, *, strict: bool = False) -> str:
+        """生成触碰文件相对运行树的 unified diff；strict 时超限即拒绝而非截断。"""
         parts: list[str] = []
         total = 0
         for change in changes:
@@ -665,6 +700,11 @@ class SelfWorkspaceManager:
             parts.append(chunk)
             total += len(chunk)
             if total > _DIFF_CAP_CHARS:
+                if strict:
+                    raise SelfWorkspaceError(
+                        f"The diff exceeds {_DIFF_CAP_CHARS} characters; the gate would review "
+                        "evidence it cannot fully see. Split the change into smaller workspaces."
+                    )
                 parts.append(f"...(diff capped at {_DIFF_CAP_CHARS} characters)\n")
                 break
         return "".join(parts)

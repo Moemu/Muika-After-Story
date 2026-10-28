@@ -94,7 +94,6 @@ async def _run_migrations(db_path: Path) -> None:
                 head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
                 if tables and (current is None or current[0] != head):
                     backup_database(db_path, label="before")
-                    logger.info(f"Backup saved before update: {db_path.parent / 'backups'}")
         # 自动标记旧数据库
         _ensure_alembic_version_table(db_path, alembic_cfg)
         alembic_command.upgrade(alembic_cfg, "head")
