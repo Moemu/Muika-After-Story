@@ -10,6 +10,7 @@ DB 备份 → manifest 全量落盘 → 指针最后写。指针是提交点；p
 from __future__ import annotations
 
 import difflib
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -117,13 +118,30 @@ def _copy_workspace(source_root: Path, destination: Path) -> None:
     )
 
 
-def _tree_hashes(root: Path) -> dict[str, str]:
-    """返回树内全部文件的 相对路径 → SHA-256 映射。"""
-    hashes: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and not path.is_symlink():
-            hashes[path.relative_to(root).as_posix()] = _sha256_file(path) or ""
-    return hashes
+_RUN_ARTIFACT_PATTERNS = ("__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache")
+"""运行产物：touched 检测时跳过，避免她跑测试生成的文件被当成待提升改动。"""
+
+
+def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
+    """判断文件名或目录名是否命中任一忽略模式。"""
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def _iter_tree_files(root: Path, skip: tuple[str, ...]):
+    """遍历树内未被 skip 命中的文件；剪枝依赖与缓存目录，不再进入 .venv/data。"""
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if not _matches_any(name, skip))
+        for name in sorted(filenames):
+            if _matches_any(name, skip):
+                continue
+            path = Path(directory) / name
+            if path.is_file() and not path.is_symlink():
+                yield path
+
+
+def _tree_hashes(root: Path, *, skip: tuple[str, ...] = WORKSPACE_IGNORE_PATTERNS) -> dict[str, str]:
+    """返回树内未被 skip 命中文件的 相对路径 → SHA-256 映射。"""
+    return {path.relative_to(root).as_posix(): _sha256_file(path) or "" for path in _iter_tree_files(root, skip)}
 
 
 _FINGERPRINT_ROOTS = ("muika", "muika_bot", "tests", "configs", "templates")
@@ -415,7 +433,7 @@ class SelfWorkspaceManager:
                 )
 
         tree = self.tree_root(ws_id)
-        tree_hashes = _tree_hashes(tree)
+        tree_hashes = _tree_hashes(tree, skip=_RUN_ARTIFACT_PATTERNS)
         runtime_hashes = _tree_hashes(self._runtime_root)
         fork_hashes = manifest["fork_hashes"]
 
@@ -636,7 +654,7 @@ class SelfWorkspaceManager:
         """分页展示工作区与运行树的差异。"""
         manifest = self.load_manifest(ws_id)
         tree = self.tree_root(ws_id)
-        tree_hashes = _tree_hashes(tree)
+        tree_hashes = _tree_hashes(tree, skip=_RUN_ARTIFACT_PATTERNS)
         runtime_hashes = _tree_hashes(self._runtime_root)
         changed = sorted(
             rel for rel in set(tree_hashes) | set(runtime_hashes) if tree_hashes.get(rel) != runtime_hashes.get(rel)

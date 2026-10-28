@@ -431,3 +431,21 @@ async def test_list_directory_covers_runtime_tree(monkeypatch):
 
     result = await fs.list_directory(str(_runtime_source_root() / "muika"))
     assert "DIR" in result or "FILE" in result
+
+
+def test_tree_hashes_skips_dependency_and_cache_paths(tmp_path):
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "lib.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "muika.db").write_bytes(b"db")
+    (tmp_path / "muika").mkdir()
+    (tmp_path / "muika" / "core.py").write_text("CORE = 1\n", encoding="utf-8")
+
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "core.cpython.pyc").write_bytes(b"pyc")
+    assert set(workspace_module._tree_hashes(tmp_path)) == {"muika/core.py"}
+    assert set(workspace_module._tree_hashes(tmp_path, skip=workspace_module._RUN_ARTIFACT_PATTERNS)) == {
+        ".venv/lib.py",
+        "data/muika.db",
+        "muika/core.py",
+    }
