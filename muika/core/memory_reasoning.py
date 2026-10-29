@@ -137,7 +137,7 @@ class MemoryReasoner:
         capacity = (
             int(input_budget(model.config) * 0.6) - request_tokens(request) - 128 - estimate_tokens(intention_block)
         )
-        through = next((d.covered_through for d in diaries if d.source == f"dream:{day}"), 0)
+        through = await memory.dream_coverage(day)
         coverage = f"Previous coverage: experience IDs <= {through}. Tension changes must cite newer experiences."
         fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
         if estimate_tokens(fixed) > capacity // 3:

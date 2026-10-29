@@ -7,6 +7,7 @@ import pytest
 from muika.core.memory import MemoryManager
 from muika.core.memory_models import DreamResult, IntentionUpdate, StateUpdate
 from muika.core.memory_reasoning import MemoryReasoner
+from muika.database.orm_models import DiaryORM
 from muika.llm import ModelCompletions, ModelConfig
 from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
 
@@ -59,3 +60,30 @@ async def test_open_intentions_keep_their_text_and_source_yields_budget(fake_llm
     model.config = ModelConfig(provider="_echo", context_window=16384, max_tokens=2048)
     with pytest.warns(ContextOverflowWarning):
         assert await MemoryReasoner(model).dream(day, memory)
+
+
+async def test_dream_continues_from_best_synced_coverage(fake_llm_factory, redirect_get_session):
+    memory = MemoryManager()
+    day = date(2026, 9, 1)
+    first = await memory.add_context("user", "Morning", timestamp=datetime(2026, 9, 1, 9))
+    night = await memory.add_context("user", "Night", timestamp=datetime(2026, 9, 1, 21))
+    await memory.add_context("user", "Late", timestamp=datetime(2026, 9, 1, 23))
+    await memory.save_dream(day, DreamResult(diary="local copy"), first, {f"experience:{first}"})
+    redirect_get_session.add(
+        DiaryORM(
+            source=f"pc-node:dream:{day.isoformat()}",
+            day=day.isoformat(),
+            created_at=datetime.now().isoformat(),
+            covered_through=night,
+            content="synced copy",
+        )
+    )
+    await redirect_get_session.commit()
+
+    def respond(request):
+        return ModelCompletions(text=DreamResult(diary="continued").model_dump_json())
+
+    model = fake_llm_factory(side_effect=respond)
+    model.config = ModelConfig(provider="_echo", context_window=16384, max_tokens=2048)
+    assert await MemoryReasoner(model).dream(day, memory)
+    assert f"Previous coverage: experience IDs <= {night}." in model.requests[-1].prompt

@@ -8,7 +8,7 @@ import re
 import warnings
 from bisect import bisect_left
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -166,6 +166,16 @@ def _reflection_material_filter(kinds: tuple[str, ...] = REFLECTION_KINDS) -> Co
         ExperienceORM.kind.in_(kinds),
         or_(ExperienceORM.kind != "note", ExperienceORM.source.is_(None), ~ExperienceORM.source.like("ipc:%")),
     )
+
+
+def _best_diary_per_day(rows: Iterable[DiaryORM]) -> dict[str, DiaryORM]:
+    """同一天的多份 dream 副本只保留覆盖最完整的一份，并列时取较新的主键。"""
+    best: dict[str, DiaryORM] = {}
+    for row in rows:
+        current = best.get(row.day)
+        if current is None or (row.covered_through, row.id) > (current.covered_through, current.id):
+            best[row.day] = row
+    return best
 
 
 class MemoryManager:
@@ -656,6 +666,25 @@ class MemoryManager:
                 ids = {row.id for row in rows}
             self.facts = {key: fact for key, fact in self.facts.items() if key not in ids}
 
+    async def _dream_coverage_rows(self, db: AsyncSession, *, day: str | None = None) -> dict[str, int]:
+        """按日汇总所有 Core 的 dream 日记覆盖进度。
+
+        同一天可能并存本节点日记与 ``{origin}:dream:`` 前缀的同步日记；覆盖判定取各份
+        日记的最大 ``covered_through``，先跨边界的节点做完即可止住另一节点。
+        """
+        statement = select(DiaryORM.day, DiaryORM.covered_through).where(DiaryORM.source.contains("dream:"))
+        if day is not None:
+            statement = statement.where(DiaryORM.day == day)
+        coverage: dict[str, int] = {}
+        for day_key, covered in (await db.execute(statement)).all():
+            coverage[day_key] = max(coverage.get(day_key, 0), covered)
+        return coverage
+
+    async def dream_coverage(self, day: date) -> int:
+        """该自然日在所有 Core dream 日记中的最大覆盖进度。"""
+        async with get_session() as db:
+            return (await self._dream_coverage_rows(db, day=day.isoformat())).get(day.isoformat(), 0)
+
     async def pending_days(self, now: datetime, *, include_today: bool = False) -> list[date]:
         cutoff = now.date() if include_today or now.hour >= 5 else now.date() - timedelta(days=1)
         async with get_session() as db:
@@ -668,12 +697,7 @@ class MemoryManager:
                     .group_by(func.substr(ExperienceORM.occurred_at, 1, 10))
                 )
             ).all()
-            # 同一天可能并存本节点日记与 {origin}:dream: 前缀的同步日记，
-            # 覆盖判定取各份日记的最大 covered_through，先跨边界的节点做完即可止住另一节点。
-            diaries: dict[str, int] = {}
-            for row in await db.scalars(select(DiaryORM).where(DiaryORM.source.contains("dream:"))):
-                covered = diaries.get(row.day)
-                diaries[row.day] = row.covered_through if covered is None else max(covered, row.covered_through)
+            diaries = await self._dream_coverage_rows(db)
         return sorted(
             date.fromisoformat(day)
             for day, latest in days
@@ -695,14 +719,22 @@ class MemoryManager:
             return [experience_from_row(row) for row in rows]
 
     async def recent_diaries(self, before: date, limit: int = 5) -> list[Diary]:
+        """按日期读取最近日记；同一天的多份 dream 副本只返回覆盖最完整的一份。"""
         async with get_session() as db:
+            days = (
+                await db.scalars(
+                    select(DiaryORM.day)
+                    .where(DiaryORM.day <= before.isoformat())
+                    .group_by(DiaryORM.day)
+                    .order_by(DiaryORM.day.desc())
+                    .limit(limit)
+                )
+            ).all()
             rows = await db.scalars(
-                select(DiaryORM)
-                .where(DiaryORM.day <= before.isoformat())
-                .order_by(DiaryORM.day.desc(), DiaryORM.id.desc())
-                .limit(limit)
+                select(DiaryORM).where(DiaryORM.day.in_(days)).order_by(DiaryORM.day.desc(), DiaryORM.id.desc())
             )
-            return [diary_from_row(row) for row in rows]
+            best = _best_diary_per_day(rows)
+            return [diary_from_row(best[key]) for key in days if key in best]
 
     async def save_dream(self, day: date, result: DreamResult, through: int, allowed_refs: set[str]) -> bool:
         """在同一事务提交日记、事实强化、状态和素材进度。"""
@@ -734,10 +766,11 @@ class MemoryManager:
             snapshot = self.snapshot.model_copy(deep=True)
             now, day_end = datetime.now(), datetime.combine(day, time.max)
             async with get_session() as db:
-                diary = await db.scalar(select(DiaryORM).where(DiaryORM.source == f"dream:{day}"))
-                if diary is not None and diary.covered_through >= through:
+                coverage = (await self._dream_coverage_rows(db, day=day.isoformat())).get(day.isoformat(), 0)
+                if coverage >= through:
                     return False
-                previous_through = diary.covered_through if diary is not None else 0
+                previous_through = coverage
+                diary = await db.scalar(select(DiaryORM).where(DiaryORM.source == f"dream:{day}"))
                 if diary is None:
                     diary = DiaryORM(source=f"dream:{day}", day=day.isoformat(), created_at=now.isoformat())
                     db.add(diary)
@@ -893,7 +926,9 @@ class MemoryManager:
                     statement = statement.where(date_column < (query.end + timedelta(days=1)).isoformat())
                 if model is FactORM:
                     statement = statement.where(FactORM.active.is_(True))
-                rows = await db.scalars(statement.order_by(date_column.desc()).limit(limit))
+                rows = list(await db.scalars(statement.order_by(date_column.desc()).limit(limit)))
+                if model is DiaryORM:
+                    rows = list(_best_diary_per_day(rows).values())
                 for row in rows:
                     if isinstance(row, ExperienceORM):
                         hit = RecallHit(

@@ -129,6 +129,58 @@ async def test_pending_days_respect_synced_diaries_and_best_coverage(database):
     assert await memory.pending_days(datetime(2026, 9, 2, 5)) == [day]
 
 
+async def _synced_dream_diaries(database, day, *, local_through, synced_through):
+    """构造本地 dream 日记与另一节点的同步 dream 日记，返回同步副本。"""
+    created = datetime.now().isoformat()
+    local = DiaryORM(
+        source=f"dream:{day.isoformat()}",
+        day=day.isoformat(),
+        created_at=created,
+        covered_through=local_through,
+        content="local copy",
+    )
+    synced = DiaryORM(
+        source=f"server-node:dream:{day.isoformat()}",
+        day=day.isoformat(),
+        created_at=created,
+        covered_through=synced_through,
+        content="synced copy",
+    )
+    database.add_all([local, synced])
+    await database.commit()
+    return synced
+
+
+async def test_dream_coverage_and_reading_prefer_best_synced_copy(database):
+    memory = MemoryManager()
+    day = date(2026, 9, 1)
+    first = await memory.add_context("user", "Morning", timestamp=datetime(2026, 9, 1, 9))
+    night = await memory.add_context("user", "Night", timestamp=datetime(2026, 9, 1, 21))
+    synced = await _synced_dream_diaries(database, day, local_through=first, synced_through=night)
+
+    assert await memory.dream_coverage(day) == night
+    diaries = await memory.recent_diaries(day)
+    assert [(diary.source, diary.content) for diary in diaries] == [
+        (f"server-node:dream:{day.isoformat()}", "synced copy")
+    ]
+    matches = await memory.search(MemoryQuery(terms=["copy"]))
+    assert [hit.ref for hit in matches] == [f"diary:{synced.id}"]
+
+
+async def test_save_dream_continues_from_best_synced_coverage(database):
+    memory = MemoryManager()
+    day = date(2026, 9, 1)
+    first = await memory.add_context("user", "Morning", timestamp=datetime(2026, 9, 1, 9))
+    night = await memory.add_context("user", "Night", timestamp=datetime(2026, 9, 1, 21))
+    await _synced_dream_diaries(database, day, local_through=first, synced_through=night)
+
+    assert not await memory.save_dream(day, DreamResult(diary="repeat"), night, {f"experience:{night}"})
+    latest = await memory.add_context("user", "Late", timestamp=datetime(2026, 9, 1, 23))
+    assert await memory.save_dream(day, DreamResult(diary="continued"), latest, {f"experience:{latest}"})
+    assert await memory.dream_coverage(day) == latest
+    assert (await memory.recent_diaries(day))[0].content == "continued"
+
+
 async def test_background_fact_input_does_not_gain_weight():
     memory = MemoryManager()
     fact, _, _ = await _first_fact(memory)

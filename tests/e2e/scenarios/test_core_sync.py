@@ -38,7 +38,7 @@ async def test_finished_initiative_records_cooldown_but_idle_ticks_do_not_sync(c
         observe_commits(None)
 
 
-async def test_partition_keeps_both_diaries_and_foreground_fact(memory_process):
+async def test_partition_keeps_latest_diary_and_foreground_fact(memory_process, tmp_path):
     pc, server = await memory_process("pc"), await memory_process("server")
     initial = await pc.command(action="material", kind="user", text="周末一起安排。")
     await server.command(action="apply", entries=initial["entries"])
@@ -47,11 +47,34 @@ async def test_partition_keeps_both_diaries_and_foreground_fact(memory_process):
     await server.command(action="material", kind="user", text="还是看电影。")
     branch = await server.command(action="dream", plan="电影", diary="服务器上商量了电影。")
     merged = await pc.command(action="apply", entries=branch["entries"], preserve_state=True)
-    assert {item["content"] for item in merged["diaries"]} == {"PC 上商量了散步。", "服务器上商量了电影。"}
+    assert [item["content"] for item in merged["diaries"]] == ["服务器上商量了电影。"]
     assert [item["value"] for item in merged["facts"]] == ["散步"]
     remote = await server.command(action="apply", entries=foreground["entries"])
     assert [item["value"] for item in remote["facts"]] == ["散步"]
-    assert {item["content"] for item in remote["diaries"]} == {"PC 上商量了散步。", "服务器上商量了电影。"}
+    assert [item["content"] for item in remote["diaries"]] == ["PC 上商量了散步。"]
+    # 两份 dream 副本仍保留在各自本地数据库中，读取接口只返回覆盖最完整的一份。
+    with sqlite3.connect(tmp_path / "pc" / "muika.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM diary").fetchone()[0] == 2
+    with sqlite3.connect(tmp_path / "server" / "muika.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM diary").fetchone()[0] == 2
+
+
+async def test_incremental_dream_reads_latest_copy_across_nodes(memory_process):
+    pc, server = await memory_process("pc"), await memory_process("server")
+    initial = await pc.command(action="material", kind="user", text="共同的基线。")
+    await server.command(action="apply", entries=initial["entries"])
+    await pc.command(action="material", kind="user", text="PC 上的散步。")
+    foreground = await pc.command(action="dream", plan="散步", diary="PC 第一次做梦。")
+    await server.command(action="material", kind="user", text="服务器上的电影。")
+    branch = await server.command(action="dream", plan="电影", diary="服务器第一次做梦。")
+    await pc.command(action="apply", entries=branch["entries"], preserve_state=True)
+    await server.command(action="apply", entries=foreground["entries"])
+
+    await pc.command(action="material", kind="user", text="PC 的新念头。")
+    second = await pc.command(action="dream", plan="散步", diary="PC 第二次做梦。")
+    assert [item["content"] for item in second["diaries"]] == ["PC 第二次做梦。"]
+    mirrored = await server.command(action="apply", entries=second["entries"])
+    assert [item["content"] for item in mirrored["diaries"]] == ["PC 第二次做梦。"]
 
 
 async def test_foreground_summary_does_not_hide_other_branch(memory_process):
