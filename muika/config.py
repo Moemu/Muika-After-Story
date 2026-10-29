@@ -180,6 +180,11 @@ class MASConfig(BaseSettings):
         return self.data_dir.resolve() / "tmp"
 
     @property
+    def workspaces_dir(self) -> Path:
+        """返回自修改版本工作区根目录。"""
+        return self.data_dir.resolve() / "workspaces"
+
+    @property
     def can_write(self) -> bool:
         """返回是否允许在授权目录写入。"""
         return self.action_permission != "read_only"

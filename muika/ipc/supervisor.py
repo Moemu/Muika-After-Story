@@ -1,25 +1,31 @@
-"""用独立父进程监督 Core 重启，启动失败时恢复本次变更。"""
+"""用独立父进程监督 Core 重启，启动失败时恢复本次变更。
+
+父进程永远运行默认树代码（锚 = 本模块位置）：读 boot 指针决定子进程跑哪棵树，
+ready 校验 nonce 与运行树，就绪后把工作区改动提升（promotion）回默认树；
+指针态失败回退默认树，提升后的默认树失败自动回滚一次（有界）。
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+import uuid
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+from typing import Literal, TypedDict, cast
 
 import psutil
 
 from muika.utils.logger import logger
-
-if TYPE_CHECKING:
-    from muika.core.self_mod.proposals import CoreProposal
 
 RESTART_EXIT_CODE = 75
 STARTUP_TIMEOUT = 180
@@ -28,18 +34,27 @@ SHUTDOWN_TIMEOUT = 180
 
 class RestartRecordBase(TypedDict):
     id: str
-    patch_id: str | None
+    workspace_id: str | None
     reason: str
     trigger: str
-    proposal_file: str | None
     record_path: str
-    status: Literal["preparing", "restarting", "started", "restoring", "restored", "failed"]
+    status: Literal[
+        "preparing",
+        "restarting",
+        "started",
+        "restoring",
+        "restored",
+        "failed",
+        "rolled_back",
+        "auto_rolled_back",
+    ]
 
 
 class RestartRecord(RestartRecordBase, total=False):
     """保存重启意图、来源和真实启动结果。"""
 
     error: str
+    confirm_memory_loss: bool
 
 
 def write_json(path: Path, value: object) -> None:
@@ -48,6 +63,139 @@ def write_json(path: Path, value: object) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+BOOT_TARGET_FILE = "boot_target.json"
+ROLLBACK_READY_FILE = "rollback_ready.json"
+ROLLBACK_TRIGGER = "rollback"
+
+PROMOTABLE_FILES = ("bot.py", "core_main.py")
+PROMOTABLE_PREFIXES = ("muika/", "muika_bot/", "tests/", "configs/", "templates/")
+REJECTED_PREFIXES = ("data/", ".git/", "plugins/")
+UNSUPPORTED_FILES = ("pyproject.toml", "uv.lock", "alembic.ini")
+"""工作区变更的白名单分类：promotable / escalated（见 ESCALATE_*）/ rejected / unsupported。"""
+
+ESCALATE_FILES = (
+    "configs/models.yml",
+    "muika/core/code_review.py",
+    "muika/core/self_mod/policy.py",
+    "muika/core/self_mod/manager.py",
+    "muika/core/self_mod/workspace.py",
+    "muika/core/self_mod/plugin_deployer.py",
+    "muika/core/self_mod/core_probe.py",
+    "muika/core/actions/tools/_executor.py",
+    "muika/core/actions/tools/_filesystem.py",
+    "muika/core/actions/tools/_workspace.py",
+    "muika/builtin_plugins/review.py",
+    "muika/builtin_plugins/restart.py",
+    "muika/builtin_plugins/patch.py",
+    "muika/ipc/supervisor.py",
+    "muika/ipc/bootstrap.py",
+    "muika/core/restart.py",
+    "muika/plugin/func_call/context.py",
+    "muika/config.py",
+    "muika/core/loop.py",
+    "muika/database/db.py",
+    "core_main.py",
+)
+ESCALATE_PREFIXES = ("muika/migrations/", "tests/")
+"""升级清单：命中的工作区改动必须由玩家亲自批准（require_player 挂起）。"""
+
+ChangeClass = Literal["promotable", "escalated", "rejected", "unsupported"]
+
+
+def classify_change(rel_path: str) -> ChangeClass:
+    """裁决工作区变更类别：白名单外的路径一律拒绝提升。"""
+    normalized = PurePosixPath(rel_path.replace("\\", "/")).as_posix().strip("/")
+    if normalized in {"", "."} or ".." in normalized.split("/") or normalized.startswith("/"):
+        return "rejected"
+    if normalized in UNSUPPORTED_FILES:
+        return "unsupported"
+    if normalized == ".env" or normalized.startswith(".env."):
+        return "rejected"
+    if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in REJECTED_PREFIXES):
+        return "rejected"
+    promotable = normalized in PROMOTABLE_FILES or any(normalized.startswith(prefix) for prefix in PROMOTABLE_PREFIXES)
+    if not promotable:
+        return "rejected"
+    if normalized in ESCALATE_FILES or any(normalized.startswith(prefix) for prefix in ESCALATE_PREFIXES):
+        return "escalated"
+    return "promotable"
+
+
+def control_data_dir() -> Path:
+    """返回 supervisor 与 Core 共用的受管 data 目录（与注入子进程的 DATA_DIR 同源）。"""
+    return Path(os.environ.get("DATA_DIR", "data")).resolve()
+
+
+def boot_target_path() -> Path:
+    """返回 boot 指针文件路径。"""
+    return control_data_dir() / BOOT_TARGET_FILE
+
+
+def read_boot_target() -> Path | None:
+    """返回 boot 指针文件路径；无指针返回 None。"""
+    path = boot_target_path()
+    return path if path.is_file() else None
+
+
+def write_boot_target(workspace_id: str, manifest_hash: str, review_id: str, backup_path: str) -> None:
+    """写入 boot 指针（提交点）：下一次重启将运行该工作区树。"""
+    write_json(
+        boot_target_path(),
+        {
+            "workspace_id": workspace_id,
+            "manifest_hash": manifest_hash,
+            "review_id": review_id,
+            "backup_path": backup_path,
+        },
+    )
+
+
+def clear_boot_target() -> None:
+    """清除 boot 指针；下次重启回到默认树。"""
+    boot_target_path().unlink(missing_ok=True)
+
+
+def read_rollback_ready() -> dict | None:
+    """读取最近一次提升的回滚记录；不存在返回 None。"""
+    path = control_data_dir() / ROLLBACK_READY_FILE
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else None
+
+
+def read_schema_head(db_path: Path) -> str | None:
+    """读取 SQLite 数据库记录的 alembic 版本；无库或无版本表返回 None。"""
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def _warn_schema_drift(record: dict) -> None:
+    """恢复提交时备份前，记录数据库 schema 是否已离开备份版本。"""
+    expected = str(record.get("schema_head") or "")
+    if not expected:
+        return
+    current = read_schema_head(control_data_dir() / "muika.db")
+    if current and current != expected:
+        logger.critical(
+            f"[Supervisor] Database schema moved {expected}->{current}; " "restoring the submit-time backup."
+        )
+
+
+def write_rollback_ready(record: dict) -> None:
+    """写入（覆盖）回滚记录。"""
+    write_json(control_data_dir() / ROLLBACK_READY_FILE, record)
+
+
+def clear_rollback_ready() -> None:
+    """删除回滚记录（单级语义：随下次 promotion 顶替或回滚消费）。"""
+    (control_data_dir() / ROLLBACK_READY_FILE).unlink(missing_ok=True)
 
 
 def lifecycle_directory() -> Path | None:
@@ -99,43 +247,342 @@ def watch_process(pid: int) -> None:
     threading.Thread(target=watch, name="core-parent-watch", daemon=True).start()
 
 
-def restore_proposal(proposal_file: Path) -> None:
-    """在新 Core 无法导入时依据原有快照恢复文件，不导入候选代码。"""
-    proposal = cast("CoreProposal", json.loads(proposal_file.read_text(encoding="utf-8")))
-    if proposal["status"] != "approved":
-        raise ValueError("Only an applied proposal can be restored after startup failure.")
-    root = Path(proposal["source_root"]).resolve()
-    snapshot_root = proposal_file.parent.resolve()
-    changes: list[tuple[Path, bytes | None]] = []
-    for change in proposal["changes"]:
-        target = (root / change["path"]).resolve()
-        if not target.is_relative_to(root) or target.suffix != ".py":
-            raise ValueError("Invalid rollback target.")
-        actual = hashlib.sha256(target.read_text(encoding="utf-8").encode()).hexdigest() if target.is_file() else None
-        if actual != change["sha256_after"]:
-            raise ValueError(f"Rollback target changed: {target}")
-        content = None
-        if change["before_snapshot"] is not None:
-            snapshot = (snapshot_root / change["before_snapshot"]).resolve()
-            if not snapshot.is_relative_to(snapshot_root):
-                raise ValueError("Invalid rollback snapshot.")
-            content = snapshot.read_bytes()
-            if hashlib.sha256(snapshot.read_text(encoding="utf-8").encode()).hexdigest() != change["sha256_before"]:
-                raise ValueError("Rollback snapshot hash mismatch.")
-        changes.append((target, content))
-    proposal["status"] = "rolling_back"
-    write_json(proposal_file, proposal)
-    for target, content in reversed(changes):
-        if content is None:
+def _default_root() -> Path:
+    """返回 supervisor 自身运行的默认树根（权威基线锚点）。"""
+    return Path(__file__).resolve().parents[2]
+
+
+def _workspace_root(ws_id: str) -> Path:
+    """返回受管工作区目录（受管数据卷内的 workspaces/<id>）。"""
+    return control_data_dir() / "workspaces" / ws_id
+
+
+def load_workspace_manifest(ws_id: str) -> dict | None:
+    """读取工作区清单；不可读返回 None（调用方保守处理）。"""
+    path = _workspace_root(ws_id) / "manifest.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _build_child_env(default_root: Path) -> dict[str, str]:
+    """从干净基准构造子进程 env：default 根 .env + 当前环境 + 绝对 DATA_DIR。
+
+    现有环境变量优先于 .env（与 pydantic-settings 语义一致）；workspace 树内
+    没有 .env 与 data，受管数据始终落在真实 data 目录。
+    """
+    env = dict(os.environ)
+    env_file = default_root / ".env"
+    if env_file.is_file():
+        try:
+            from dotenv import dotenv_values
+
+            for key, value in dotenv_values(env_file).items():
+                if value is not None and key not in os.environ:
+                    env[key] = value
+        except ImportError:
+            pass
+    env["DATA_DIR"] = str(control_data_dir())
+    env["MUIKA_BOOT_NONCE"] = uuid.uuid4().hex
+    return env
+
+
+def _ready_matches(ready_file: Path, expected_root: Path | None, nonce: str) -> bool:
+    """校验 ready 标记：nonce 必须匹配；指针 boot 还须声明正确的运行树。"""
+    try:
+        payload = json.loads(ready_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("nonce") != nonce:
+        return False
+    if expected_root is not None:
+        try:
+            declared = Path(str(payload.get("running_root", ""))).resolve()
+        except OSError:
+            return False
+        if declared != expected_root.resolve():
+            return False
+    return True
+
+
+def _sha256_file(path: Path) -> str | None:
+    """返回文件 SHA-256；缺失返回 None。"""
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    """临时文件 + 原子替换写入。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes(content)
+    temporary.replace(path)
+
+
+def verify_review(review_id: str, ws_id: str, changes: list[dict]) -> None:
+    """父进程权威复核：该 diff 确有一次 approved 的 workspace 审查。
+
+    :raises ValueError: 审查记录缺失、未批准或与清单不符
+    """
+    path = control_data_dir() / "reviews" / f"{review_id}.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Workspace review record is missing or unreadable: {review_id}") from exc
+    if not isinstance(value, dict) or value.get("status") != "approved":
+        raise ValueError(f"Workspace review {review_id} is not approved (status={value.get('status')}).")
+    payload = value.get("payload", {})
+    if not isinstance(payload, dict) or payload.get("workspace_id") != ws_id:
+        raise ValueError("The approved review does not match this workspace.")
+
+    def _identity(change: dict) -> tuple:
+        return (
+            str(change.get("path")),
+            str(change.get("action")),
+            str(change.get("sha_before")),
+            str(change.get("sha_after")),
+        )
+
+    reviewed = {_identity(c) for c in payload.get("changes", [])}
+    expected = {_identity(c) for c in changes}
+    if reviewed != expected:
+        raise ValueError("The approved review no longer matches the submitted diff.")
+
+
+def promote_workspace(ws_id: str, default_root: Path) -> dict:
+    """就绪后提升：复核 review → rollback_ready(pending) → 逐文件三态写 → 清指针 → 标 ready。
+
+    任一步失败即用 before/ 快照回填已写文件（统一失败路径），再抛出由调用方回退。
+    :raises ValueError: 复核失败、快照哈希不符或与外部修改冲突
+    """
+    manifest = load_workspace_manifest(ws_id)
+    if manifest is None:
+        raise ValueError(f"Workspace manifest is missing: {ws_id}")
+    changes = list(manifest.get("touched", []))
+    verify_review(str(manifest.get("review_id", "")), ws_id, changes)
+
+    workspace_root = _workspace_root(ws_id)
+    tree = workspace_root / "tree"
+    record: dict = {
+        "workspace_id": ws_id,
+        "reason": str(manifest.get("reason", "")),
+        "touched": changes,
+        "schema_changed": bool(manifest.get("schema_changed")),
+        "schema_head": str(manifest.get("schema_head", "")),
+        "backup_path": str(manifest.get("backup_path", "")),
+        "review_id": str(manifest.get("review_id", "")),
+        "before_dir": str(workspace_root / "before"),
+        "status": "pending",
+    }
+    write_rollback_ready(record)
+    try:
+        for change in sorted(changes, key=lambda item: str(item.get("path", ""))):
+            rel = PurePosixPath(str(change.get("path", ""))).as_posix()
+            if classify_change(rel) in {"rejected", "unsupported"}:
+                raise ValueError(f"Path is not promotable: {rel}")
+            after_hash = change.get("sha_after")
+            after = _sha256_file(tree / rel)
+            if after != after_hash:
+                raise ValueError(f"Workspace snapshot drifted before promotion: {rel}")
+            if change.get("sha_before") is not None:
+                before_snapshot = workspace_root / "before" / rel
+                if _sha256_file(before_snapshot) != change.get("sha_before"):
+                    raise ValueError(f"Before snapshot hash mismatch: {rel}")
+            target = default_root / rel
+            current = _sha256_file(target)
+            if after_hash is None:
+                if current == change.get("sha_before"):
+                    target.unlink(missing_ok=True)
+                elif current is not None:
+                    raise ValueError(f"Promotion conflict on delete target: {rel}")
+            elif current == change.get("sha_before"):
+                _atomic_write_bytes(target, (tree / rel).read_bytes())
+            elif current == after_hash:
+                continue  # 重入幂等：已写过的文件跳过
+            else:
+                raise ValueError(f"Promotion conflict, default tree drifted: {rel}")
+    except Exception:
+        pending = read_rollback_ready() or record
+        archive_dir = control_data_dir() / "backups" / f"promotion-failed-{datetime.now():%Y%m%d-%H%M%S-%f}"
+        # 子进程仍在运行并持有数据库；此处只回填代码文件，DB 恢复由
+        # supervise 的指针态失败分支在子进程停止后归档并执行。
+        restore_workspace(pending, default_root, archive_after_dir=archive_dir, include_db=False)
+        raise
+
+    clear_boot_target()
+    record["status"] = "ready"
+    record["promoted_at"] = datetime.now().isoformat()
+    write_rollback_ready(record)
+    logger.info(f"[Supervisor] Promoted 1 workspace {ws_id} with {len(changes)} change(s) into the default tree.")
+    return record
+
+
+def _contained_rel_path(raw: str, default_root: Path) -> PurePosixPath:
+    """校验清单中的相对路径落在默认树内，拒绝绝对路径与目录跳出。"""
+    rel = PurePosixPath(str(raw).replace("\\", "/")).as_posix().strip("/")
+    parts = PurePosixPath(rel).parts
+    if not rel or any(part in ("", ".", "..") for part in parts) or Path(rel).is_absolute():
+        raise ValueError(f"Invalid rollback path: {raw!r}")
+    target = (default_root / rel).resolve()
+    if not target.is_relative_to(default_root.resolve()):
+        raise ValueError(f"Rollback path escapes the default tree: {raw!r}")
+    return PurePosixPath(rel)
+
+
+def restore_workspace(
+    record: dict, default_root: Path, *, archive_after_dir: Path | None = None, include_db: bool = True
+) -> list[str]:
+    """把 default 树还原到 before 状态；可选归档将被丢弃的 after 内容。
+
+    :param include_db: schema_changed 时是否恢复数据库备份；调用方须保证
+        此时已无存活子进程持有该库
+    :raises ValueError: 回滚资料缺失或哈希不符（还原中止，已还原文件保持 before 态）
+    """
+    restored: list[str] = []
+    before_dir = Path(str(record.get("before_dir", "")))
+    for change in reversed(list(record.get("touched", []))):
+        rel = _contained_rel_path(str(change.get("path", "")), default_root).as_posix()
+        target = default_root / rel
+        if archive_after_dir is not None and target.is_file():
+            archived = archive_after_dir / rel
+            archived.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, archived)
+        if change.get("sha_before") is None:
             target.unlink(missing_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_suffix(".restore.tmp")
-            temporary.write_bytes(content)
-            temporary.replace(target)
-    proposal["status"] = "rolled_back"
-    proposal["recovery_note"] = "New Core failed to start; supervisor restored the previous version."
-    write_json(proposal_file, proposal)
+            restored.append(rel)
+            continue
+        before_snapshot = before_dir / rel
+        content = before_snapshot.read_bytes() if before_snapshot.is_file() else None
+        if content is None or hashlib.sha256(content).hexdigest() != change.get("sha_before"):
+            raise ValueError(f"Rollback material missing or drifted: {rel}")
+        _atomic_write_bytes(target, content)
+        restored.append(rel)
+    if include_db and record.get("schema_changed") and record.get("backup_path"):
+        _warn_schema_drift(record)
+        backup = Path(str(record["backup_path"])).resolve()
+        if not backup.is_relative_to(control_data_dir().resolve()):
+            raise ValueError(f"Rollback backup is outside the managed data directory: {backup}")
+        _restore_database(backup)
+    return restored
+
+
+def _restore_database(backup: Path) -> None:
+    """把备份复制回 muika.db 并清掉 WAL 残留（子进程已停止时调用）。"""
+    db = control_data_dir() / "muika.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(backup, db)
+    for suffix in ("-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+
+
+def _archive_database(label: str) -> str:
+    """在线归档当前数据库，返回归档路径说明；无库返回空串。"""
+    db = control_data_dir() / "muika.db"
+    if not db.is_file():
+        return ""
+    archive = control_data_dir() / "backups" / f"{label}-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db) as source, sqlite3.connect(archive) as destination:
+        source.backup(destination)
+    return str(archive)
+
+
+def _fail_restart(restart: RestartRecord, message: str, *, critical: bool = False) -> None:
+    """记录一次失败的重启/回滚；调用方负责随后返回。"""
+    restart["status"] = "failed"
+    restart["error"] = message
+    write_json(Path(str(restart["record_path"])), restart)
+    if critical:
+        logger.critical(f"[Supervisor] {message}")
+
+
+def _execute_rollback(restart: RestartRecord, default_root: Path) -> None:
+    """父进程执行玩家回滚：清指针 → 归档 DB → flag 复核 → before/ 还原 → 条件恢复。"""
+    clear_boot_target()
+    ready = read_rollback_ready()
+    if ready is None:
+        _fail_restart(restart, "No rollback record survived; nothing to roll back.")
+        return
+    if ready.get("schema_changed") and not restart.get("confirm_memory_loss"):
+        _fail_restart(
+            restart,
+            "This rollback discards memories made after the update; repeat with --confirm-memory-loss to proceed.",
+        )
+        return
+    if not _default_matches_promoted(ready, default_root):
+        _fail_restart(
+            restart,
+            "Rollback refused: the default tree no longer matches the promoted version "
+            "(external changes). Manual recovery required.",
+            critical=True,
+        )
+        return
+    archive_note = _archive_database("rollback-discard")
+    try:
+        restored = restore_workspace(ready, default_root)
+    except Exception as exc:  # noqa: BLE001 - 记录后由默认树重启兜底
+        _fail_restart(restart, f"Rollback failed: {exc}", critical=True)
+        return
+    clear_rollback_ready()
+    restart["status"] = "rolled_back"
+    restart["error"] = f"Rolled back {len(restored)} file(s)." + (
+        f" Database archived at {archive_note}." if archive_note else ""
+    )
+    write_json(Path(str(restart["record_path"])), restart)
+    logger.info(f"[Supervisor] Rolled back workspace {ready.get('workspace_id')}: {len(restored)} file(s).")
+
+
+def _default_matches_promoted(record: dict, default_root: Path) -> bool:
+    """判断 default 树是否仍与提升后的版本一致（回滚守卫）。"""
+    for change in record.get("touched", []):
+        rel = PurePosixPath(str(change.get("path", ""))).as_posix()
+        if _sha256_file(default_root / rel) != change.get("sha_after"):
+            return False
+    return True
+
+
+def _try_auto_rollback(default_root: Path) -> bool:
+    """非指针态 default 未 ready 且仍是刚提升状态时自动回滚一次（有界）。
+
+    :return: 是否执行了自动回滚（调用方据此重生一次；consumed 后不再触发）
+    """
+    ready = read_rollback_ready()
+    if not ready or ready.get("status") not in {"pending", "ready"}:
+        return False
+    if not _default_matches_promoted(ready, default_root):
+        logger.critical(
+            "[Supervisor] Default tree drifted from the promoted version; automatic rollback refused. "
+            "Manual recovery required."
+        )
+        return False
+    archive_dir = control_data_dir() / "backups" / f"auto-rollback-{datetime.now():%Y%m%d-%H%M%S-%f}"
+    archive_note = _archive_database("auto-rollback-discard")
+    try:
+        restore_workspace(ready, default_root, archive_after_dir=archive_dir)
+    except Exception as exc:  # noqa: BLE001 - 拒绝自动回滚，交给人工
+        logger.critical(f"[Supervisor] Automatic rollback failed: {exc}; manual recovery required.")
+        return False
+    ready["status"] = "consumed"
+    ready["consumed_at"] = datetime.now().isoformat()
+    ready["note"] = "Auto-rolled back after the promoted default failed to start; the discarded version was archived."
+    write_rollback_ready(ready)
+    record: RestartRecord = {
+        "id": uuid.uuid4().hex,
+        "workspace_id": str(ready.get("workspace_id", "")),
+        "reason": "promoted version failed to start",
+        "trigger": "auto_rollback",
+        "record_path": str(control_data_dir() / "restart.json"),
+        "status": "auto_rolled_back",
+    }
+    write_json(Path(record["record_path"]), record)
+    logger.critical(
+        "[Supervisor] Promoted default failed to start; auto-rolled back 1 version. "
+        f"Discarded code archived at {archive_dir}; database archived at {archive_note or '(none)'}."
+    )
+    return True
 
 
 def supervise(argv: list[str]) -> int:
@@ -149,7 +596,6 @@ def supervise(argv: list[str]) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="muika-lifecycle-") as temporary:
             directory = Path(temporary)
-            env = dict(os.environ, MUIKA_LIFECYCLE_DIR=str(directory), MUIKA_SUPERVISOR_PID=str(os.getpid()))
             creationflags = 0
             if sys.platform == "win32" and not any(
                 stream is not None and stream.isatty() for stream in (sys.stdout, sys.stderr)
@@ -162,19 +608,94 @@ def supervise(argv: list[str]) -> int:
                     return 0
                 ready = directory / "ready.json"
                 ready.unlink(missing_ok=True)
+
+                # 逐轮从干净基准重建 env：上一轮指针态的 PYTHONPATH 不带入默认启动
+                env = _build_child_env(_default_root())
+                env["MUIKA_LIFECYCLE_DIR"] = str(directory)
+                env["MUIKA_SUPERVISOR_PID"] = str(os.getpid())
+                nonce = env["MUIKA_BOOT_NONCE"]
+                boot: dict | None = None
+                child_cwd: str | None = None
+                expected_root: Path | None = None
+                pointer = read_boot_target()
+                if pointer is not None:
+                    try:
+                        candidate = json.loads(pointer.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        candidate = None
+                    manifest = (
+                        load_workspace_manifest(str(candidate.get("workspace_id", "")))
+                        if isinstance(candidate, dict)
+                        else None
+                    )
+                    digest = (
+                        hashlib.sha256(
+                            json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                        ).hexdigest()
+                        if manifest is not None
+                        else None
+                    )
+                    if (
+                        manifest is None
+                        or manifest.get("ws_id") != candidate.get("workspace_id")
+                        or digest != candidate.get("manifest_hash")
+                    ):
+                        logger.critical(
+                            "[Supervisor] Boot pointer does not match its workspace manifest; "
+                            "falling back to the default tree."
+                        )
+                        candidate = None
+                    tree = (
+                        _workspace_root(str(candidate.get("workspace_id", ""))) / "tree"
+                        if isinstance(candidate, dict)
+                        else None
+                    )
+                    if tree is None or not tree.is_dir():
+                        logger.critical("[Supervisor] Invalid boot pointer; falling back to the default tree.")
+                        clear_boot_target()
+                    else:
+                        boot = candidate
+                        child_cwd = str(tree)
+                        expected_root = tree
+                        env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(tree), os.environ.get("PYTHONPATH"))))
+                if boot is not None and restart is None:
+                    # 冷启动遇指针：构造隐式记录，失败回退与结果标记有账可查
+                    restart = {
+                        "id": uuid.uuid4().hex,
+                        "workspace_id": str(boot.get("workspace_id", "")),
+                        "reason": "boot pointer active",
+                        "trigger": "boot",
+                        "record_path": str(control_data_dir() / "restart.json"),
+                        "status": "preparing",
+                    }
+                    write_json(Path(restart["record_path"]), restart)
+
                 child = subprocess.Popen(
                     [sys.executable, "-m", "muika.ipc.bootstrap", *argv],
                     env=env,
+                    cwd=child_cwd,
                     stdout=sys.stdout,
                     stderr=sys.stderr,
                     creationflags=creationflags,
                 )
                 started = time.monotonic()
                 healthy = False
+                pointer_boot = boot is not None
                 try:
                     while child.poll() is None and not stop_signals:
-                        if not healthy and ready.is_file():
+                        if not healthy and ready.is_file() and _ready_matches(ready, expected_root, nonce):
                             healthy = True
+                            if boot is not None:
+                                try:
+                                    promote_workspace(str(boot["workspace_id"]), _default_root())
+                                    boot = None
+                                except Exception as exc:  # noqa: BLE001 - 统一失败路径回退
+                                    healthy = False
+                                    logger.critical(
+                                        f"[Supervisor] Promotion failed: {exc}; restoring the default tree."
+                                    )
+                                    stop_tree(child.pid)
+                                    break
                             if restart is not None:
                                 restart["status"] = "restored" if restored else "started"
                                 write_json(Path(restart["record_path"]), restart)
@@ -216,20 +737,47 @@ def supervise(argv: list[str]) -> int:
                     restart = cast(RestartRecord, json.loads(request_file.read_text(encoding="utf-8")))
                     request_file.unlink()
                     restored = False
+                    if restart.get("trigger") == ROLLBACK_TRIGGER:
+                        _execute_rollback(restart, _default_root())
+                        restart = None
                     continue
-                if restart is not None and not healthy:
-                    restart["error"] = f"Core did not become ready; exit code {code}. See the Core startup log."
-                    if not restored and restart["proposal_file"] is not None:
-                        try:
-                            restore_proposal(Path(restart["proposal_file"]))
-                            restored = True
+                if not healthy:
+                    if pointer_boot:
+                        # 指针态失败：清指针 + 条件恢复 DB + 默认树重生一次
+                        logger.critical(
+                            "[Supervisor] Workspace version failed to become ready; restoring the default tree."
+                        )
+                        manifest = load_workspace_manifest(str((boot or {}).get("workspace_id", "")))
+                        clear_boot_target()
+                        if manifest and manifest.get("schema_changed") and manifest.get("backup_path"):
+                            try:
+                                archive_note = _archive_database("boot-failure-discard")
+                                backup = Path(str(manifest["backup_path"])).resolve()
+                                if not backup.is_relative_to(control_data_dir().resolve()):
+                                    raise OSError(f"Backup outside managed data directory: {backup}")
+                                _warn_schema_drift(manifest)
+                                _restore_database(backup)
+                                logger.info(
+                                    "[Supervisor] Database restored after failed boot; "
+                                    f"pre-restore state archived at {archive_note}."
+                                )
+                            except (OSError, sqlite3.Error) as exc:
+                                logger.critical(f"[Supervisor] Database restore after failed boot: {exc}")
+                        if restart is not None:
                             restart["status"] = "restoring"
+                            restart["error"] = (
+                                "The workspace version did not become ready; the default tree was restored."
+                            )
                             write_json(Path(restart["record_path"]), restart)
-                            continue
-                        except (OSError, ValueError, KeyError) as exc:
-                            restart["error"] = str(exc)
-                    restart["status"] = "failed"
-                    write_json(Path(restart["record_path"]), restart)
+                            restored = True
+                        continue
+                    if restart is not None:
+                        restart["error"] = f"Core did not become ready; exit code {code}. See the Core startup log."
+                        restart["status"] = "failed"
+                        write_json(Path(restart["record_path"]), restart)
+                        restart = None
+                    if _try_auto_rollback(_default_root()):
+                        continue
                 return code if code != 0 or healthy else 1
     finally:
         for sig, handler in previous_handlers.items():

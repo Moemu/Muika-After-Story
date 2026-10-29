@@ -12,8 +12,8 @@ The override takes priority when both exist. Delete the override to fall back to
 ## Workflow
 
 1. Use `self_read("muika/builtin_templates/Muika.md.jinja2")` to read the current built-in template.
-2. Use `self_write("templates/Muika.md.jinja2", <exact copy>, <reason>)` to create the override. Always start from an exact copy — never write the template from memory.
-3. Use `self_edit`, review the preview, and use `self_edit_confirm` to make targeted changes.
+2. Use `write_file("templates/Muika.md.jinja2", <exact copy>, reason=<why>)` to create the override. Always start from an exact copy — never write the template from memory.
+3. Use `edit_file("templates/...", ..., reason=<why>)` for targeted changes; every write is validated and journaled.
 4. The change takes effect on the next conversation turn — no restart needed.
 
 ## Template structure

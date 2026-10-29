@@ -93,12 +93,7 @@ async def _run_migrations(db_path: Path) -> None:
                 )
                 head = ScriptDirectory.from_config(alembic_cfg).get_current_head()
                 if tables and (current is None or current[0] != head):
-                    backup_dir = db_path.parent / "backups"
-                    backup_dir.mkdir(parents=True, exist_ok=True)
-                    backup = backup_dir / f"{db_path.stem}-before-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
-                    with sqlite3.connect(backup) as destination:
-                        source.backup(destination)
-                    logger.info(f"Backup saved before update: {backup}")
+                    backup_database(db_path, label="before")
         # 自动标记旧数据库
         _ensure_alembic_version_table(db_path, alembic_cfg)
         alembic_command.upgrade(alembic_cfg, "head")
@@ -107,6 +102,21 @@ async def _run_migrations(db_path: Path) -> None:
 
     # 迁移完成后清理 alembic 模块，释放内存
     _cleanup_alembic_modules()
+
+
+def backup_database(db_path: Path, *, label: str = "manual") -> Path:
+    """在线备份 SQLite 数据库到同目录 ``backups/`` 下，返回备份文件路径。
+
+    :param db_path: 源数据库文件
+    :param label: 备份用途标签，用于生成文件名
+    """
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{db_path.stem}-{label}-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
+    with sqlite3.connect(db_path) as source, sqlite3.connect(backup) as destination:
+        source.backup(destination)
+    logger.info(f"Database backup saved: {backup}")
+    return backup
 
 
 def _ensure_alembic_version_table(db_path: Path, alembic_cfg: AlembicConfig) -> None:

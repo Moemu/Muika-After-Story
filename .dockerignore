@@ -1,0 +1,21 @@
+# 构建 context 瘦身：运行镜像只消费 pyproject/uv.lock/README/alembic.ini、muika/、muika_bot/、bot.py 与 deploy/
+.git
+.venv
+.venv-review
+data
+docs
+tests
+configs
+templates
+plugins
+logs
+dist
+node_modules
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.env
+.env.*
+PROPOSAL-*.md
+*.log

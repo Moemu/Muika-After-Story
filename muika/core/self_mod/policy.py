@@ -46,7 +46,7 @@ def _project_root() -> Path:
     return Path.cwd()
 
 
-def _runtime_source_root() -> Path:
+def runtime_source_root() -> Path:
     """返回当前运行的 MAS 源码根目录。"""
     return Path(__file__).resolve().parents[3]
 
@@ -68,7 +68,6 @@ def is_protected_path(resolved: Path) -> bool:
         data / name
         for name in (
             "reviews",
-            "core_proposals",
             "restart.json",
             "agent_tasks",
             "agent_processes",
@@ -79,9 +78,14 @@ def is_protected_path(resolved: Path) -> bool:
         )
     ]
     controls.append(Path(mas_config.self_mod_backup_dir).resolve())
+    # 工作区控制件：指针与回滚记录属于 supervisor 受管状态；workspaces 里的
+    # tree/ 由会话写根豁免（_filesystem 有序路由第①层），manifest 与 before/ 不可直写。
+    controls.append(Path(mas_config.data_dir / "boot_target.json").resolve())
+    controls.append(Path(mas_config.data_dir / "rollback_ready.json").resolve())
+    controls.append(mas_config.workspaces_dir.resolve())
     if any(resolved == path or path in resolved.parents or resolved in path.parents for path in controls):
         return True
-    for root in {_project_root(), _runtime_source_root()}:
+    for root in {_project_root(), runtime_source_root()}:
         for prefix in PROTECTED_PREFIXES:
             p = Path(prefix)
             protected = (p if p.is_absolute() else root / p).resolve()

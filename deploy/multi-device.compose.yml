@@ -18,7 +18,9 @@ services:
 
   core:
     image: mas-runtime-local
-    command: ["python", "-m", "muika.ipc.bootstrap"]
+    # 源码形态：父进程入口保持轻量（core_main.py），运行树来自宿主 checkout
+    command: ["python", "core_main.py"]
+    working_dir: /app-src
     stop_grace_period: 190s
     env_file: ../.env
     environment:
@@ -26,11 +28,13 @@ services:
       CORE_NODE_NAME: server
       CORE_PRIORITY: 0
       LOCAL_FALLBACK: "false"
+      # 受管数据固定落在卷上：数据库、工作区树、boot 指针与回滚记录都在这里
+      DATA_DIR: /app/data
+      PYTHONPATH: /app-src
     volumes:
+      # 整棵源码树可写：promotion 会写回这里（持久），git pull 也更新这里
+      - ${MAS_SOURCE_DIR:-..}:/app-src
       - core-data:/app/data
-      - ../configs:/app/configs:ro
-      - ../templates:/app/templates:ro
-      - ../plugins:/app/plugins:ro
     restart: unless-stopped
     depends_on:
       - gateway

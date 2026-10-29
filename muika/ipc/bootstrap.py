@@ -39,12 +39,6 @@ from muika.core.self_change import (
     run_boot_self_change_check,
     setup_self_change,
 )
-from muika.core.self_mod.proposals import (
-    core_maintenance_message,
-    get_core_proposal_manager,
-    is_core_maintenance_active,
-    is_maintenance_command_allowed,
-)
 from muika.database.crud import local_time
 from muika.database.db import close_db, get_session, init_db
 from muika.database.orm_models import ExperienceORM
@@ -198,20 +192,35 @@ class CoreBootstrap:
         directory = lifecycle_directory()
         restart_record: Optional[RestartRecord] = None
         if directory is not None:
-            write_json(directory / "ready.json", {"pid": os.getpid()})
+            import muika
+
+            write_json(
+                directory / "ready.json",
+                {
+                    "pid": os.getpid(),
+                    "running_root": str(Path(muika.__file__).resolve().parents[1]),
+                    "nonce": os.environ.get("MUIKA_BOOT_NONCE", ""),
+                },
+            )
             record_path = mas_config.data_dir.resolve() / "restart.json"
             if record_path.is_file():
                 try:
                     for _ in range(30):
                         record = json.loads(record_path.read_text(encoding="utf-8"))
-                        if record.get("status") in {"started", "restored", "failed"}:
+                        if record.get("status") in {
+                            "started",
+                            "restored",
+                            "failed",
+                            "rolled_back",
+                            "auto_rolled_back",
+                        }:
                             restart_record = record
                             await self._muika.memory.add_material(
                                 "agent",
                                 f"Core restart outcome: {record['status']}. "
                                 f"Purpose: {record.get('reason', '')}. "
                                 "Startup readiness is not full feature verification.",
-                                source=f"restart:{record.get('id') or record['patch_id']}:{record['status']}",
+                                source=f"restart:{record.get('id') or record.get('workspace_id')}:{record['status']}",
                             )
                             break
                         await asyncio.sleep(0.1)
@@ -229,35 +238,28 @@ class CoreBootstrap:
         else:
             self._muika.start()
 
-    async def request_restart(self, patch_id: str | None, trigger: str) -> None:
-        """暂停行动，按需应用指定提案，再请求父进程重启。"""
+    async def request_restart(self, workspace_id: str | None, trigger: str, confirm_memory_loss: bool = False) -> None:
+        """暂停行动并请求父进程重启；指针生效与回滚由父进程执行。"""
         if self._restart_task is not None and not self._restart_task.done():
             raise ValueError("A restart is already pending.")
         directory = lifecycle_directory()
         if directory is None:
             raise ValueError("A supervisor is required to restart Core.")
-        manager = get_core_proposal_manager()
-        proposal = manager.check_ready(patch_id) if patch_id is not None else None
         record_path = mas_config.data_dir.resolve() / "restart.json"
         record: RestartRecord = {
             "id": uuid.uuid4().hex,
-            "patch_id": patch_id,
-            "reason": proposal["reason"] if proposal is not None else trigger,
+            "workspace_id": workspace_id,
+            "reason": trigger,
             "trigger": trigger,
-            "proposal_file": str(manager.proposals_root / patch_id / "proposal.json") if patch_id is not None else None,
             "record_path": str(record_path),
-            "status": "preparing",
+            "status": "restarting",
         }
+        if confirm_memory_loss:
+            record["confirm_memory_loss"] = True
 
         async def restart() -> None:
             try:
                 await self._muika.agent_tasks.handoff()
-                if patch_id is not None:
-                    manager.check_ready(patch_id)
-                write_json(record_path, record)
-                if patch_id is not None:
-                    await manager.apply(patch_id)
-                record["status"] = "restarting"
                 write_json(record_path, record)
                 write_json(directory / "restart.json", record)
                 self.restart_requested = True
@@ -375,26 +377,6 @@ class CoreBootstrap:
         if source and not isinstance(event, IpcUserMessageEvent):
             await self._muika.memory.add_material("note", f"Adapter event: {event.type}", source=source)
 
-        if is_core_maintenance_active():
-            if isinstance(event, IpcCommandEvent) and is_maintenance_command_allowed(event.raw):
-                pass
-            elif isinstance(event, IpcUserMessageEvent):
-                self._ws_server.set_triggering_adapter(client_name)
-                await self._ws_server.send_to_bot(SendMessage(content=core_maintenance_message()), target=client_name)
-                return ActionResponse(action=event.type, status="maintenance")
-            elif isinstance(event, IpcCommandEvent):
-                self._ws_server.set_triggering_adapter(client_name)
-                await self._ws_server.send_to_bot(
-                    CommandResult(content="[System] Core 正在等待重启。当前命令在维护模式中不可用。"),
-                    target=client_name,
-                )
-                return ActionResponse(action=event.type, status="maintenance")
-            else:
-                if isinstance(event, IpcSessionBootstrapEvent):
-                    self._ws_server.mark_bootstrapped(client_name)
-                    self.is_bootstraped = True
-                return ActionResponse(action=event.type, status="maintenance")
-
         if isinstance(event, IpcUserMessageEvent):
             self._ws_server.set_triggering_adapter(client_name)
             resources = []
@@ -483,9 +465,6 @@ async def run_core(
     try:
         logger.debug("Loading Database...")
         await init_db()
-        recovered = get_core_proposal_manager().recover_incomplete()
-        if recovered:
-            logger.warning(f"[CoreProposal] Recovered incomplete proposals: {', '.join(recovered)}")
         logger.info(f"[Permissions] {mas_config.action_permission}; code review: {mas_config.code_review_mode}.")
 
         if MCP_CONFIG_PATH.exists():

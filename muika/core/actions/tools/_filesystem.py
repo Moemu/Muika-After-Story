@@ -10,7 +10,11 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from muika.config import mas_config
-from muika.core.self_mod.policy import is_protected_path, is_self_path
+from muika.core.self_mod.policy import (
+    is_protected_path,
+    is_self_path,
+    runtime_source_root,
+)
 from muika.llm._schema import MediaReference, ToolResult
 from muika.llm.utils.tools import ToolError
 from muika.plugin.func_call import on_function_call
@@ -22,22 +26,79 @@ class _FSError(Exception):
     """Raised when a file system operation is rejected by policy or path validation."""
 
 
+def _workspace_sessions() -> list[Path]:
+    """当前 open 工作区的树根（会话写根）；延迟导入避免 core 内环。"""
+    from muika.core.self_mod.workspace import get_self_workspace_manager
+
+    return get_self_workspace_manager().active_write_roots()
+
+
+def _runtime_read_root() -> Path | None:
+    """自修改开启时的运行树只读根。"""
+    if not mas_config.can_self_modify:
+        return None
+    return runtime_source_root()
+
+
+_RUNTIME_READ_EXCLUDED_DIRS = {
+    ".git",
+    "logs",
+    "__pycache__",
+    ".venv",
+    ".venv-review",
+    "dist",
+    ".mypy_cache",
+    ".pytest_cache",
+}
+
+
+def _runtime_read_allowed(resolved: Path, root: Path) -> bool:
+    """运行树读取判定：受管数据与凭据除外。"""
+    relative = resolved.relative_to(root)
+    if relative.parts and relative.parts[0] == "data":
+        return False
+    if resolved.name.startswith(".env"):
+        return False
+    if relative.as_posix() in {"configs/models.yml", "configs/mcp.json"}:
+        return False
+    return not any(part in _RUNTIME_READ_EXCLUDED_DIRS for part in relative.parts)
+
+
 def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
     """
-    Resolve a raw path string and validate it against the whitelist.
+    Resolve a raw path string and validate it against the active scopes.
 
-    Raises _FSError with a human-readable message when the path should be rejected.
-    Returns the resolved Path on success.
+    有序路由：① open 工作区树（她可自由编辑的副本，相对路径锚定于此）；
+    ② 运行树只读（自修改开启时，排除受管数据与凭据）；③ 自路径写
+    （persona/plugins 交由对应管线处理）；④ 常规授权根（原逻辑）。
     """
+    sessions = _workspace_sessions()
+    candidate = Path(raw_path)
+    try:
+        if not candidate.is_absolute() and sessions:
+            resolved = (sessions[0] / candidate).resolve()
+        else:
+            resolved = candidate.resolve()
+    except Exception as e:
+        raise _FSError(f"Invalid path {raw_path!r}: {e}") from e
+
+    if any(resolved == root or root in resolved.parents for root in sessions):
+        return resolved
+
+    if not require_write:
+        root = _runtime_read_root()
+        if root is not None and (resolved == root or root in resolved.parents):
+            if _runtime_read_allowed(resolved, root):
+                return resolved
+            raise _FSError(f"Access denied: {resolved} is protected runtime data.")
+
+    if require_write and is_self_path(resolved):
+        return resolved  # 写工具按 _route_self_write 分发到校验/部署管线
+
     allowed = [Path(p).resolve() for p in mas_config.fs_allowed_paths]
 
     if not allowed:
         raise _FSError("File system tools are disabled by configuration.")
-
-    try:
-        resolved = Path(raw_path).resolve()
-    except Exception as e:
-        raise _FSError(f"Invalid path {raw_path!r}: {e}") from e
 
     if not any(resolved == root or root in resolved.parents for root in allowed):
         raise _FSError(
@@ -47,13 +108,33 @@ def _resolve_and_check(raw_path: str, require_write: bool = False) -> Path:
     if require_write and is_protected_path(resolved):
         raise _FSError(f"Access denied: {resolved} is protected core code or runtime control data.")
 
-    if require_write and is_self_path(resolved):
-        raise _FSError("Use self_write/self_edit or the topic tools to change Muika's content and plugins.")
-
     if require_write and not mas_config.can_write:
         raise _FSError("File write/delete is disabled by configuration.")
 
     return resolved
+
+
+def _route_self_write(resolved: Path, reason: Optional[str]) -> Optional[str]:
+    """识别自路径写并返回管线名（persona/plugin）；工作区树与非自路径返回 None。
+
+    :raises _FSError: 自修改关闭、缺少 reason，或路径只属于结构化工具（topics）
+    """
+    from muika.core.self_mod.policy import infer_layer
+
+    if any(resolved == root or root in resolved.parents for root in _workspace_sessions()):
+        return None
+    if not is_self_path(resolved):
+        return None
+    if not mas_config.can_self_modify:
+        raise _FSError("Self-modification is disabled by configuration.")
+    if not reason or not reason.strip():
+        raise _FSError("A non-empty 'reason' is required: every change to yourself must be explained and journaled.")
+    layer = infer_layer(resolved)
+    if layer in {"template", "skill"}:
+        return "persona"
+    if layer == "plugin":
+        return "plugin"
+    raise _FSError("Use the topic tools (topic_list/topic_add/topic_update/topic_delete) to change topic seeds.")
 
 
 class ListDirectoryParams(BaseModel):
@@ -67,9 +148,6 @@ class ListDirectoryParams(BaseModel):
     read_only=True,
 )
 async def list_directory(path: str, show_hidden: bool = False):
-    if not mas_config.fs_allowed_paths:
-        return ToolError("File system tools are disabled by configuration.")
-
     try:
         resolved = _resolve_and_check(path)
     except _FSError as e:
@@ -193,11 +271,18 @@ async def read_file(
 
 
 class WriteFileParams(BaseModel):
-    path: str = Field(..., description="Absolute or relative path of the file to write.")
+    path: str = Field(..., description="Absolute or relative file path of the file to write.")
     content: str = Field(..., description="Text content to write.")
     write_mode: Literal["overwrite", "append"] = Field(
         "overwrite",
         description="'overwrite' replaces the file; 'append' adds to the end.",
+    )
+    reason: Optional[str] = Field(
+        None,
+        description=(
+            "Required when writing Muika's own persona/skill/plugin files; "
+            "it is recorded in her self-modification journal."
+        ),
     )
 
 
@@ -206,17 +291,30 @@ class WriteFileParams(BaseModel):
     "Requires file-write permission enabled by the user.",
     params=WriteFileParams,
 )
-async def write_file(path: str, content: str, write_mode: str = "overwrite"):
-    if not mas_config.fs_allowed_paths:
-        return ToolError("File system tools are disabled by configuration.")
-    if not mas_config.can_write:
-        return ToolError("File write/delete is disabled by configuration.")
-
+async def write_file(path: str, content: str, write_mode: str = "overwrite", reason: Optional[str] = None):
     try:
         resolved = _resolve_and_check(path, require_write=True)
         _check_read_version(resolved)
     except _FSError as e:
         return ToolError(str(e))
+
+    try:
+        route = _route_self_write(resolved, reason)
+    except _FSError as e:
+        return ToolError(str(e))
+    if route in {"persona", "plugin"}:
+        if write_mode != "overwrite":
+            return ToolError("Writes to Muika's own files only support overwrite mode.")
+        if route == "persona":
+            from muika.core.self_mod.manager import get_self_mod_manager
+
+            report = await get_self_mod_manager().apply(path, content, (reason or "").strip())
+        else:
+            from muika.core.self_mod.plugin_deployer import get_plugin_deployer
+
+            report = await get_plugin_deployer().deploy_new(path, content, (reason or "").strip())
+        _remember_file(resolved)
+        return report
 
     open_mode = "a" if write_mode == "append" else "w"
     try:
@@ -264,6 +362,13 @@ class EditFileParams(BaseModel):
         None,
         description="Required for 'delete_lines'. Last line to delete (1-based, inclusive).",
     )
+    reason: Optional[str] = Field(
+        None,
+        description=(
+            "Required when editing Muika's own persona/skill/plugin files; "
+            "it is recorded in her self-modification journal."
+        ),
+    )
 
 
 @on_function_call(
@@ -279,12 +384,8 @@ async def edit_file(
     line_number: Optional[int] = None,
     line_start: Optional[int] = None,
     line_end: Optional[int] = None,
+    reason: Optional[str] = None,
 ):
-    if not mas_config.fs_allowed_paths:
-        return ToolError("File system tools are disabled by configuration.")
-    if not mas_config.can_write:
-        return ToolError("File write/delete is disabled by configuration.")
-
     try:
         resolved = _resolve_and_check(path, require_write=True)
         _check_read_version(resolved)
@@ -305,6 +406,23 @@ async def edit_file(
         result = _apply_edit(original, operation, old_string, new_string, line_number, line_start, line_end)
     except ValueError as e:
         return ToolError(str(e))
+
+    try:
+        route = _route_self_write(resolved, reason)
+    except _FSError as e:
+        return ToolError(str(e))
+    if route in {"persona", "plugin"}:
+        if route == "persona":
+            from muika.core.self_mod.manager import get_self_mod_manager
+
+            report = await get_self_mod_manager().apply(path, result, (reason or "").strip())
+        else:
+            from muika.core.self_mod.plugin_deployer import get_plugin_deployer
+
+            source_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
+            report = await get_plugin_deployer().deploy_if_unchanged(path, result, (reason or "").strip(), source_hash)
+        _remember_file(resolved)
+        return report
 
     try:
         resolved.write_text(result, encoding="utf-8")
@@ -377,16 +495,22 @@ class DeleteFileParams(BaseModel):
     params=DeleteFileParams,
 )
 async def delete_file(path: str):
-    if not mas_config.fs_allowed_paths:
-        return ToolError("File system tools are disabled by configuration.")
-    if not mas_config.can_write:
-        return ToolError("File write/delete is disabled by configuration.")
-
     try:
         resolved = _resolve_and_check(path, require_write=True)
         _check_read_version(resolved)
     except _FSError as e:
         return ToolError(str(e))
+
+    if is_self_path(resolved) and not any(
+        resolved == root or root in resolved.parents for root in _workspace_sessions()
+    ):
+        return ToolError(
+            "Files that are part of Muika cannot be deleted directly; "
+            "use self_revert to restore a previous version, or discard the workspace copy."
+        )
+
+    if not mas_config.can_write:
+        return ToolError("File write/delete is disabled by configuration.")
 
     if not resolved.exists():
         return ToolError(f"File not found: {resolved}")

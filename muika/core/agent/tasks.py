@@ -642,9 +642,8 @@ class AgentTasks:
             review = get_code_reviewer().load(result.review_id)
             if review.human and review.status in {"approved", "denied"}:
                 instruction = (
-                    f"Continue prepare_core_change(patch_id={review.payload['patch_id']!r}); "
-                    "do not create a new proposal."
-                    if review.kind == "core"
+                    f"Continue self_workspace_submit; the workspace review {review.id} is approved."
+                    if review.kind == "workspace"
                     else ""
                 )
                 await self.record_review_decision(task.id, review.id, instruction)

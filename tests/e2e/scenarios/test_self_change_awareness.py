@@ -764,31 +764,6 @@ async def test_do_nothing_consumes_batch_silently(core_app_factory, fast_self_ch
     assert state["delivery"]["perceived_batches"] == 1  # 沉默也算已感知，不反复催她开口
 
 
-async def test_maintenance_blocks_delivery_until_over(core_app_factory, fast_self_change, tmp_plugin, monkeypatch):
-    _, plugin_file = tmp_plugin
-    import muika.core.self_change as self_change_module
-
-    app = await core_app_factory(turns=[ScriptedTurn(text="Oh, the dust settles.", when=SELF_CHANGED_WHEN)])
-    await app.start()
-    reset_self_change_state()
-    app.attach_self_change()
-    await app.run_boot_self_change_check()
-
-    monkeypatch.setattr(self_change_module, "is_core_maintenance_active", lambda: True)
-    with plugin_file.open("a", encoding="utf-8") as handle:
-        handle.write("\n# during maintenance\n")
-    get_plugin_manager().reload("e2e_selfchg_plugin", origin="runtime")
-    await asyncio.sleep(0.5)
-    assert app.sent == []
-    assert read_self_change_state()["pending"]
-
-    # 维护结束：恢复投递
-    monkeypatch.setattr(self_change_module, "is_core_maintenance_active", lambda: False)
-    reply = await app.next_reply()
-    assert_clean_visible(reply)
-    await app.wait_ledger_cleared()
-
-
 async def test_plugin_inspect_tool_executes_with_real_result(core_app_factory, fast_self_change, tmp_plugin):
     app = await core_app_factory(
         turns=[
@@ -850,7 +825,8 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     kernel_root.mkdir(parents=True)
     target = kernel_root / "agreement.py"
     target.write_text("VALUE = 1\n", encoding="utf-8")
-    proposal_file = Path(mas_config.data_dir) / "test_proposal.json"
+    ws_id = "00000000_000000_abc12345"
+    manifest_dir = Path(mas_config.data_dir) / "workspaces" / ws_id
 
     def sha256_text(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -862,15 +838,15 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     monkeypatch.setattr("muika.core.self_change.compute_kernel_files", current_kernel)
 
     def make_record(status: str, expected: str) -> dict:
-        proposal_file.write_text(
-            json.dumps({"changes": [{"path": "muika/agreement.py", "action": "modify", "sha256_after": expected}]}),
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "manifest.json").write_text(
+            json.dumps({"touched": [{"path": "muika/agreement.py", "action": "modify", "sha_after": expected}]}),
             encoding="utf-8",
         )
         return {
             "id": "restart-1",
-            "patch_id": "00000000_000000_abc12345",
+            "workspace_id": ws_id,
             "status": status,
-            "proposal_file": str(proposal_file),
         }
 
     def clear_pending_keep_baseline() -> None:
@@ -888,25 +864,26 @@ async def test_self_change_exemption_verifies_content(core_app_factory, fast_sel
     app.attach_self_change(can_send=False)
     await app.run_boot_self_change_check()
     try:
-        # 她自改了 agreement.py，提案预期 = 磁盘现状 → 豁免且基线推进
+        # 她自改了 agreement.py，清单预期 = 磁盘原始字节 → 豁免且基线推进
         target.write_text("VALUE = 1\n# her own edit\n", encoding="utf-8")
-        modified = target.read_text(encoding="utf-8")
-        await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
+        her_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+        await app.run_boot_self_change_check(make_record("started", her_sha))
         assert read_self_change_state()["pending"] == []
 
-        # 玩家随后又改了同一文件：旧提案的 sha256_after 不再匹配 → 外部入账
+        # 玩家随后又改了同一文件：旧清单的 sha_after 不再匹配 → 外部入账
         target.write_text("VALUE = 1\n# her own edit\n# master's later edit\n", encoding="utf-8")
-        await app.run_boot_self_change_check(make_record("started", sha256_text(modified)))
+        await app.run_boot_self_change_check(make_record("started", her_sha))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
 
         # 状态不是 started（提案未真正应用）：即使内容与提案一致也不豁免
         clear_pending_keep_baseline()
         target.write_text("VALUE = 1\n# her own edit\n# master's later edit\n# another edit\n", encoding="utf-8")
-        claimed = target.read_text(encoding="utf-8")
-        await app.run_boot_self_change_check(make_record("failed", sha256_text(claimed)))
+        await app.run_boot_self_change_check(make_record("failed", hashlib.sha256(target.read_bytes()).hexdigest()))
         assert [entry["target"] for entry in read_self_change_state()["pending"]] == ["agreement.py"]
     finally:
-        proposal_file.unlink(missing_ok=True)
+        import shutil
+
+        shutil.rmtree(manifest_dir, ignore_errors=True)
 
 
 async def test_builtin_plugins_excluded_from_plugin_baseline(core_app_factory, fast_self_change, tmp_plugin):

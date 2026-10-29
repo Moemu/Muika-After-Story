@@ -54,39 +54,6 @@ async def command(port: int, raw: str) -> str:
     raise RuntimeError("Command returned no result.")
 
 
-def create_proposal(repo: Path, env: dict[str, str], fail_startup: bool) -> str:
-    """准备一次可控测试变更，交由真实命令进行审批和验证。"""
-    change = (
-        {
-            "action": "modify",
-            "path": "muika/core/state.py",
-            "replacements": [
-                {
-                    "old_text": "from __future__ import annotations",
-                    "new_text": "from __future__ import annotations\nraise RuntimeError('smoke startup failure')",
-                }
-            ],
-        }
-        if fail_startup
-        else {"action": "create", "path": "muika/core/restart_smoke_marker.py", "content": "READY = True\n"}
-    )
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import json,sys; from muika.core.self_mod.proposals import CoreProposalManager; "
-            "print(CoreProposalManager().create([json.load(sys.stdin)], 'Restart integration fixture.'))",
-        ],
-        cwd=repo,
-        env=env,
-        input=json.dumps(change),
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return result.stdout.strip().splitlines()[-1]
-
-
 async def plain_restart(
     repo: Path, port: int, supervisor: psutil.Process, *, broken: bool = False, autonomous: bool = False
 ) -> None:
@@ -105,7 +72,7 @@ async def plain_restart(
     else:
         raise TimeoutError("No plain restart outcome.")
     assert record["status"] == ("failed" if broken else "started"), record
-    assert record["patch_id"] is None and record["proposal_file"] is None
+    assert record["workspace_id"] is None
     assert record["trigger"].startswith("time_tick: ") if autonomous else record["trigger"] == ".restart"
     if broken:
         supervisor.wait(timeout=10)
@@ -248,51 +215,12 @@ async def restart_probe(muika: Muika):
                 )
                 supervisor = psutil.Process(json.loads(status.stdout)["core_pid"])
             await wait_health(port, supervisor)
-            pending_id = create_proposal(repo, env, False)
-            pending_path = repo / "data/core_proposals" / pending_id / "proposal.json"
-            pending = pending_path.read_bytes()
             manual_path = repo / "muika/core/manual_restart_marker.py"
             manual_path.write_text("PLAYER_EDIT = True\n", encoding="utf-8")
             await plain_restart(repo, port, supervisor)
             await plain_restart(repo, port, supervisor, autonomous=True)
-            assert pending_path.read_bytes() == pending
-            assert not (repo / "muika/core/restart_smoke_marker.py").exists()
             assert manual_path.read_text(encoding="utf-8") == "PLAYER_EDIT = True\n"
-            print("PASS: stale pending proposal was not applied or changed", flush=True)
-            for broken in (False, True):
-                children = supervisor.children(recursive=True)
-                assert children
-                worker_pid = max(children, key=lambda p: len(p.parents())).pid
-                patch_id = create_proposal(repo, env, broken)
-                approved = await command(port, f".patch approve {patch_id}")
-                proposal_path = repo / "data/core_proposals" / patch_id / "proposal.json"
-                assert json.loads(proposal_path.read_text(encoding="utf-8"))["status"] == "ready", approved
-                assert children[0].is_running()
-                await wait_health(port, supervisor)
-                await command(port, f".patch restart {patch_id}")
-                record_path = repo / "data/restart.json"
-                for _ in range(600):
-                    if record_path.is_file():
-                        record = json.loads(record_path.read_text(encoding="utf-8"))
-                        if record.get("patch_id") == patch_id and record.get("status") in {
-                            "started",
-                            "restored",
-                            "failed",
-                        }:
-                            break
-                    await asyncio.sleep(0.1)
-                else:
-                    raise TimeoutError("No terminal restart outcome.")
-                assert record["status"] == ("restored" if broken else "started"), record
-                await wait_health(port, supervisor)
-                assert max(supervisor.children(recursive=True), key=lambda p: len(p.parents())).pid != worker_pid
-                assert json.loads(proposal_path.read_text(encoding="utf-8"))["status"] == (
-                    "rolled_back" if broken else "approved"
-                )
-                print(
-                    f"PASS: {'startup failure restored old code' if broken else 'ready -> apply -> restart'}",
-                    flush=True,
-                )
+            print("PASS: manual edits outside any workspace survived plain restarts", flush=True)
             if plain_failure:
                 state_path = repo / "muika/core/state.py"
                 manual_edit = state_path.read_text(encoding="utf-8").replace(
@@ -302,7 +230,6 @@ async def restart_probe(muika: Muika):
                 state_path.write_text(manual_edit, encoding="utf-8")
                 await plain_restart(repo, port, supervisor, broken=True)
                 assert state_path.read_text(encoding="utf-8") == manual_edit
-                assert json.loads(proposal_path.read_text(encoding="utf-8"))["status"] == "rolled_back"
                 return
             children = supervisor.children(recursive=True)
             if launcher is not None:

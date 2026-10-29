@@ -1,5 +1,4 @@
 from . import (  # noqa: F401
-    _core_proposal,
     _device,
     _executor,
     _filesystem,
@@ -13,4 +12,5 @@ from . import (  # noqa: F401
     _skill,
     _system,
     _topics,
+    _workspace,
 )
