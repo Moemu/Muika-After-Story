@@ -11,9 +11,9 @@ from pydantic import BaseModel, Field
 
 from muika.config import mas_config
 from muika.core.self_mod.policy import (
-    _runtime_source_root,
     is_protected_path,
     is_self_path,
+    runtime_source_root,
 )
 from muika.llm._schema import MediaReference, ToolResult
 from muika.llm.utils.tools import ToolError
@@ -37,7 +37,7 @@ def _runtime_read_root() -> Path | None:
     """自修改开启时的运行树只读根。"""
     if not mas_config.can_self_modify:
         return None
-    return _runtime_source_root()
+    return runtime_source_root()
 
 
 _RUNTIME_READ_EXCLUDED_DIRS = {

@@ -51,10 +51,6 @@ def runtime_source_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-_runtime_source_root = runtime_source_root
-"""旧名兼容：既有调用方沿用。"""
-
-
 def is_protected_path(resolved: Path) -> bool:
     """判断解析后的路径是否命中受保护清单。
 

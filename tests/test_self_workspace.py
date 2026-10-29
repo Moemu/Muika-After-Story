@@ -330,9 +330,9 @@ async def test_workspace_session_grants_direct_writes(manager: SelfWorkspaceMana
 
 async def test_default_tree_write_stays_protected(monkeypatch, runtime: Path):
     from muika.core.actions.tools import _filesystem as fs
-    from muika.core.self_mod.policy import _runtime_source_root
+    from muika.core.self_mod.policy import runtime_source_root
 
-    repo = _runtime_source_root()
+    repo = runtime_source_root()
     monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [str(repo)])
 
@@ -342,11 +342,11 @@ async def test_default_tree_write_stays_protected(monkeypatch, runtime: Path):
 
 async def test_runtime_read_scope_excludes_sensitive_files(monkeypatch):
     from muika.core.actions.tools import _filesystem as fs
-    from muika.core.self_mod.policy import _runtime_source_root
+    from muika.core.self_mod.policy import runtime_source_root
 
     monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
-    repo = _runtime_source_root()
+    repo = runtime_source_root()
 
     code = await fs.read_file(str(repo / "muika" / "core" / "restart.py"), max_chars=200)
     assert "restart" in code.lower() or "File:" in code
@@ -357,11 +357,11 @@ async def test_runtime_read_scope_excludes_sensitive_files(monkeypatch):
 
 async def test_runtime_read_scope_excludes_models_config(monkeypatch):
     from muika.core.actions.tools import _filesystem as fs
-    from muika.core.self_mod.policy import _runtime_source_root
+    from muika.core.self_mod.policy import runtime_source_root
 
     monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
-    repo = _runtime_source_root()
+    repo = runtime_source_root()
 
     denied = await fs.read_file(str(repo / "configs" / "models.yml"), max_chars=50)
     assert "denied" in denied or "protected" in denied
@@ -424,12 +424,12 @@ async def test_baseline_cache_never_poisons_submit(monkeypatch, tmp_path):
 
 async def test_list_directory_covers_runtime_tree(monkeypatch):
     from muika.core.actions.tools import _filesystem as fs
-    from muika.core.self_mod.policy import _runtime_source_root
+    from muika.core.self_mod.policy import runtime_source_root
 
     monkeypatch.setattr(mas_config, "action_permission", "self_modify")
     monkeypatch.setattr(mas_config, "fs_allowed_paths", [])
 
-    result = await fs.list_directory(str(_runtime_source_root() / "muika"))
+    result = await fs.list_directory(str(runtime_source_root() / "muika"))
     assert "DIR" in result or "FILE" in result
 
 
