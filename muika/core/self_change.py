@@ -768,7 +768,7 @@ def _workspace_self_paths(restart_record: Optional[Mapping[str, Any]]) -> tuple[
     if record is not None and record.get("workspace_id") == ws_id:
         changes = list(record.get("touched", []))
     else:
-        manifest_path = Path(mas_config.data_dir).resolve() / "workspaces" / ws_id / "manifest.json"
+        manifest_path = mas_config.workspaces_dir / ws_id / "manifest.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

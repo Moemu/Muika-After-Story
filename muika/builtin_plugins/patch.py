@@ -35,8 +35,6 @@ patch_cmd = on_alconna(alc)
 @patch_cmd.assign("list")
 async def _list() -> str:
     """列出工作区版本、待重启指针与最近提升记录。"""
-    from muika.ipc import supervisor
-
     lines: list[str] = []
     if supervisor.read_boot_target() is not None:
         lines.append("[System] 有一个已通过终审的新版本正在等待重启。")
@@ -77,6 +75,11 @@ async def _rollback(muika: Muika, arparma: Arparma) -> str:
 @patch_cmd.assign("restart")
 async def _restart(muika: Muika) -> str:
     """重启并让等待中的新版本生效。"""
+    if muika.restart.handler is None:
+        return "[System] 当前宿主未提供重启管理，请通过启动入口手动重启 Core。"
+    try:
+        await muika.restart.request(None, ".patch restart")
+    except (OSError, ValueError) as exc:
+        return f"[System] 无法重启：{exc}"
     await muika.executor.send_message("好哦，我会保存进度再重新醒来，待会见。")
-    await muika.restart.request(None, ".patch restart")
     return "[System] 正在准备重启 Core。"

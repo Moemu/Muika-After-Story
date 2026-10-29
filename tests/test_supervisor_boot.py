@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -77,7 +80,6 @@ def _workspace(data_dir: Path, ws_id: str, *, touched: list[dict], review_status
     _write_json(
         root / "manifest.json",
         {
-            "schema_version": 1,
             "ws_id": ws_id,
             "reason": "test",
             "status": "submitted",
@@ -409,10 +411,50 @@ def test_classify_change_rejects_dotdot_paths():
     assert classify_change("muika/../data/x") == "rejected"
 
 
-def test_rollback_restart_trigger_matches_patch_command():
+def test_patch_rollback_requests_restart_with_shared_trigger(monkeypatch):
     from muika.builtin_plugins import patch as patch_plugin
+    from muika.core.restart import RestartController
 
-    assert patch_plugin.supervisor.ROLLBACK_TRIGGER is supervisor.ROLLBACK_TRIGGER
+    manager = SimpleNamespace(request_rollback=AsyncMock(return_value="20261025_000000_00000042"))
+    monkeypatch.setattr(patch_plugin, "get_self_workspace_manager", lambda: manager)
+    controller = RestartController()
+    controller.handler = AsyncMock()
+    muika = SimpleNamespace(restart=controller, executor=SimpleNamespace(send_message=AsyncMock()))
+    arparma = SimpleNamespace(query=lambda _path: None)
+
+    result = asyncio.run(patch_plugin._rollback(muika, arparma))
+
+    assert "[System]" in result
+    manager.request_rollback.assert_awaited_once_with(False)
+    controller.handler.assert_awaited_once_with("20261025_000000_00000042", supervisor.ROLLBACK_TRIGGER, False)
+
+
+def test_patch_restart_without_supervisor_returns_message_and_sends_nothing():
+    from muika.builtin_plugins import patch as patch_plugin
+    from muika.core.restart import RestartController
+
+    send = AsyncMock()
+    muika = SimpleNamespace(restart=RestartController(), executor=SimpleNamespace(send_message=send))
+
+    result = asyncio.run(patch_plugin._restart(muika))
+
+    assert "当前宿主未提供重启管理" in result
+    send.assert_not_awaited()
+
+
+def test_patch_restart_reports_error_without_false_promise():
+    from muika.builtin_plugins import patch as patch_plugin
+    from muika.core.restart import RestartController
+
+    controller = RestartController()
+    controller.handler = AsyncMock(side_effect=ValueError("A restart is already pending."))
+    send = AsyncMock()
+    muika = SimpleNamespace(restart=controller, executor=SimpleNamespace(send_message=send))
+
+    result = asyncio.run(patch_plugin._restart(muika))
+
+    assert "无法重启" in result and "already pending" in result
+    send.assert_not_awaited()
 
 
 def test_execute_rollback_refuses_drifted_default(data_dir: Path, tmp_path: Path):
