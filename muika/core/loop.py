@@ -377,7 +377,9 @@ class Muika:
         """
         heart_pattern = r"<heart\s*>(.*?)(?:</heart\s*>|$)"
         heart_cot = re.findall(heart_pattern, reply, re.DOTALL | re.IGNORECASE)
-        reply = re.sub(heart_pattern, "", reply, flags=re.DOTALL | re.IGNORECASE).strip()
+        reply = re.sub(heart_pattern, "", reply, flags=re.DOTALL | re.IGNORECASE)
+        # 无开标签的孤儿闭合同样剥离，防止控制标记泄漏进可见正文
+        reply = re.sub(r"</heart\s*>", "", reply, flags=re.IGNORECASE).strip()
 
         do_nothing = bool(re.search(r"<do_nothing\s*/?>", reply, re.IGNORECASE))
         reply = re.sub(r"<do_nothing\s*/?>", "", reply, flags=re.IGNORECASE).strip()
