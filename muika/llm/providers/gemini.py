@@ -40,9 +40,8 @@ from .. import (
     register,
 )
 from .._retry import RequestRetry
-from .._schema import ModelMessage
+from .._schema import ModelMessage, ToolCall
 from .._schema import Tool as DeclaredTool
-from .._schema import ToolCall
 from ..utils.protocol import json_arguments, stop_reason
 
 
