@@ -68,7 +68,7 @@ class SessionBootstrapEvent:
         """计算当前 Session 的缺席时间段"""
         if not self.last_chat_time:
             return "short"
-        absence_duration = datetime.now() - self.last_chat_time
+        absence_duration = self.timestamp - self.last_chat_time
         if absence_duration < timedelta(hours=3):
             return "short"
         elif absence_duration < timedelta(days=1):
