@@ -63,4 +63,9 @@ class Agent:
             f" Action permission={mas_config.action_permission}; code review={mas_config.code_review_mode}; "
             f"allowed file roots={mas_config.fs_allowed_paths}."
         )
-        return ModelRequest(prompt=f"Command: {command}", system=system, tools=get_tool_list(), purpose="agent_step")
+        return ModelRequest(
+            prompt=f"Command: {command}",
+            system=system,
+            tools=get_tool_list(mas_config.action_permission),
+            purpose="agent_step",
+        )

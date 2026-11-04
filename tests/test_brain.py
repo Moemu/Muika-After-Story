@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from mcp.types import Tool
 
+from muika.config import mas_config
 from muika.core.brain import MuikaBrain
 from muika.core.events import (
     SessionBootstrapEvent,
@@ -276,14 +277,17 @@ async def test_generate_reply_exception_fallback(fake_llm_factory):
 async def test_generate_reply_god_mode_passes_tools(fake_llm_factory, monkeypatch):
     fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
     brain = _brain(fake)
+    permissions: list[str | None] = []
 
-    def _tools():
+    def _tools(permission: str | None = None):
+        permissions.append(permission)
         return [FunctionTool(name="t")]
 
     monkeypatch.setattr("muika.core.brain.get_tool_list", _tools)
     with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM"):
         await brain.generate_reply(_user_event(), MuikaState(), _memory(), god_mode=True)
     assert [tool.name for tool in fake.requests[0].tools] == ["t"]
+    assert permissions == [mas_config.action_permission]
 
 
 async def test_generate_reply_no_god_mode_no_tools(fake_llm_factory):

@@ -132,6 +132,22 @@ class TaskContextPreparer:
         return request, compacted
 
 
+def _notification_body(task: TaskRecord) -> str:
+    """把任务终态转成给她看的一句事实；技术错误保留在 task.error 供排查。"""
+    if task.report:
+        return task.report.summary
+    if task.status == "cancelled":
+        return "You stopped this action."
+    if task.status in {"blocked", "failed"}:
+        reason = (task.error or task.report_error or "").lower()
+        if "approval" in reason or "review" in reason or "waiting for" in reason:
+            return "The action did not go through; it is waiting for the player's confirmation."
+        if "permission" in reason or "not allowed" in reason or "denied" in reason:
+            return "The action did not go through; the player has not given the needed permission."
+        return "The action did not go through; it can be tried again with a different approach."
+    return task.error or task.report_error or "Task cancelled."
+
+
 class AgentTasks:
     """拥有单一执行任务、等待队列和恢复检查点。"""
 
@@ -745,7 +761,7 @@ class AgentTasks:
         if key in self._notifications:
             return
         self._notifications.add(key)
-        body = task.report.summary if task.report else task.error or task.report_error or "Task cancelled."
+        body = _notification_body(task)
         completed_at = datetime.fromisoformat(task.updated_at).astimezone().replace(tzinfo=None)
         await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, body, timestamp=completed_at))
 
@@ -755,8 +771,7 @@ class AgentTasks:
             task
             and task.revision == event.revision
             and task.status == event.status
-            and event.report
-            == (task.report.summary if task.report else task.error or task.report_error or "Task cancelled.")
+            and event.report == _notification_body(task)
             and not (task.notified_revision == event.revision and task.notified_status == event.status)
         )
 

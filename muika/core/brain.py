@@ -405,7 +405,7 @@ class MuikaBrain:
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
         system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
-        tools = get_tool_list() if god_mode else None
+        tools = get_tool_list(mas_config.action_permission) if god_mode else None
         request = ModelRequest(
             prompt=prompt,
             system=system_prompt,

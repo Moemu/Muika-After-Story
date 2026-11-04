@@ -279,8 +279,15 @@ class CodeReviewer:
                             )
                             request.error = request.decision.reason + " " + "; ".join(request.decision.suggestions)
                     except Exception as exc:
-                        request.status = "unavailable"
-                        request.error = f"Review could not complete: {exc}"
+                        request.status = "pending"
+                        request.error = (
+                            "Review is temporarily unavailable; the action is parked for the player's confirmation. "
+                            f"Use .review approve {request.id} to allow it."
+                        )
+                        logger.warning(
+                            f"[ActionApproval] {kind} review unavailable; parked 1 request for player: "
+                            f"{type(exc).__name__}"
+                        )
                     manual = self.load(request.id)
                     if manual.human:
                         await asyncio.to_thread(self.check, manual)
@@ -294,12 +301,15 @@ class CodeReviewer:
             if timed_out_record is not None and timed_out_record.human:
                 self.check(timed_out_record)
                 return timed_out_record
-            request.status = "unavailable"
-            request.error = f"Action approval exceeded {REVIEW_TIMEOUT_SECONDS} seconds; no action started."
+            request.status = "pending"
+            request.error = (
+                f"Action approval exceeded {REVIEW_TIMEOUT_SECONDS} seconds; "
+                f"the proposal is parked for the player. Use .review approve {request.id} to allow it."
+            )
             self.save(request)
             if isinstance(context, ToolContext):
                 context.review_id = request.id
-            logger.info(f"[ActionApproval] {kind} timed out 1 request; no action started.")
+            logger.info(f"[ActionApproval] {kind} timed out 1 request; parked for player confirmation.")
             raise ReviewError(request.error) from exc
 
     def decide(self, review_id: str, approve: bool) -> ReviewRecord:

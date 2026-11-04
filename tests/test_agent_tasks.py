@@ -383,7 +383,10 @@ async def test_failed_checkpoint_prevents_action(factory, monkeypatch):
         event = await _event(manager)
         assert event.status == "failed"
         assert performed == []
-        assert "disk full" in event.report
+        # 事件回执给玩家侧人格化事实；技术错误保留在任务记录里
+        assert "The action did not go through" in event.report
+        assert "disk full" not in event.report
+        assert "disk full" in (manager.tasks[event.task_id].error or "")
     finally:
         await _stop(manager, worker)
 

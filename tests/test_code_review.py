@@ -100,7 +100,9 @@ async def test_review_failure_and_permission_mismatch_never_start_code(monkeypat
         reviewer.decide(reviewer.records()[0].id, True)
     monkeypatch.setattr(CodeReviewer, "assess", AsyncMock(side_effect=ValueError("invalid model response")))
     result = await _executor.execute_python("print('two')")
-    assert result.is_error and "invalid model response" in result.text
+    assert result.is_error and "parked for the player's confirmation" in result.text
+    parked = next(record for record in CodeReviewer().records() if record.status == "pending")
+    assert ".review approve" in parked.error
     manager.start.assert_not_awaited()
 
 
