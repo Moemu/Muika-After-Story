@@ -23,12 +23,19 @@ def _write_topics(tmp_path: Path, topics: list[dict]) -> Path:
     return p
 
 
+@pytest.fixture(autouse=True)
+def _disable_greeting_slots(monkeypatch):
+    """话题选择测试只验证静态/事件候选，不受时段问候干扰。"""
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {})
+
+
 def _manager_with_store(store: TopicStore) -> TopicManager:
     """用 ``__new__`` 构造 TopicManager，手动注入 store 与内部队列。"""
     tm = TopicManager.__new__(TopicManager)
     tm.store = store
     tm._recent_categories = deque(maxlen=3)
     tm._event_queue = deque()
+    tm._occasion_rules = []
     return tm
 
 

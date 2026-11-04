@@ -47,7 +47,7 @@ from .reflection import ReflectionAgent
 from .restart import RestartController
 from .self_change import SelfChangeDispatcher
 from .state import ActiveTopicState, MuikaState
-from .topic_manager import EventTopic, TopicManager
+from .topic_manager import EventTopic, TopicKind, TopicManager
 
 TaskResult = TypeVar("TaskResult")
 
@@ -317,6 +317,15 @@ class Muika:
                 await self.after_activity()
             return
 
+        persistent = self.memory.persistent
+        dissonance_tick = persistent.dissonance >= 0.6 and any(item.status == "open" for item in persistent.intentions)
+        if think_mode == "emotional" and event.type == "time_tick" and not dissonance_tick:
+            blocked = await self.topic_manager.kind_budget_block(TopicKind.REFLECTION, datetime.now())
+            if blocked is not None:
+                logger.debug(f"[Initiative] suppressed | kind=reflection | reason={blocked}")
+                await self._tick_idle(event, dt)
+                return
+
         await self._run_brain_pipeline(event)
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
@@ -489,9 +498,15 @@ class Muika:
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
         last_dialogue_at = self.memory.last_dialogue_at
-        topic = await self.topic_manager.get_next_topic(self.state)
+        topic = await self.topic_manager.get_next_topic(self.state, now=datetime.now())
         if not topic:
             logger.debug("[Topic] No available seed -- skipping topic pipeline this tick.")
+            return
+        blocked = await self.topic_manager.kind_budget_block(topic.kind, datetime.now())
+        if blocked is not None:
+            if isinstance(topic, EventTopic):
+                self.topic_manager.enqueue_event(topic)
+            logger.debug(f"[Topic] Suppressed by budget | kind={topic.kind.value} | reason={blocked}")
             return
         expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
         if (
@@ -533,6 +548,9 @@ class Muika:
             topic_type=topic.category,
         )
         self.state.boredom = 0.0
+        await self.topic_manager.record_topic_used(topic.dedupe_key or topic.id, user_engaged=False)
+        self.state.last_proactive_at = datetime.now()
+        logger.info(f"[Initiative] sent | pipeline=topic | kind={topic.kind.value} | topic={topic.id}")
         logger.debug(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
     async def _run_brain_pipeline(
@@ -667,6 +685,10 @@ class Muika:
             if not silent_turn:
                 prev = self.state.loneliness
                 self.state.loneliness = max(0.0, self.state.loneliness - LONELINESS_PROACTIVE_RELIEF)
+                await self.topic_manager.record_topic_used(
+                    f"reflection:{datetime.now():%Y-%m-%d}:{uuid4().hex[:12]}", user_engaged=False
+                )
+                logger.info("[Initiative] sent | pipeline=emotional | kind=reflection")
                 logger.debug(
                     f"[State] Proactive relief -- loneliness {prev:.2f} -> {self.state.loneliness:.2f} "
                     f"(cooldown {PROACTIVE_COOLDOWN / 60:.0f} min)"
@@ -738,12 +760,10 @@ class Muika:
 
     async def _handle_session_end(self) -> None:
         """结束工作会话；素材继续等待按自然日整理。"""
-        # 话题使用记录：Session 结束时与 TopicHistory 同步
+        # 主动话题在发送时已记录 use_count；会话结束只补充互动计数
         if self.state.active_topic is not None:
-            await self.topic_manager.record_topic_used(
-                self.state.active_topic.topic_id,
-                user_engaged=self.state.active_topic.user_engaged,
-            )
+            if self.state.active_topic.user_engaged:
+                await self.topic_manager.mark_engaged(self.state.active_topic.topic_id)
             logger.debug(
                 f"[Topic] Recorded topic {self.state.active_topic.topic_id!r} "
                 f"at session end (engaged={self.state.active_topic.user_engaged})"

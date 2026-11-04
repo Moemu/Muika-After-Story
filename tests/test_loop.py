@@ -223,6 +223,8 @@ def _tick() -> TimeTickEvent:
 )
 def test_think_mode(changes, event, expected):
     engine = _engine()
+    # 主动发言新增"玩家安静"门槛：默认刚说过话的 state 不能触发主动管线。
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=30)
     for name, value in changes.items():
         setattr(engine.state, name, value)
     with patch("muika.core.loop.random", return_value=0.0):
@@ -245,6 +247,9 @@ def engine(monkeypatch, redirect_get_session):
     for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
     engine = Muika(MagicMock(send_message=AsyncMock()), asyncio.Queue())
+    engine.topic_manager.record_topic_used = AsyncMock()
+    engine.topic_manager.mark_engaged = AsyncMock()
+    engine.topic_manager.kind_budget_block = AsyncMock(return_value=None)
     engine.reflection.maybe_reflect = AsyncMock()
     engine.agent.model.config = ModelConfig(provider="_echo")
     engine.agent.model.ask = AsyncMock(return_value=ModelCompletions(text="We talked about a small personal detail."))
@@ -401,7 +406,8 @@ async def test_dissonance_initiative_allows_silence_and_uses_cooldown(engine):
 
     engine.memory.persistent.dissonance = 0.7
     engine.memory.persistent.intentions = [Intention(id="poem", description="Read a poem")]
-    engine.state.last_interaction = datetime.now() - timedelta(minutes=5)
+    # 主动发言新增"玩家安静"门槛（10 分钟），此处用安静 30 分钟的玩家。
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=30)
     assert engine.get_think_mode(TimeTickEvent()) == "emotional"
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing>")
     await engine._run_brain_pipeline(TimeTickEvent())

@@ -1,0 +1,123 @@
+# 内置节日事件规则（日期由 muika/utils/lunar.py 计算；用户可在 configs/occasions.yml 覆盖或新增）
+# window_days：触发窗口（1=当天；大于 1 时窗口内的日期都按当天事实注入，仅在确有需要时使用）
+# prompt：注入的客观事实行（英文，供人格管线自然采用，不要求复述）
+- id: chinese_new_year
+  name: 春节
+  window_days: 1
+  prompt: "It is Chinese New Year (Spring Festival) today."
+- id: lantern_festival
+  name: 元宵
+  window_days: 1
+  prompt: "It is the Lantern Festival today."
+- id: dragon_heads_raising
+  name: 龙抬头
+  window_days: 1
+  prompt: "It is the Dragon Heads-raising Day today."
+- id: qingming
+  name: 清明
+  window_days: 1
+  prompt: "It is Tomb-Sweeping Day (Qingming) today."
+- id: dragon_boat
+  name: 端午
+  window_days: 1
+  prompt: "It is the Dragon Boat Festival today."
+- id: qixi
+  name: 七夕
+  window_days: 1
+  prompt: "It is Qixi, the Chinese Valentine's Day, today."
+- id: ghost_festival
+  name: 中元
+  window_days: 1
+  prompt: "It is the Ghost Festival today."
+- id: mid_autumn
+  name: 中秋
+  window_days: 1
+  prompt: "It is the Mid-Autumn Festival today."
+- id: double_ninth
+  name: 重阳
+  window_days: 1
+  prompt: "It is the Double Ninth Festival today."
+- id: winter_clothes
+  name: 寒衣
+  window_days: 1
+  prompt: "It is the Winter Clothes Festival today."
+- id: xia_yuan
+  name: 下元
+  window_days: 1
+  prompt: "It is the Xia Yuan Festival today."
+- id: laba
+  name: 腊八
+  window_days: 1
+  prompt: "It is the Laba Festival today."
+- id: little_new_year
+  name: 小年
+  window_days: 1
+  prompt: "It is Little New Year today."
+- id: new_years_eve
+  name: 除夕
+  window_days: 1
+  prompt: "It is New Year's Eve on the lunar calendar today."
+- id: new_year_day
+  name: 元旦
+  window_days: 1
+  prompt: "It is New Year's Day today."
+- id: valentines_day
+  name: 情人节
+  window_days: 1
+  prompt: "It is Valentine's Day today."
+- id: womens_day
+  name: 妇女节
+  window_days: 1
+  prompt: "It is International Women's Day today."
+- id: april_fools
+  name: 愚人节
+  window_days: 1
+  prompt: "It is April Fools' Day today."
+- id: labour_day
+  name: 劳动节
+  window_days: 1
+  prompt: "It is International Workers' Day today."
+- id: childrens_day
+  name: 儿童节
+  window_days: 1
+  prompt: "It is Children's Day today."
+- id: teachers_day
+  name: 教师节
+  window_days: 1
+  prompt: "It is Teachers' Day today."
+- id: national_day
+  name: 国庆
+  window_days: 1
+  prompt: "It is the National Day holiday in China today."
+- id: christmas_eve
+  name: 平安夜
+  window_days: 1
+  prompt: "It is Christmas Eve today."
+- id: christmas
+  name: 圣诞
+  window_days: 1
+  prompt: "It is Christmas today."
+- id: new_years_eve_solar
+  name: 跨年
+  window_days: 1
+  prompt: "It is the last day of the year today."
+- id: mothers_day
+  name: 母亲节
+  window_days: 1
+  prompt: "It is Mother's Day today."
+- id: fathers_day
+  name: 父亲节
+  window_days: 1
+  prompt: "It is Father's Day today."
+- id: thanksgiving
+  name: 感恩节
+  window_days: 1
+  prompt: "It is Thanksgiving today."
+- id: halloween
+  name: 万圣节
+  window_days: 1
+  prompt: "It is Halloween today."
+- id: winter_solstice
+  name: 冬至
+  window_days: 1
+  prompt: "It is the winter solstice today."

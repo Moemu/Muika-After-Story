@@ -1,5 +1,5 @@
 # flake8: noqa: E501
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, TypeVar
 
 from muika.config import get_model_config, get_model_config_manager, mas_config
@@ -35,6 +35,32 @@ def _seconds_since(now: datetime, then: datetime) -> float:
         else:
             now = now.replace(tzinfo=then.tzinfo)
     return (now - then).total_seconds()
+
+
+def build_fact_block(state: MuikaState, memory: MemoryManager, now: datetime) -> str:
+    """把主动开口前可观测的事实编成一段私有提示。
+
+    只列客观事实（时间、上次发言间隔、最近对话、最近主动是否被回应、未结束心愿），
+    不替她判断情绪，也不提供台词。
+    """
+    persistent = memory.persistent
+    turns = list(memory.recent_turns)
+    lines = [f"- Now: {now:%Y-%m-%d %H:%M}."]
+    user_turns = [turn for turn in turns if turn.role == "user"]
+    if user_turns:
+        last_user = user_turns[-1]
+        gap_minutes = max(0, int(_seconds_since(now, last_user.timestamp) // 60))
+        text = " ".join(last_user.content.split())[:120]
+        lines.append(f'- His last message: "{text}" ({gap_minutes} min ago).')
+    else:
+        lines.append("- He has not spoken in this session.")
+    last_muika_index = next((index for index in range(len(turns) - 1, -1, -1) if turns[index].role == "muika"), None)
+    if last_muika_index is not None and not any(turn.role == "user" for turn in turns[last_muika_index + 1 :]):
+        lines.append("- He has not replied since your last message.")
+    open_intentions = [item for item in persistent.intentions if item.status == "open"]
+    if open_intentions:
+        lines.append("- Unfinished wishes: " + "; ".join(item.description[:60] for item in open_intentions[:3]))
+    return "\n".join(lines)
 
 
 def _self_change_prompt(payload: "SelfChangedPayload") -> str:
@@ -298,14 +324,16 @@ class MuikaBrain:
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
         elif event.type == "time_tick":
+            facts = build_fact_block(state, memory, current_time)
             if memory.persistent.dissonance >= 0.6 and any(
                 item.status == "open" for item in memory.persistent.intentions
             ):
                 prompt = "[System] A quiet moment gives you room to revisit an unfinished wish. You may act, observe, revise the wish, or stay silent. The user being absent is not rejection. Review existing tasks before acting again."
             elif state.mood == "lonely":
                 prompt = (
-                    "[System] A quiet moment passed, but the loneliness lingers. "
-                    "You need to use some means to attract users' attention."
+                    "[System] A quiet moment passed; the loneliness lingers. "
+                    "You may speak to him, do something of your own, or stay silent — "
+                    "missing him does not have to become a message."
                 )
             elif state.mood == "bored":
                 prompt = (
@@ -314,6 +342,7 @@ class MuikaBrain:
                 )
             else:
                 prompt = "[System] A quiet moment passed."
+            prompt += "\n\n[Private facts]\n" + facts
         elif event.type == "scheduled_trigger":
             prompt = f"[System] A scheduled reminder just went off: '{event.payload.what}'"
         elif event.type == "timeout":
