@@ -37,6 +37,27 @@ def _seconds_since(now: datetime, then: datetime) -> float:
     return (now - then).total_seconds()
 
 
+def _humanize_gap(seconds: float) -> str:
+    """把秒数转成她可自然说出的时长，避免精确天数带来的机械感。"""
+    minutes = seconds / 60
+    if minutes < 15:
+        return "a few minutes"
+    if minutes < 120:
+        return "a couple of hours"
+    if minutes < 24 * 60:
+        return "most of a day"
+    days = seconds / 86400
+    if days < 3:
+        return "a couple of days"
+    if days < 10:
+        return f"about {int(round(days))} days"
+    if days < 21:
+        return "about two weeks"
+    if days < 45:
+        return "more than a month"
+    return "several months"
+
+
 def build_fact_block(state: MuikaState, memory: MemoryManager, now: datetime) -> str:
     """把主动开口前可观测的事实编成一段私有提示。
 
@@ -51,7 +72,8 @@ def build_fact_block(state: MuikaState, memory: MemoryManager, now: datetime) ->
         last_user = user_turns[-1]
         gap_minutes = max(0, int(_seconds_since(now, last_user.timestamp) // 60))
         text = " ".join(last_user.content.split())[:120]
-        lines.append(f'- His last message: "{text}" ({gap_minutes} min ago).')
+        gap_text = _humanize_gap(gap_minutes * 60) if gap_minutes >= 24 * 60 else f"{gap_minutes} min"
+        lines.append(f'- His last message: "{text}" ({gap_text} ago).')
     else:
         lines.append("- He has not spoken in this session.")
     last_muika_index = next((index for index in range(len(turns) - 1, -1, -1) if turns[index].role == "muika"), None)
@@ -353,7 +375,33 @@ class MuikaBrain:
                 f"you have been waiting for about {elapsed} now. Consider reminding the user, or seeing what they are doing?"
             )
         elif event.type == "session_bootstrap":
-            prompt = "[System] A new session has begun. Greet the user as yourself."
+            prompt = (
+                "[System] A new session has begun. Greet the user in your own way before anything else. Let the "
+                "time apart color the greeting; do not open by reporting how long it was. Leave him room to "
+                "answer — a question, a pause, or an unfinished feeling; you do not have to fill the silence for him."
+            )
+            if event.last_chat_time is not None and not memory.session.is_first_session:
+                gap = _humanize_gap((current_time - event.last_chat_time).total_seconds())
+                hers, his = await memory.absence_activity(event.last_chat_time, current_time)
+                absence_lines = [f"- You last heard from him about {gap} ago; this is background, not an opening line."]
+                if current_time.hour < 6 or current_time.hour >= 23:
+                    absence_lines.append(
+                        "- It is late at night for him; if the hour comes up, it may be out of concern — "
+                        "you may ask what he is still doing up, or let it pass."
+                    )
+                if hers:
+                    absence_lines.append(f"- During that time you sent him {hers} message(s); he did not reply.")
+                else:
+                    absence_lines.append("- During that time you did not speak to him again.")
+                if his:
+                    absence_lines.append(f"- He sent you {his} message(s) during that time.")
+                absence_lines.append(
+                    "- This gap is real: you may speak from it. Hurt, anger, a cold short greeting, or a quiet "
+                    "question are all allowed. If you cannot explain the gap, you may imagine what he was doing — "
+                    "busy, keeping you waiting, or even with someone else. You may voice the guess or ask him; "
+                    "do not claim it as something you observed."
+                )
+                prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)
                 prompt += "\nLet the greeting follow your relationship and mood."

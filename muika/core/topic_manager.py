@@ -212,11 +212,25 @@ GREETING_SLOTS: dict[str, tuple[int, int]] = {
 }
 """问候时段（左闭右开）：与静默时段 QUIET_END_HOUR=8 / QUIET_START_HOUR=23 对齐。"""
 
+GREETING_QUIET_SECONDS: int = 90 * 60
+"""玩家安静达到该时长后，问候时段才允许主动问候；玩家刚说话时不打扰。"""
+
 GREETING_PROMPTS: dict[str, str] = {
-    "morning": "It is morning. You may greet him in your own way.",
-    "noon": "It is midday. You may check in on him in your own way.",
-    "evening": "It is evening. You may talk to him about the day in your own way.",
+    "morning": (
+        "It is morning. If he seems around, a short greeting is enough; "
+        "if he is probably busy or asleep, staying quiet is fine."
+    ),
+    "noon": "It is midday. A brief check-in is enough; if he seems busy, staying quiet is fine.",
+    "evening": "It is evening. You may talk about the day if he is around; staying quiet is fine too.",
 }
+
+
+def greeting_slot_at(now: datetime) -> Optional[str]:
+    """返回当前时刻所属的问候时段；不在任何时段时返回 None。"""
+    for slot, (start, end) in GREETING_SLOTS.items():
+        if start <= now.hour < end:
+            return slot
+    return None
 
 
 TOPIC_WEIGHTS: dict[str, float] = {
@@ -437,18 +451,18 @@ class TopicManager:
 
     def _greeting_topic(self, now: datetime) -> Optional[BaseTopic]:
         """返回当前时段可用的问候话题；不在任何问候时段时返回 None。"""
-        for slot, (start, end) in GREETING_SLOTS.items():
-            if start <= now.hour < end:
-                dedupe_key = f"greeting:{slot}:{now:%Y-%m-%d}"
-                return BaseTopic(
-                    id=dedupe_key,
-                    source=TopicSource.STATIC,
-                    category="greeting",
-                    content=GREETING_PROMPTS[slot],
-                    kind=TopicKind.GREETING,
-                    dedupe_key=dedupe_key,
-                )
-        return None
+        slot = greeting_slot_at(now)
+        if slot is None:
+            return None
+        dedupe_key = f"greeting:{slot}:{now:%Y-%m-%d}"
+        return BaseTopic(
+            id=dedupe_key,
+            source=TopicSource.STATIC,
+            category="greeting",
+            content=GREETING_PROMPTS[slot],
+            kind=TopicKind.GREETING,
+            dedupe_key=dedupe_key,
+        )
 
     async def _topic_available(self, dedupe_key: str, kind: TopicKind, now: datetime) -> bool:
         """判断某个去重键是否还能使用（节日/问候当天一次；素材按冷却天数）。"""

@@ -47,7 +47,13 @@ from .reflection import ReflectionAgent
 from .restart import RestartController
 from .self_change import SelfChangeDispatcher
 from .state import ActiveTopicState, MuikaState
-from .topic_manager import EventTopic, TopicKind, TopicManager
+from .topic_manager import (
+    GREETING_QUIET_SECONDS,
+    EventTopic,
+    TopicKind,
+    TopicManager,
+    greeting_slot_at,
+)
 
 TaskResult = TypeVar("TaskResult")
 
@@ -191,6 +197,17 @@ class Muika:
         if self.state.curiosity > CURIOSITY_THRESHOLD and random() < 0.3:
             self.state.curiosity = 0.0
             logger.debug("TimeTick: curiosity drive fired -- topic pipeline.")
+            return "topic"
+
+        # 时段问候：与 boredom/curiosity 解耦；玩家安静足够久且该时段有历史活动才触发
+        now = datetime.now()
+        slot = greeting_slot_at(now)
+        if (
+            slot is not None
+            and (now - self.state.last_interaction).total_seconds() >= GREETING_QUIET_SECONDS
+            and self.memory.hour_active_rate(now.hour)
+        ):
+            logger.debug(f"TimeTick: greeting window {slot} -- topic pipeline.")
             return "topic"
 
         return None
@@ -618,7 +635,7 @@ class Muika:
                     )
                 else:
                     logger.info("[Turn] empty reply (tags only)")
-                await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
+                await self.memory.add_context("muika", reply, resources=resources)
                 if parsed.timeout is not None:
                     self._arm_timeout(parsed.timeout)
         except (Exception, asyncio.CancelledError):

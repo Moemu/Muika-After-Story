@@ -479,7 +479,7 @@ async def test_resources_are_immutable_and_private_tags_never_recalled(tmp_path)
     assert memory.recent_turns[-1].resources[0].path != str(path)
     assert "private" not in await memory.read_source(f"experience:{ref}")
     assert "<state>" not in await memory.read_source(f"experience:{ref}")
-    assert memory.recent_turns[-1].content == "Hello"
+    assert memory.recent_turns[-1].content == "<heart>private</heart>Hello<state>{}</state>"
 
 
 async def test_context_summary_commits_before_replacing_history(monkeypatch):

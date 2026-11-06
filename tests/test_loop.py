@@ -76,7 +76,7 @@ async def test_background_initiative_can_restart_after_saving_its_reply(engine, 
 
     async def restart(workspace_id, trigger, confirm_memory_loss=False):
         calls.append((workspace_id, trigger, confirm_memory_loss))
-        assert engine.memory.recent_turns[-1].content == "准备好了。"
+        assert engine.memory.recent_turns[-1].content == f"准备好了。{tag}"
 
     engine.restart.handler = restart
     tag = f'<restart workspace_id="{ws_id}">' if ws_id else "<restart>"
@@ -231,6 +231,30 @@ def test_think_mode(changes, event, expected):
         assert engine.get_think_mode(event) == expected
     if "curiosity" in changes:
         assert engine.state.curiosity == 0.0
+
+
+def test_think_mode_greeting_window_fires(monkeypatch):
+    engine = _engine()
+    engine.state.last_interaction = datetime.now() - timedelta(hours=2)
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {"always": (0, 24)})
+    monkeypatch.setattr(engine.memory, "hour_active_rate", lambda hour: True)
+    assert engine.get_think_mode(_tick()) == "topic"
+
+
+def test_think_mode_greeting_requires_quiet(monkeypatch):
+    engine = _engine()
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=30)
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {"always": (0, 24)})
+    monkeypatch.setattr(engine.memory, "hour_active_rate", lambda hour: True)
+    assert engine.get_think_mode(_tick()) is None
+
+
+def test_think_mode_greeting_requires_active_hour(monkeypatch):
+    engine = _engine()
+    engine.state.last_interaction = datetime.now() - timedelta(hours=2)
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {"always": (0, 24)})
+    monkeypatch.setattr(engine.memory, "hour_active_rate", lambda hour: False)
+    assert engine.get_think_mode(_tick()) is None
 
 
 @pytest.mark.parametrize("opening", ["<heart>", "<HEART>"])

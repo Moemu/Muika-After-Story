@@ -403,6 +403,8 @@ async def test_first_meeting_then_absence_return_after_restart(core_app_factory)
     assert not returned.muika.memory.session.is_first_session
     assert returned.muika.memory.has_history
 
-    # 缺席语义真实进入人设提示：模板将上次对话时间渲染进 system prompt
+    # 缺席语义真实进入提示：自然语言时长与期间消息事实进入 prompt（不再渲染精确时间戳）
     greeting_call = next(call for call in returned.scripted.calls if call["name"] == "greeting_return")
-    assert two_days_ago.strftime("%Y-%m-%d") in greeting_call["system"]
+    assert "[Private facts]" in greeting_call["prompt"]
+    assert "a couple of days" in greeting_call["prompt"]
+    assert "did not speak to him again" in greeting_call["prompt"]

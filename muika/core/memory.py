@@ -226,6 +226,13 @@ class MemoryManager:
             previous = stamp
         return len(active_days) >= ACTIVITY_MIN_DAYS and len(matching_days) >= ACTIVITY_MIN_MATCHING_DAYS
 
+    def hour_active_rate(self, hour: int, days: int = ACTIVITY_HISTORY_DAYS) -> bool:
+        """判断玩家在最近 *days* 天的该小时是否活跃；无历史记录时允许问候。"""
+        if not self._dialogue_times:
+            return True
+        since = datetime.now() - timedelta(days=days)
+        return any(kind == "user" and stamp >= since and stamp.hour == hour for stamp, kind in self._dialogue_times)
+
     async def _save_snapshot(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
         await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
 
@@ -392,7 +399,8 @@ class MemoryManager:
     ) -> int:
         """追加素材；来源标识防止事件重投产生重复记录。"""
         now = local_time((timestamp or datetime.now()).isoformat())
-        if kind in {"muika", "agent", "note"}:
+        # muika 的原始输出（含 <heart> 内心）必须保留在上下文里；展示层负责剥离。
+        if kind in {"agent", "note"}:
             content = public_text(content)
         async with self._lock:
             snapshot = self.snapshot.model_copy(deep=True)
@@ -704,6 +712,34 @@ class MemoryManager:
             if (date.fromisoformat(day) <= cutoff if include_today else date.fromisoformat(day) < cutoff)
             and latest > diaries.get(day, 0)
         )
+
+    async def absence_activity(self, since: datetime, until: datetime) -> tuple[int, int]:
+        """统计 (since, until] 之间她发出与玩家发来的消息数；用于重逢时的可观察事实。"""
+        try:
+            return await self._absence_activity(since, until)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Memory] Absence activity unavailable: {type(exc).__name__}")
+            return 0, 0
+
+    async def _absence_activity(self, since: datetime, until: datetime) -> tuple[int, int]:
+        start = local_time(since.isoformat())
+        end = local_time(until.isoformat())
+        async with get_session() as db:
+            hers = await db.scalar(
+                select(func.count(ExperienceORM.id)).where(
+                    ExperienceORM.kind == "muika",
+                    ExperienceORM.occurred_at > start,
+                    ExperienceORM.occurred_at <= end,
+                )
+            )
+            his = await db.scalar(
+                select(func.count(ExperienceORM.id)).where(
+                    ExperienceORM.kind == "user",
+                    ExperienceORM.occurred_at > start,
+                    ExperienceORM.occurred_at <= end,
+                )
+            )
+        return int(hers or 0), int(his or 0)
 
     async def day_material(self, day: date) -> list[Experience]:
         async with get_session() as db:

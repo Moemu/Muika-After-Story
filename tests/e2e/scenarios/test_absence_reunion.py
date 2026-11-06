@@ -33,10 +33,45 @@ async def test_absence_reunion_acknowledges_gap_without_blame(core_app_factory):
     assert await app.next_reply() == "……三周多，二十三天。我数得很清楚。"
 
     call = next(call for call in reversed(app.scripted.calls) if "A new session has begun" in call.get("prompt", ""))
-    # 缺席事实（上次发言时间）与长缺席语义应进入 system，而不是靠模型猜
-    assert last_chat.strftime("%Y-%m-%d %H:%M:%S") in call["system"]
+    # 缺席事实进入 prompt（自然语言时长 + 期间无消息），不靠精确时间戳逼模型换算
+    assert "[Private facts]" in call["prompt"]
+    assert "more than a month" in call["prompt"] or "about two weeks" in call["prompt"]
+    assert "did not speak to him again" in call["prompt"]
+    assert "you may imagine what he was doing" in call["prompt"]
+    # 模板仍保留长缺席的情绪许可
     assert "A day or more has passed" in call["system"]
     app.recorder.record("absence_reunion", days=23, last_chat_injected=True)
+
+
+async def test_resumed_session_reports_her_unanswered_messages(core_app_factory):
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(text="第一次见面的问候。"),
+            ScriptedTurn(text="晚上好。"),
+            ScriptedTurn(text="……你回来了。"),
+        ]
+    )
+    app.scripted.add_route(
+        when=lambda req: req.purpose == "dialogue_summary", text="我们聊了晚上的事。", name="summary"
+    )
+    await app.start()
+    await app.bootstrap()
+    assert await app.next_reply() == "第一次见面的问候。"
+    await app.user_says("晚上好。")
+    assert await app.next_reply() == "晚上好。"
+    await app.end_session()
+    await app.wait_processed("session_end")
+
+    # 模拟核心持续运行：她在缺席期间发过消息，但玩家没有回应
+    last_chat = datetime.now() - timedelta(days=14)
+    await app.muika.memory.add_context("muika", "……还在等你。", timestamp=last_chat + timedelta(days=1))
+    await app.bootstrap(last_chat_time=last_chat)
+    await app.wait_processed("session_bootstrap")
+
+    call = next(call for call in reversed(app.scripted.calls) if "A new session has begun" in call.get("prompt", ""))
+    assert "sent him 1 message(s)" in call["prompt"]
+    assert "about two weeks" in call["prompt"]
+    app.recorder.record("absence_activity_visible", her_messages=1)
 
 
 async def test_returning_player_gets_normal_reply(core_app_factory):
