@@ -53,16 +53,27 @@ from muika.utils.utils import get_version
 
 from .attachments import AttachmentTransfer, attachment_routes
 from .core_link import CoreLink
-from .protocol import ActionResponse, BotToCoreEvent, BotToCoreMessage
+from .protocol import (
+    ActionResponse,
+    BotToCoreEvent,
+    BotToCoreMessage,
+    CommandResult,
+    ErrorMessage,
+    SendMessage,
+)
 from .protocol import CommandEvent as IpcCommandEvent
-from .protocol import CommandResult, ErrorMessage, SendMessage
 from .protocol import SessionBootstrapEvent as IpcSessionBootstrapEvent
 from .protocol import SessionEndEvent as IpcSessionEndEvent
 from .protocol import UserMessageEvent as IpcUserMessageEvent
 from .server import DEFAULT_HOST, DEFAULT_PORT, CoreWsServer
-from .supervisor import RESTART_EXIT_CODE, RestartRecord, lifecycle_directory
+from .supervisor import (
+    RESTART_EXIT_CODE,
+    RestartRecord,
+    lifecycle_directory,
+    watch_parent,
+    write_json,
+)
 from .supervisor import main as supervisor_main
-from .supervisor import watch_parent, write_json
 
 MCP_CONFIG_PATH = Path("./configs/mcp.json")
 BUILTIN_PLUGINS_PATH = Path("muika/builtin_plugins")
