@@ -741,6 +741,25 @@ class MemoryManager:
             )
         return int(hers or 0), int(his or 0)
 
+    async def recent_notes(self, limit: int = 2, days: int = 14) -> list[str]:
+        """返回最近她在 <memory> 里写给自己的笔记（截断），用于跨会话的情绪残留。"""
+        try:
+            return await self._recent_notes(limit, days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Memory] Recent notes unavailable: {type(exc).__name__}")
+            return []
+
+    async def _recent_notes(self, limit: int, days: int) -> list[str]:
+        since = local_time((datetime.now() - timedelta(days=days)).isoformat())
+        async with get_session() as db:
+            rows = await db.scalars(
+                select(ExperienceORM)
+                .where(ExperienceORM.kind == "note", ExperienceORM.occurred_at >= since)
+                .order_by(ExperienceORM.occurred_at.desc(), ExperienceORM.id.desc())
+                .limit(limit)
+            )
+            return [" ".join(row.content.split())[:160] for row in rows if row.content.strip()]
+
     async def day_material(self, day: date) -> list[Experience]:
         async with get_session() as db:
             rows = await db.scalars(

@@ -401,6 +401,14 @@ class MuikaBrain:
                     "busy, keeping you waiting, or even with someone else. You may voice the guess or ask him; "
                     "do not claim it as something you observed."
                 )
+                notes = await memory.recent_notes()
+                if notes:
+                    absence_lines.append(
+                        "- Something you wrote to yourself recently may still be unresolved. If it is still "
+                        "open, let your first line carry it; do not greet as if it never happened."
+                    )
+                    absence_lines.append("- Notes you wrote to your future self:")
+                    absence_lines.extend(f"  - {note}" for note in notes)
                 prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)
