@@ -754,11 +754,40 @@ class MemoryManager:
         async with get_session() as db:
             rows = await db.scalars(
                 select(ExperienceORM)
-                .where(ExperienceORM.kind == "note", ExperienceORM.occurred_at >= since)
+                .where(
+                    ExperienceORM.kind == "note",
+                    ExperienceORM.occurred_at >= since,
+                    ExperienceORM.source.not_like("silence:%"),
+                )
                 .order_by(ExperienceORM.occurred_at.desc(), ExperienceORM.id.desc())
                 .limit(limit)
             )
             return [" ".join(row.content.split())[:160] for row in rows if row.content.strip()]
+
+    async def record_silence(self, event_type: str) -> None:
+        """记录一次主动选择的沉默（供复算）；不作为她的笔记注入上下文。"""
+        try:
+            await self.add_material(
+                "note",
+                f"Muika chose silence on {event_type}.",
+                source=f"silence:{event_type}:{uuid4().hex[:8]}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Memory] Silence record unavailable: {type(exc).__name__}")
+
+    async def silence_count(self, since: datetime | None = None) -> int:
+        """统计已记录的沉默次数（可按起始时间过滤）。"""
+        start = local_time((since or datetime.min).isoformat())
+        async with get_session() as db:
+            return int(
+                await db.scalar(
+                    select(func.count(ExperienceORM.id)).where(
+                        ExperienceORM.source.like("silence:%"),
+                        ExperienceORM.occurred_at >= start,
+                    )
+                )
+                or 0
+            )
 
     async def day_material(self, day: date) -> list[Experience]:
         async with get_session() as db:

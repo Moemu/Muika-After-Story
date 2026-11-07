@@ -626,6 +626,7 @@ class Muika:
             silent_turn = parsed.do_nothing
             if silent_turn:
                 logger.info("[Turn] silent (do_nothing)")
+                await self.memory.record_silence(event.type)
             receipt: Optional[SendReceipt] = None
             if not silent_turn:
                 if parsed.clean_reply:
