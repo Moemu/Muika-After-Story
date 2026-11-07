@@ -76,9 +76,13 @@ def build_fact_block(state: MuikaState, memory: MemoryManager, now: datetime) ->
         lines.append(f'- His last message: "{text}" ({gap_text} ago).')
     else:
         lines.append("- He has not spoken in this session.")
-    last_muika_index = next((index for index in range(len(turns) - 1, -1, -1) if turns[index].role == "muika"), None)
-    if last_muika_index is not None and not any(turn.role == "user" for turn in turns[last_muika_index + 1 :]):
-        lines.append("- He has not replied since your last message.")
+    last_user_index = next((index for index in range(len(turns) - 1, -1, -1) if turns[index].role == "user"), None)
+    trailing = turns[last_user_index + 1 :] if last_user_index is not None else turns
+    her_trailing = [turn for turn in trailing if turn.role == "muika"]
+    # 他最后一条消息之后她的话：第一条是对他的回复，其余是继续说却没人接
+    unanswered = len(her_trailing) - 1 if last_user_index is not None else len(her_trailing)
+    if unanswered > 0:
+        lines.append(f"- Since his last message, you have spoken to him {unanswered} time(s) without a reply.")
     open_intentions = [item for item in persistent.intentions if item.status == "open"]
     if open_intentions:
         lines.append("- Unfinished wishes: " + "; ".join(item.description[:60] for item in open_intentions[:3]))
