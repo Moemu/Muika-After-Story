@@ -407,4 +407,3 @@ async def test_first_meeting_then_absence_return_after_restart(core_app_factory)
     greeting_call = next(call for call in returned.scripted.calls if call["name"] == "greeting_return")
     assert "[Private facts]" in greeting_call["prompt"]
     assert "a couple of days" in greeting_call["prompt"]
-    assert "did not speak to him again" in greeting_call["prompt"]

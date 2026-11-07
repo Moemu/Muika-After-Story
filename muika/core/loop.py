@@ -541,8 +541,22 @@ class Muika:
             await self.memory.update_state(update)
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
+        if parsed.agent_commands:
+            # 调查任务带上素材语境，回执后才接得上"我在说战争"
+            title = topic.title if isinstance(topic, EventTopic) else topic.category
+            task_seed = f"Reading notes: {topic.content}\n\nInvestigation: {title}"
+            for command in parsed.agent_commands:
+                await self.agent_tasks.submit(command, task_seed, read_only=True)
+            # 回送她的真实原始输出（含 heart 与素材语境），不伪造自述
+            await self.memory.add_context("muika", expanded)
+            await self.topic_manager.record_topic_used(topic.dedupe_key or topic.id, user_engaged=False)
+            logger.info(
+                f"[Topic] Muika chose to investigate before speaking ({len(parsed.agent_commands)} command(s))."
+            )
+            return
         if parsed.do_nothing:
             logger.info("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
+            await self.topic_manager.record_topic_used(topic.dedupe_key or topic.id, user_engaged=False)
             return
         if parsed.target:
             logger.debug(f"[Topic] Routing to target={parsed.target!r}")
@@ -558,7 +572,7 @@ class Muika:
             self._arm_timeout(parsed.timeout)
         await self.executor.send_message(parsed.clean_reply, target=parsed.target)
         logger.info(f"Muika: {parsed.clean_reply}")
-        await self.memory.add_context("muika", parsed.clean_reply)
+        await self.memory.add_context("muika", expanded)
         self.state.active_topic = ActiveTopicState(
             topic_id=topic.id,
             topic_seed=topic.content,
@@ -627,6 +641,8 @@ class Muika:
             if silent_turn:
                 logger.info("[Turn] silent (do_nothing)")
                 await self.memory.record_silence(event.type)
+                # 沉默也要保留她的原始输出（含 heart）：下一轮才知道自己为何沉默
+                await self.memory.add_context("muika", reply)
             receipt: Optional[SendReceipt] = None
             if not silent_turn:
                 if parsed.clean_reply:

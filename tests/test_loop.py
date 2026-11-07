@@ -327,7 +327,7 @@ async def test_chat_and_session_end_keep_background_task(engine):
         return ModelCompletions(text='<agent_result status="completed">Verified.</agent_result>')
 
     engine.agent.action_lock = asyncio.Lock()
-    engine.agent.build_request = lambda command, state=None: ModelRequest(command, tools=[])
+    engine.agent.build_request = lambda command, state=None, *, read_only=False: ModelRequest(command, tools=[])
     engine.agent.model.step = step
     engine.brain.generate_reply = AsyncMock(side_effect=["我去看看。<agent>Develop Daily</agent>", "我在呢。"])
     worker = asyncio.create_task(engine.agent_tasks.run())

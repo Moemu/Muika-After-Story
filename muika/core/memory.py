@@ -713,17 +713,18 @@ class MemoryManager:
             and latest > diaries.get(day, 0)
         )
 
-    async def absence_activity(self, since: datetime, until: datetime) -> tuple[int, int]:
-        """统计 (since, until] 之间她发出与玩家发来的消息数；用于重逢时的可观察事实。"""
+    async def absence_activity(self, since: datetime, until: datetime) -> tuple[int, int] | None:
+        """统计 (since, until] 之间她发出与玩家发来的消息数；查询失败返回 None（未知，不伪造事实）。"""
         try:
             return await self._absence_activity(since, until)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[Memory] Absence activity unavailable: {type(exc).__name__}")
-            return 0, 0
+            return None
 
     async def _absence_activity(self, since: datetime, until: datetime) -> tuple[int, int]:
-        start = local_time(since.isoformat())
-        end = local_time(until.isoformat())
+        # occurred_at 是 T 分隔的 ISO 文本；必须用同一格式的字符串比较，绑定 datetime 会错位一天
+        start = since.isoformat()
+        end = until.isoformat()
         async with get_session() as db:
             hers = await db.scalar(
                 select(func.count(ExperienceORM.id)).where(
@@ -750,14 +751,20 @@ class MemoryManager:
             return []
 
     async def _recent_notes(self, limit: int, days: int) -> list[str]:
-        since = local_time((datetime.now() - timedelta(days=days)).isoformat())
+        since = (datetime.now() - timedelta(days=days)).isoformat()
         async with get_session() as db:
             rows = await db.scalars(
                 select(ExperienceORM)
                 .where(
                     ExperienceORM.kind == "note",
                     ExperienceORM.occurred_at >= since,
-                    or_(ExperienceORM.source.is_(None), ExperienceORM.source.not_like("silence:%")),
+                    or_(
+                        ExperienceORM.source.is_(None),
+                        and_(
+                            ExperienceORM.source.not_like("silence:%"),
+                            ExperienceORM.source.not_like("ipc:%"),
+                        ),
+                    ),
                 )
                 .order_by(ExperienceORM.occurred_at.desc(), ExperienceORM.id.desc())
                 .limit(limit)
@@ -777,7 +784,7 @@ class MemoryManager:
 
     async def silence_count(self, since: datetime | None = None) -> int:
         """统计已记录的沉默次数（可按起始时间过滤）。"""
-        start = local_time((since or datetime.min).isoformat())
+        start = (since or datetime.min).isoformat()
         async with get_session() as db:
             return int(
                 await db.scalar(

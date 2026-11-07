@@ -20,7 +20,7 @@ except ImportError:
     cv2 = None
 
 
-@on_function_call("Capture a screenshot and return it as an image resource.")
+@on_function_call("Capture a screenshot and return it as an image resource.", read_only=True)
 async def capture_screenshot(context: ToolContext) -> str:
     """截取屏幕并将图片加入本次工具调用的资源。"""
     temp_dir = Path(gettempdir()) / "muika_screenshots"
@@ -55,6 +55,7 @@ class CaptureCameraPhotoParams(BaseModel):
 @on_function_call(
     "Capture a photo from the webcam and return it as an image resource.",
     params=CaptureCameraPhotoParams,
+    read_only=True,
 )
 async def capture_camera_photo(context: ToolContext, device_index: int = 0) -> str:
     """从指定摄像头拍照并附加图片资源。"""

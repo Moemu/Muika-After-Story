@@ -232,7 +232,9 @@ class AgentTasks:
         if removed:
             logger.info(f"[AgentTask] Cleaned {removed} expired scratch dir(s).")
 
-    async def submit(self, instruction: str, original_request: str, *, intention_id: str | None = None) -> TaskRecord:
+    async def submit(
+        self, instruction: str, original_request: str, *, intention_id: str | None = None, read_only: bool = False
+    ) -> TaskRecord:
         """保存新任务，执行工作由后台循环负责。"""
         await self.initialize()
         async with self._lock:
@@ -253,7 +255,12 @@ class AgentTasks:
                     intention = next((i for i in self.state.memory.persistent.intentions if i.id == intention_id), None)
                     if intention is None or intention.task_id is not None or intention.status != "open":
                         raise ValueError("The intention is missing, resolved or already linked to a task")
-            task = TaskRecord(instruction=instruction, original_request=original_request, intention_id=intention_id)
+            task = TaskRecord(
+                instruction=instruction,
+                original_request=original_request,
+                intention_id=intention_id,
+                read_only=read_only,
+            )
             await self._save(task)
             self.tasks[task.id] = task
             if intention_id and self.state.memory is not None:
@@ -403,6 +410,7 @@ class AgentTasks:
             request = self.agent.build_request(
                 f"{task.instruction}\n\nOriginal request:\n{task.original_request}\n\nAcceptance:\n{task.acceptance}",
                 self.state,
+                read_only=task.read_only,
             )
             if uncertain:
                 safe = {name for name, caller in get_function_calls().items() if caller.read_only}

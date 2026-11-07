@@ -46,7 +46,7 @@ class Agent:
         self.memory_reasoner.compactor.model = summarize_model
         model.compactor = self.memory_reasoner.compactor
 
-    def build_request(self, command: str, state: MuikaState | None = None) -> ModelRequest:
+    def build_request(self, command: str, state: MuikaState | None = None, *, read_only: bool = False) -> ModelRequest:
         """组装当前模板、技能、工具和实际运行环境。"""
         self.refresh_models()
         system = generate_prompt_from_template(mas_config.agent_template)
@@ -66,6 +66,6 @@ class Agent:
         return ModelRequest(
             prompt=f"Command: {command}",
             system=system,
-            tools=get_tool_list(mas_config.action_permission),
+            tools=get_tool_list("read_only" if read_only else mas_config.action_permission),
             purpose="agent_step",
         )

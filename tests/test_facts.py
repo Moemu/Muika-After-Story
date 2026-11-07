@@ -2,10 +2,18 @@
 
 from datetime import datetime, timedelta
 
-from muika.core.brain import build_fact_block
+from muika.core.brain import _humanize_gap, build_fact_block
 from muika.core.memory import MemoryManager
 from muika.core.memory_models import SessionTurn
 from muika.core.state import MuikaState
+
+
+def test_humanize_gap_boundaries() -> None:
+    assert _humanize_gap(2 * 3600 + 60) == "a couple of hours"
+    assert _humanize_gap(23 * 86400) == "about three weeks"
+    assert _humanize_gap(2 * 86400) == "a couple of days"
+    assert _humanize_gap(45 * 86400) == "more than a month"
+    assert _humanize_gap(5 * 60) == "a few minutes"
 
 
 def _memory(turns: list[SessionTurn]) -> MemoryManager:

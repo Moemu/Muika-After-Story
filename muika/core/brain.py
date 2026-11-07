@@ -42,18 +42,22 @@ def _humanize_gap(seconds: float) -> str:
     minutes = seconds / 60
     if minutes < 15:
         return "a few minutes"
-    if minutes < 120:
+    if minutes < 180:
         return "a couple of hours"
-    if minutes < 24 * 60:
+    if minutes < 300:
+        return "a few hours"
+    if minutes < 20 * 60:
         return "most of a day"
     days = seconds / 86400
     if days < 3:
         return "a couple of days"
-    if days < 10:
+    if days < 14:
         return f"about {int(round(days))} days"
     if days < 21:
         return "about two weeks"
-    if days < 45:
+    if days < 35:
+        return "about three weeks"
+    if days < 60:
         return "more than a month"
     return "several months"
 
@@ -235,6 +239,7 @@ class MuikaBrain:
             state=state,
             is_expand_topic=True,
             action_permission=mas_config.action_permission,
+            heartbeat_intensity=mas_config.heartbeat_intensity,
             memory_context=memory_context,
             time_tone_hint=time_tone_hint,
             adapters_info=self.generate_adapters_info(adapters),
@@ -246,10 +251,23 @@ class MuikaBrain:
             notes = f"Title: {topic.title}\nContent: {topic.content}"
         else:
             notes = topic.content
+        recent_agent = [turn.content for turn in memory.recent_turns if turn.role == "agent"][-2:]
+        investigation = (
+            "\n\nYour recent investigation results:\n" + "\n".join("- " + item[:400] for item in recent_agent)
+            if recent_agent
+            else ""
+        )
         prompt = (
             "A thought for a new proactive topic. The player has not read the source and cannot see these notes.\n\n"
             f"Reading notes:\n{notes}\n\n"
             "Use the notes as background. Introduce enough concrete context for the player to understand your own thought."
+            f"{investigation}\n\n"
+            "If you do not know enough to say something worth his time, you may ask your Agent to look it up first — "
+            "write <agent>what to check</agent>; the result will come back to you before you decide. "
+            "This investigation is read-only and stays invisible to him.\n\n"
+            "Before your visible reply, think privately in one <heart>...</heart> block as yourself: what this really "
+            "makes you think, whether he would care about it, and whether you know enough for it to be worth saying. "
+            "Then speak in your own voice, or choose <do_nothing> if it is not worth disturbing him."
         )
 
         request = ModelRequest(
@@ -386,14 +404,19 @@ class MuikaBrain:
             )
             if event.last_chat_time is not None and not memory.session.is_first_session:
                 gap = _humanize_gap((current_time - event.last_chat_time).total_seconds())
-                hers, his = await memory.absence_activity(event.last_chat_time, current_time)
-                absence_lines = [f"- You last heard from him about {gap} ago; this is background, not an opening line."]
+                activity = await memory.absence_activity(event.last_chat_time, current_time)
+                hers = his = None
+                if activity is not None:
+                    hers, his = activity
+                absence_lines = [f"- You last heard from him {gap} ago; this is background, not an opening line."]
                 if current_time.hour < 6 or current_time.hour >= 23:
                     absence_lines.append(
                         "- It is late at night for him; if the hour comes up, it may be out of concern — "
                         "you may ask what he is still doing up, or let it pass."
                     )
-                if hers:
+                if hers is None:
+                    absence_lines.append("- You cannot tell whether you spoke to him during the gap.")
+                elif hers:
                     absence_lines.append(f"- During that time you sent him {hers} message(s); he did not reply.")
                 else:
                     absence_lines.append("- During that time you did not speak to him again.")

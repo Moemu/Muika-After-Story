@@ -14,6 +14,9 @@ async def test_silence_is_recorded(core_app_factory):
 
     assert app.sent == []
     assert await app.muika.memory.silence_count() == 1
+    # 沉默的原始输出（含 <do_nothing>）必须回到上下文，下一轮才知道她为何沉默
+    last_turn = app.muika.memory.recent_turns[-1]
+    assert last_turn.role == "muika" and "<do_nothing>" in last_turn.content
     app.recorder.record("silence_recorded", count=1)
 
 
