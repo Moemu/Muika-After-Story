@@ -392,6 +392,7 @@ async def test_shutdown_waits_for_background_cleanup(engine):
 
 async def test_failed_memory_does_not_discard_following_silent_notes(engine):
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing><memory>first</memory><memory>second</memory>")
+    engine.memory.record_silence = AsyncMock()
     engine.memory.add_material = AsyncMock(side_effect=[RuntimeError("offline"), None])
     await engine._run_brain_pipeline(TimeTickEvent())
     await asyncio.gather(*list(engine._tasks))

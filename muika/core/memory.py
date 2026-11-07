@@ -757,7 +757,7 @@ class MemoryManager:
                 .where(
                     ExperienceORM.kind == "note",
                     ExperienceORM.occurred_at >= since,
-                    ExperienceORM.source.not_like("silence:%"),
+                    or_(ExperienceORM.source.is_(None), ExperienceORM.source.not_like("silence:%")),
                 )
                 .order_by(ExperienceORM.occurred_at.desc(), ExperienceORM.id.desc())
                 .limit(limit)
