@@ -242,6 +242,7 @@ class Muika:
         :param dt: 距上次循环的秒数
         """
         self._log_event(event)
+        previous_chat: datetime | None = None
         if event.type in {"user_message", "adapter_online"}:
             await self.agent_tasks.notify_pending()
         if isinstance(event, AgentTaskEvent):
@@ -278,6 +279,7 @@ class Muika:
         if event.type == "user_message":
             if event.payload.source and await self.memory.contains_source(event.payload.source):
                 return
+            previous_chat = self.memory.last_dialogue_at
             await self.memory.add_context(
                 "user",
                 event.payload.message.message,
@@ -343,7 +345,7 @@ class Muika:
                 await self._tick_idle(event, dt)
                 return
 
-        await self._run_brain_pipeline(event)
+        await self._run_brain_pipeline(event, last_chat_time=previous_chat)
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
         if self.after_activity is not None:
@@ -587,6 +589,8 @@ class Muika:
     async def _run_brain_pipeline(
         self,
         event: Event,
+        *,
+        last_chat_time: datetime | None = None,
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
         dispatcher = self.self_change
@@ -620,6 +624,7 @@ class Muika:
                     god_mode_pending=self._god_mode_pending,
                     resources=event.payload.message.resources if event.type == "user_message" else None,
                     task_context="\n".join(filter(None, (self.agent_tasks.describe(), self.restart.describe()))),
+                    last_chat_time=last_chat_time,
                 )
                 resources = context.resources
             if event.type == "time_tick" and (
@@ -642,7 +647,10 @@ class Muika:
                 logger.info("[Turn] silent (do_nothing)")
                 await self.memory.record_silence(event.type)
                 # 沉默也要保留她的原始输出（含 heart）：下一轮才知道自己为何沉默
-                await self.memory.add_context("muika", reply)
+                try:
+                    await self.memory.add_context("muika", reply)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[Turn] Silent reply not stored: {type(exc).__name__}")
             receipt: Optional[SendReceipt] = None
             if not silent_turn:
                 if parsed.clean_reply:

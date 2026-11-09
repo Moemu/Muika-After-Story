@@ -393,10 +393,13 @@ async def test_shutdown_waits_for_background_cleanup(engine):
 async def test_failed_memory_does_not_discard_following_silent_notes(engine):
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing><memory>first</memory><memory>second</memory>")
     engine.memory.record_silence = AsyncMock()
-    engine.memory.add_material = AsyncMock(side_effect=[RuntimeError("offline"), None])
+    # 第一次是沉默轮原始输出的回写（辅助行为），之后才是 memory 内容；
+    # 第 2 次（first）失败时，后续 second 不能被丢弃。
+    engine.memory.add_material = AsyncMock(side_effect=[None, RuntimeError("offline"), None])
     await engine._run_brain_pipeline(TimeTickEvent())
     await asyncio.gather(*list(engine._tasks))
-    assert [call.args[1] for call in engine.memory.add_material.await_args_list] == ["first", "second"]
+    contents = [call.args[1] for call in engine.memory.add_material.await_args_list]
+    assert contents[1:3] == ["first", "second"]
     engine.executor.send_message.assert_not_awaited()
 
 

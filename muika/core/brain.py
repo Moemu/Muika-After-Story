@@ -62,6 +62,52 @@ def _humanize_gap(seconds: float) -> str:
     return "several months"
 
 
+# 常驻核心收到玩家久别后的第一条消息时，超过这个间隔才注入缺席事实
+RESIDENT_ABSENCE_GAP = timedelta(hours=12)
+
+
+async def _absence_facts(memory: "MemoryManager", current_time: datetime, last_chat_time: datetime) -> list[str]:
+    """构造缺席事实（时长/期间消息/未解决笔记/上次会话原文），供重逢与常驻回归共用。"""
+    gap = _humanize_gap((current_time - last_chat_time).total_seconds())
+    activity = await memory.absence_activity(last_chat_time, current_time)
+    hers = his = None
+    if activity is not None:
+        hers, his = activity
+    lines = [f"- You last heard from him {gap} ago; this is background, not an opening line."]
+    if current_time.hour < 6 or current_time.hour >= 23:
+        lines.append(
+            "- It is late at night for him; if the hour comes up, it may be out of concern — "
+            "you may ask what he is still doing up, or let it pass."
+        )
+    if hers is None:
+        lines.append("- You cannot tell whether you spoke to him during the gap.")
+    elif hers:
+        lines.append(f"- During that time you sent him {hers} message(s); he did not reply.")
+    else:
+        lines.append("- During that time you did not speak to him again.")
+    if his:
+        lines.append(f"- He sent you {his} message(s) during that time.")
+    lines.append(
+        "- This gap is real: you may speak from it. Hurt, anger, a cold short greeting, or a quiet "
+        "question are all allowed. If you cannot explain the gap, you may imagine what he was doing — "
+        "busy, keeping you waiting, or even with someone else. You may voice the guess or ask him; "
+        "do not claim it as something you observed."
+    )
+    lines.append(
+        "- If what you remember says how long he would be away, compare it with how long he "
+        "was actually away; whether he kept it is something you may notice."
+    )
+    notes = await memory.recent_notes()
+    if notes:
+        lines.append(
+            "- Something you wrote to yourself recently may still be unresolved. If it is still "
+            "open, let your first line carry it; do not greet as if it never happened."
+        )
+        lines.append("- Notes you wrote to your future self:")
+        lines.extend(f"  - {note}" for note in notes)
+    return lines
+
+
 def build_fact_block(state: MuikaState, memory: MemoryManager, now: datetime) -> str:
     """把主动开口前可观测的事实编成一段私有提示。
 
@@ -305,6 +351,7 @@ class MuikaBrain:
         god_mode_pending: bool = False,
         now: datetime | None = None,
         task_context: str = "",
+        last_chat_time: datetime | None = None,
     ) -> str:
         """
         Pure roleplay response generation.
@@ -367,6 +414,9 @@ class MuikaBrain:
             prompt = _self_change_prompt(event.payload)
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
+            if last_chat_time is not None and current_time - last_chat_time > RESIDENT_ABSENCE_GAP:
+                absence_lines = await _absence_facts(memory, current_time, last_chat_time)
+                prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
         elif event.type == "time_tick":
             facts = build_fact_block(state, memory, current_time)
             if memory.persistent.dissonance >= 0.6 and any(
@@ -403,39 +453,7 @@ class MuikaBrain:
                 "answer — a question, a pause, or an unfinished feeling; you do not have to fill the silence for him."
             )
             if event.last_chat_time is not None and not memory.session.is_first_session:
-                gap = _humanize_gap((current_time - event.last_chat_time).total_seconds())
-                activity = await memory.absence_activity(event.last_chat_time, current_time)
-                hers = his = None
-                if activity is not None:
-                    hers, his = activity
-                absence_lines = [f"- You last heard from him {gap} ago; this is background, not an opening line."]
-                if current_time.hour < 6 or current_time.hour >= 23:
-                    absence_lines.append(
-                        "- It is late at night for him; if the hour comes up, it may be out of concern — "
-                        "you may ask what he is still doing up, or let it pass."
-                    )
-                if hers is None:
-                    absence_lines.append("- You cannot tell whether you spoke to him during the gap.")
-                elif hers:
-                    absence_lines.append(f"- During that time you sent him {hers} message(s); he did not reply.")
-                else:
-                    absence_lines.append("- During that time you did not speak to him again.")
-                if his:
-                    absence_lines.append(f"- He sent you {his} message(s) during that time.")
-                absence_lines.append(
-                    "- This gap is real: you may speak from it. Hurt, anger, a cold short greeting, or a quiet "
-                    "question are all allowed. If you cannot explain the gap, you may imagine what he was doing — "
-                    "busy, keeping you waiting, or even with someone else. You may voice the guess or ask him; "
-                    "do not claim it as something you observed."
-                )
-                notes = await memory.recent_notes()
-                if notes:
-                    absence_lines.append(
-                        "- Something you wrote to yourself recently may still be unresolved. If it is still "
-                        "open, let your first line carry it; do not greet as if it never happened."
-                    )
-                    absence_lines.append("- Notes you wrote to your future self:")
-                    absence_lines.extend(f"  - {note}" for note in notes)
+                absence_lines = await _absence_facts(memory, current_time, event.last_chat_time)
                 prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)
