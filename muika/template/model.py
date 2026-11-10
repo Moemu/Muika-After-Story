@@ -19,6 +19,8 @@ class PromptTemplatesData(BaseModel):
 
     is_chat: bool = False
     """当前为对话模式"""
+    enable_agent: bool = True
+    """是否通过行动半身执行任务。"""
     action_permission: str = "write"
     """行动权限，用于模板按权限渲染自我修改能力。"""
     is_first_session: bool = False

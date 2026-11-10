@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from muika.config import mas_config
 from muika.models import AdapterInfo
 from muika.plugin.func_call.context import tool_context
 from muika.utils.logger import logger
@@ -570,7 +571,12 @@ class Muika:
                     god_mode=self._god_mode,
                     god_mode_pending=self._god_mode_pending,
                     resources=event.payload.message.resources if event.type == "user_message" else None,
-                    task_context="\n".join(filter(None, (self.agent_tasks.describe(), self.restart.describe()))),
+                    task_context="\n".join(
+                        filter(
+                            None,
+                            (self.agent_tasks.describe() if mas_config.enable_agent else "", self.restart.describe()),
+                        )
+                    ),
                 )
                 resources = context.resources
             if event.type == "time_tick" and (
@@ -612,6 +618,10 @@ class Muika:
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
         if not silent_turn:
+            if not mas_config.enable_agent:
+                parsed.agent_controls.clear()
+                parsed.agent_commands.clear()
+                parsed.god_mode = False
             for control in parsed.agent_controls:
                 try:
                     if control.action == "complete":
@@ -712,7 +722,8 @@ class Muika:
             self._stopped = False
         logger.info("Muika is waking up...")
         self.is_alive = True
-        self.start_background_task(self.agent_tasks.run())
+        if mas_config.enable_agent:
+            self.start_background_task(self.agent_tasks.run())
         self.start_background_task(self.loop())
         self._reflection_task = self.start_background_task(self.reflection.run_daily())
         if self.self_change is not None:

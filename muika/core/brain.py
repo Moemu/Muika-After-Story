@@ -182,6 +182,7 @@ class MuikaBrain:
             event_type="",
             state=state,
             is_expand_topic=True,
+            enable_agent=mas_config.enable_agent,
             action_permission=mas_config.action_permission,
             memory_context=memory_context,
             time_tone_hint=time_tone_hint,
@@ -254,6 +255,7 @@ class MuikaBrain:
             event_type=event.type,
             state=state,
             is_chat=True,
+            enable_agent=mas_config.enable_agent,
             action_permission=mas_config.action_permission,
             heartbeat_intensity=get_model_config_manager().heart_intensity,
             memory_context=memory_context,
@@ -310,7 +312,7 @@ class MuikaBrain:
             elif state.mood == "bored":
                 prompt = (
                     "[System] A quiet moment passed, but the boredom persists. "
-                    "Perhaps you can actively explore the user's computer or let your Agent alter-ego fetch some news"
+                    "Perhaps you can actively explore the user's computer or fetch some news"
                 )
             else:
                 prompt = "[System] A quiet moment passed."
@@ -347,7 +349,7 @@ class MuikaBrain:
                 "\nUse these references for relevant action control. They are not dialogue topics. "
                 "Background work can continue while you keep the player company."
             )
-        if god_mode:
+        if god_mode and mas_config.enable_agent:
             prompt += (
                 "\n[Direct action handoff]\n"
                 "Direct tools are available for this task. Use the saved task state, inspect files before changing them, "
@@ -357,7 +359,7 @@ class MuikaBrain:
                 'If you cannot finish, use status="blocked". To return the work to your acting half, use action="continue". '
                 "Completing or returning the handoff releases direct control so queued tasks can proceed."
             )
-        elif god_mode_pending:
+        elif god_mode_pending and mas_config.enable_agent:
             prompt += (
                 "\n[Direct action request]\n"
                 "You asked to take over the current task. Wait for the handoff event before claiming you have taken over; "
@@ -376,7 +378,7 @@ class MuikaBrain:
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
         system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
-        tools = get_tool_list() if god_mode else None
+        tools = get_tool_list() if god_mode or not mas_config.enable_agent else None
         request = ModelRequest(
             prompt=prompt,
             system=system_prompt,

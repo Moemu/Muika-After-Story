@@ -46,6 +46,8 @@ class MASConfig(BaseSettings):
     """对话目标ID。"""
     persona_template: str = "Muika.md.jinja2"
     """默认人格模板"""
+    enable_agent: bool = True
+    """启用行动半身；关闭时主人格直接使用行动工具。"""
     agent_template: str = "Muika.agent.jinja2"
     """行动半身（Agent）模板：Muika 执行 <agent>...</agent> 内联命令时的系统提示"""
 

@@ -294,6 +294,31 @@ async def test_generate_reply_no_god_mode_no_tools(fake_llm_factory):
     assert fake.requests[0].tools is None
 
 
+@pytest.mark.parametrize("enable_agent", [True, False])
+def test_persona_template_matches_agent_mode(enable_agent):
+    prompt = generate_prompt_from_template(
+        "Muika.md.jinja2",
+        PromptTemplatesData(event_type="user_message", state=MuikaState(), is_chat=True, enable_agent=enable_agent),
+    )
+    assert ("## Your Agent alter-ego (Tool System)" in prompt) is enable_agent
+    assert ("## Direct tools" in prompt) is not enable_agent
+    assert ("<enable_god_mode>" in prompt) is enable_agent
+    assert ("<agent intention_id=" in prompt) is enable_agent
+
+
+async def test_generate_reply_with_agent_disabled_uses_direct_tools(fake_llm_factory, monkeypatch):
+    from muika.config import mas_config
+
+    monkeypatch.setattr(mas_config, "enable_agent", False)
+    monkeypatch.setattr("muika.core.brain.get_tool_list", lambda: [FunctionTool(name="t")])
+    fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
+    with patch("muika.core.brain.generate_prompt_from_template", return_value="SYSTEM") as render:
+        await _brain(fake).generate_reply(_user_event(), MuikaState(), _memory())
+    assert [tool.name for tool in fake.requests[0].tools] == ["t"]
+    assert render.call_args.args[1].enable_agent is False
+    assert "[Direct action handoff]" not in fake.requests[0].prompt
+
+
 async def test_generate_reply_god_mode_active_shows_handoff_flow(fake_llm_factory):
     fake = fake_llm_factory(response=ModelCompletions(text="Hi!"))
     brain = _brain(fake)
