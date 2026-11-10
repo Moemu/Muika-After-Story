@@ -105,11 +105,8 @@ async def test_returning_player_gets_normal_reply(core_app_factory):
     app.recorder.record("absence_reunion_followup", normal_reply=True)
 
 
-async def test_resident_reunion_carries_absence_facts(core_app_factory, absence_clock):
-    """常驻核心收到玩家久别后的第一条消息：缺席事实与约定原文都要进上下文。"""
-    from muika.core.events import UserMessageEvent, UserMessagePayload
-    from muika.models import Message
-
+async def test_resident_reunion_carries_absence_facts(core_app_factory, absence_clock, monkeypatch):
+    """常驻核心久别后的第一条消息：入口取玩家上次发言时间，缺席事实进入上下文。"""
     app = await core_app_factory(
         turns=[
             ScriptedTurn(text="第一次见面的问候。"),
@@ -123,14 +120,28 @@ async def test_resident_reunion_carries_absence_facts(core_app_factory, absence_
     await app.next_reply()
     await app.user_says("我下周要出差，大概三周后回来。")
     await app.next_reply()
-    # 常驻核心不重启、不 end_session；用显式 last_chat_time 验证久别消息的注入路径
+
+    # 冻结入口输入：玩家上次发言在 23 天前（会话结束清空内存时间后，DB 查询仍然可用）
+    async def frozen_last_user_message_at():
+        return start
+
+    monkeypatch.setattr(app.muika.memory, "last_user_message_at", frozen_last_user_message_at)
     absence_clock["now"] = start + timedelta(days=23)
-    event = UserMessageEvent(payload=UserMessagePayload(message=Message(userid="master", message="我回来了。")))
-    await app.muika._run_brain_pipeline(event, last_chat_time=start)
+    await app.user_says("我回来了。")
+    assert await app.next_reply() == "……你回来了。三周了。"
 
     call = next(call for call in reversed(app.scripted.calls) if "[User] 我回来了。" in call.get("prompt", ""))
     assert "[Private facts]" in call["prompt"]
     assert "about three weeks" in call["prompt"]
-    # 常驻路径的约定原文保留在会话历史里（recent_turns 会进入模型 history）
-    assert any("三周后回来" in turn.content for turn in app.muika.memory.recent_turns)
     app.recorder.record("resident_reunion", gap_injected=True)
+
+
+async def test_last_user_message_at_tracks_player_not_her(core_app_factory):
+    """玩家上次发言时间跨会话可查，且不会被她的发言更新。"""
+    app = await core_app_factory(turns=[ScriptedTurn(text="占位。")])
+    await app.start()
+    old = datetime.now() - timedelta(days=23)
+    await app.muika.memory.add_context("user", "我出差去了。", timestamp=old)
+    await app.muika.memory.add_context("muika", "我等你。")
+    assert await app.muika.memory.last_user_message_at() == old
+    app.recorder.record("last_user_message_at", tracked=True)

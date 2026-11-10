@@ -279,7 +279,9 @@ class Muika:
         if event.type == "user_message":
             if event.payload.source and await self.memory.contains_source(event.payload.source):
                 return
-            previous_chat = self.memory.last_dialogue_at
+            # 常驻核心的久别判定要取"玩家上次发言"（DB 跨会话）；
+            # memory.last_dialogue_at 会被会话结束清空、也会被她自己的发言更新。
+            previous_chat = await self.memory.last_user_message_at()
             await self.memory.add_context(
                 "user",
                 event.payload.message.message,

@@ -742,6 +742,12 @@ class MemoryManager:
             )
         return int(hers or 0), int(his or 0)
 
+    async def last_user_message_at(self) -> datetime | None:
+        """返回玩家最近一条消息的时间（跨会话，含已结束的会话）。"""
+        async with get_session(record_activity=False) as db:
+            stamp = await db.scalar(select(func.max(ExperienceORM.occurred_at)).where(ExperienceORM.kind == "user"))
+        return local_time(stamp) if stamp else None
+
     async def recent_notes(self, limit: int = 2, days: int = 14) -> list[str]:
         """返回最近她在 <memory> 里写给自己的笔记（截断），用于跨会话的情绪残留。"""
         try:
