@@ -5,7 +5,22 @@ from jinja2 import TemplateNotFound
 
 from muika.config import mas_config
 from muika.core.actions.tools._self_edit import persona_switch
+from muika.core.state import MuikaState
 from muika.template import loader
+from muika.template.model import PromptTemplatesData
+
+
+def test_prompt_renders_current_derived_mood(tmp_path: Path, monkeypatch):
+    (tmp_path / "mood.jinja2").write_text("Mood: {{ state.mood }}", encoding="utf-8")
+    monkeypatch.setattr(loader, "SEARCH_PATH", [tmp_path])
+    state = MuikaState(loneliness=0.9, boredom=0.9)
+    data = PromptTemplatesData(event_type="user_message", state=state, is_chat=True)
+
+    assert loader.generate_prompt_from_template("mood.jinja2", data) == "Mood: lonely"
+    state.loneliness = 0.0
+    assert loader.generate_prompt_from_template("mood.jinja2", data) == "Mood: bored"
+    state.boredom = 0.0
+    assert loader.generate_prompt_from_template("mood.jinja2", data) == "Mood: calm"
 
 
 def test_missing_template_raises(tmp_path: Path, monkeypatch):

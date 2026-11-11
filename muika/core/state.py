@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 from .memory import MemoryManager
 
@@ -82,6 +82,7 @@ class MuikaState:
         self.last_interaction, self.last_proactive_at = rhythm.last_interaction, rhythm.last_proactive_at
         self.active_topic = rhythm.active_topic
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def mood(self) -> str:
         """情绪（派生属性）：依据孤独感/无聊感阈值实时计算，不存储。
