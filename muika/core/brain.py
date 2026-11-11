@@ -185,11 +185,11 @@ class MuikaBrain:
             enable_agent=mas_config.enable_agent,
             action_permission=mas_config.action_permission,
             memory_context=memory_context,
+            recent_intentions=memory.persistent.describe(),
             time_tone_hint=time_tone_hint,
             adapters_info=self.generate_adapters_info(adapters),
         )
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
-        system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
         if isinstance(topic, EventTopic):
             notes = f"Title: {topic.title}\nContent: {topic.content}"
@@ -259,6 +259,7 @@ class MuikaBrain:
             action_permission=mas_config.action_permission,
             heartbeat_intensity=get_model_config_manager().heart_intensity,
             memory_context=memory_context,
+            recent_intentions=memory.persistent.describe(),
             adapters_info=self.generate_adapters_info(adapters, now=current_time),
         )
 
@@ -376,7 +377,6 @@ class MuikaBrain:
                     history.pop()
 
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
-        system_prompt += "\n[Lasting state, separate from immediate drives]\n" + memory.persistent.describe()
 
         tools = get_tool_list() if god_mode or not mas_config.enable_agent else None
         request = ModelRequest(

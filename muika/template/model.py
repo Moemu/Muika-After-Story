@@ -31,6 +31,8 @@ class PromptTemplatesData(BaseModel):
     """内心独白（Heart）强度等级，决定模板渲染哪一段思考指示"""
     memory_context: Optional[str] = None
     """记忆内容"""
+    recent_intentions: Optional[str] = None
+    """最近的意图/持续的状态"""
 
     lonely_desc: Optional[str] = None
     focus_desc: Optional[str] = None
