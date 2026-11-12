@@ -1,4 +1,4 @@
-"""MASConfig 的旧字段迁移与联网搜索配置默认值。"""
+"""MASConfig 的旧字段迁移与模型配置校验。"""
 
 import pytest
 from pydantic import ValidationError
@@ -31,12 +31,6 @@ def test_explicit_proxy_wins_over_legacy(monkeypatch):
     config = _make(proxy="http://new:7890", telegram_proxy="http://old:7890")
     assert config.proxy == "http://new:7890"
     assert "telegram_proxy" not in config.model_dump()
-
-
-def test_web_search_disabled_by_default():
-    config = _make()
-    assert config.web_search_provider is None
-    assert config.web_search_api_key == ""
 
 
 @pytest.mark.parametrize(

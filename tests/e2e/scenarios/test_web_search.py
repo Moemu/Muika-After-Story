@@ -1,16 +1,18 @@
 """联网搜索真实性：Agent 通过真实管线调用 web_search，结果回到她的可见回复。"""
 
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
-from muika.core.actions.tools import _search
-from muika.core.actions.tools._search import SearchResult
 from muika.core.agent.task_store import TaskStore
 from muika.llm import ModelRequest
 from muika.llm._schema import ToolCall
+
+if TYPE_CHECKING:
+    from muika.builtin_plugins.web_search import SearchResult
 
 pytestmark = pytest.mark.e2e
 
@@ -23,13 +25,13 @@ def _is_agent_request(request: ModelRequest) -> bool:
     return bool(request.tools)
 
 
-async def test_agent_web_search_is_grounded_and_recorded(core_app_factory, recorder, monkeypatch):
+async def test_agent_web_search_is_grounded_and_recorded(core_app_factory, recorder, monkeypatch, web_search_plugin):
     calls: list[tuple[str, str | None]] = []
 
-    async def fake_tavily(query: str, time_range: str | None) -> list[SearchResult]:
+    async def fake_tavily(query: str, time_range: str | None) -> list["SearchResult"]:
         calls.append((query, time_range))
         return [
-            SearchResult(
+            web_search_plugin.SearchResult(
                 title="MAS release",
                 url=RELEASE_URL,
                 snippet=RELEASE_NOTE,
@@ -38,9 +40,9 @@ async def test_agent_web_search_is_grounded_and_recorded(core_app_factory, recor
         ]
 
     monkeypatch.setattr(mas_config, "action_permission", "write")
-    monkeypatch.setattr(mas_config, "web_search_provider", "tavily")
-    monkeypatch.setattr(mas_config, "web_search_api_key", "test-key")
-    monkeypatch.setitem(_search.SEARCH_BACKENDS, "tavily", fake_tavily)
+    monkeypatch.setattr(web_search_plugin.plugin_config, "provider", "tavily")
+    monkeypatch.setattr(web_search_plugin.plugin_config, "api_key", "test-key")
+    monkeypatch.setitem(web_search_plugin.SEARCH_BACKENDS, "tavily", fake_tavily)
 
     app = await core_app_factory(
         turns=[
@@ -118,10 +120,12 @@ async def test_agent_web_search_is_grounded_and_recorded(core_app_factory, recor
     assert app.scripted.pending_turns == 0
 
 
-async def test_unconfigured_web_search_reports_unavailability(core_app_factory, recorder, monkeypatch):
+async def test_unconfigured_web_search_reports_unavailability(
+    core_app_factory, recorder, monkeypatch, web_search_plugin
+):
     monkeypatch.setattr(mas_config, "action_permission", "write")
-    monkeypatch.setattr(mas_config, "web_search_provider", "")
-    monkeypatch.setattr(mas_config, "web_search_api_key", "")
+    monkeypatch.setattr(web_search_plugin.plugin_config, "provider", None)
+    monkeypatch.setattr(web_search_plugin.plugin_config, "api_key", "")
 
     app = await core_app_factory(
         turns=[

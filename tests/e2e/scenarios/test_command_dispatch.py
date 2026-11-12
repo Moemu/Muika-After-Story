@@ -48,6 +48,7 @@ async def test_command_dispatch_bypasses_llm(core_app_factory, builtin_plugins):
 
     await app.say_command(".plugins")
     assert "muika_builtin_commands (muika.builtin_plugins.commands) [builtin]" in app.command_replies[-1]
+    assert "web_search (muika.builtin_plugins.web_search) [builtin] — cmds: 0, tools: 1" in app.command_replies[-1]
 
     reload_plugin("muika.builtin_plugins.commands")
     await app.say_command(".help")

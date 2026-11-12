@@ -79,10 +79,6 @@ class MASConfig(BaseSettings):
     proxy: Optional[str] = None
     """通用出站代理地址（如 ``http://127.0.0.1:7890``）。Core 的联网工具与 Bot 文件下载会经过它；
     LLM 供应商 SDK 流量不在此列，继续遵循标准 HTTP_PROXY/HTTPS_PROXY 环境变量。"""
-    web_search_provider: Optional[Literal["tavily", "perplexity"]] = None
-    """联网搜索后端：``tavily`` 或 ``perplexity``。留空时 web_search 工具不可用。"""
-    web_search_api_key: str = ""
-    """联网搜索后端的 API 密钥。"""
     client_name: str = ""
     """适配器唯一名称。用于多适配器场景下标识当前 Bot 实例的身份。
     例如 ``"qq-desktop"``, ``"qq-phone"``。留空时自动分配。"""

@@ -34,6 +34,15 @@ def sandbox(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def web_search_plugin():
+    from muika.plugin.loader import load_plugin, unload_plugin
+
+    plugin = load_plugin("muika.builtin_plugins.web_search")
+    yield plugin.module
+    unload_plugin(plugin.package_name)
+
+
+@pytest.fixture
 def daytime_initiative(monkeypatch):
     """将非时段场景的主动开场判断固定在本地正午。"""
     from muika.core.memory import MemoryManager
