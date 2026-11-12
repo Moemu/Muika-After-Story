@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +12,7 @@ class BotConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     master_id: str = ""
-    """主人账号 ID，用于校验消息来源和指定回复目标。留空时从 superusers 中选择。"""
+    """主人账号 ID；留空时沿用 NoneBot 的超级用户隐式回退。"""
     core_ws_url: str = "ws://127.0.0.1:8765/ws"
     """Core 或 Gateway 的 Bot WebSocket 地址，使用 /ws 路径。"""
     core_fallback_urls: list[str] = Field(default_factory=list)
@@ -33,13 +33,6 @@ class BotConfig(BaseSettings):
     """控制台日志等级。文件日志固定记录 DEBUG 及以上等级。"""
     mas_log_only: bool = False
     """控制台是否仅输出 muika 命名空间的日志。文件日志不受此选项限制。"""
-
-    @field_validator("master_id")
-    def validate_master_id(cls, v):
-        if v:
-            return v
-
-        raise ValueError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
 
 
 bot_config = BotConfig()

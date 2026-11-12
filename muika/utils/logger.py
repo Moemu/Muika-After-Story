@@ -7,36 +7,17 @@ from __future__ import annotations
 import os
 import sys
 import time
-from typing import TYPE_CHECKING
 
 from loguru import logger
-
-if TYPE_CHECKING:
-    from loguru import Record
 
 _initialized = False
 
 
-def _mas_filter(record: "Record") -> bool:
-    """仅输出 MAS 相关日志（当 mas_config.mas_log_only 为 True 时抑制非 muika 命名空间的日志）"""
-    # 懒加载以避免与 config.py 的循环导入
-    from ..config import mas_config
-
-    if mas_config.mas_log_only:
-        if record["name"] is None or not record["name"].startswith("muika"):
-            return False
-    return True
-
-
-def init_logger():
+def init_logger(log_level: str, mas_log_only: bool) -> None:
+    """使用当前进程的日志等级和命名空间过滤设置初始化日志。"""
     global _initialized
     if _initialized:
         return
-
-    # 懒加载以避免与 config.py 的循环导入
-    from ..config import mas_config
-
-    console_handler_level = mas_config.log_level
 
     log_dir = "logs"
     if not os.path.exists(log_dir):
@@ -51,10 +32,10 @@ def init_logger():
     # 添加控制台处理器
     logger.add(
         sys.stdout,
-        level=console_handler_level,
+        level=log_level,
         diagnose=True,
         format="<lvl>[{level}] {name}: {message}</lvl>",
-        filter=_mas_filter,
+        filter=lambda record: not mas_log_only or (record["name"] or "").startswith("muika"),
         colorize=True,
     )
 

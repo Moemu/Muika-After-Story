@@ -40,6 +40,7 @@ except ValueError as error:
 for adapter in enable_adapters:
     load_specified_adapter(driver, adapter)
 
-nonebot.load_plugin("muika_bot")
+if nonebot.load_plugin("muika_bot") is None:
+    raise SystemExit("Failed to load Muika bot plugin. Check the configuration and startup errors above.")
 
 nonebot.run()

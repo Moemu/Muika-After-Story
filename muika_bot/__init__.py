@@ -37,6 +37,6 @@ if not bot_config.master_id and _driver.config.superusers:
 if not bot_config.master_id:
     raise ValueError("Set MASTER_ID to select the player account.")
 
-init_logger()
+init_logger(bot_config.log_level, bot_config.mas_log_only)
 
 from . import handlers  # noqa: E402, F401
