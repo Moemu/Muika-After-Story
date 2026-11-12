@@ -5,9 +5,7 @@ from arclet.alconna import Alconna, Args, Subcommand
 from muika.core.code_review import get_code_reviewer
 from muika.core.loop import Muika
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
 
-metadata = PluginMetadata(name="review", description="查看和处理代码审批", usage=".review <list|show|approve|deny>")
 review_cmd = on_alconna(
     Alconna(
         "review",

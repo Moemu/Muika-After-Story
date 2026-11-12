@@ -5,13 +5,6 @@ from arclet.alconna import Alconna, CommandMeta, Subcommand
 from muika.core.events import SessionEndEvent
 from muika.core.loop import Muika
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="session",
-    description="Muika 会话管理",
-    usage=".session <new|summarize> / .new / .clear",
-)
 
 # .session 命令
 session_cmd = on_alconna(

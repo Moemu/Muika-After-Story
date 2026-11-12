@@ -4,9 +4,7 @@ from arclet.alconna import Alconna
 
 from muika.core.loop import Muika
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
 
-metadata = PluginMetadata(name="restart", description="保存行动进度并重启 Core", usage=".restart")
 restart_cmd = on_alconna(Alconna("restart"))
 
 

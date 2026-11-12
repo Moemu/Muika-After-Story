@@ -7,13 +7,6 @@ from arclet.alconna import Alconna, Args, Subcommand
 from muika.core.loop import Muika
 from muika.core.state import MuikaState
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="debug",
-    description="Muika 调试命令",
-    usage=".debug <topic|state|state-set|topic-reset>",
-)
 
 # 从 MuikaState 动态推导可修改的字段，避免新增字段后需要手动同步
 _FLOAT_FIELDS: set[str] = set()

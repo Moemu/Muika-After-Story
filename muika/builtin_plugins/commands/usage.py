@@ -7,13 +7,6 @@ from muika.database.crud import UsageORM
 from muika.database.db import get_session
 from muika.llm import Usage
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="usage",
-    description="查看 Token 用量统计",
-    usage=".usage [today|week|total]",
-)
 
 alc = Alconna("usage", Args["period?", str])
 usage_cmd = on_alconna(alc)

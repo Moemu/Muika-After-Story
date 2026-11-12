@@ -4,13 +4,6 @@ from arclet.alconna import Alconna, Args
 
 from muika.config import get_model_config_manager
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="heart",
-    description="Heart 内心独白强度控制",
-    usage=".heart [low|medium|high|off]",
-)
 
 alc = Alconna("heart", Args["level?", str])
 heart_cmd = on_alconna(alc)

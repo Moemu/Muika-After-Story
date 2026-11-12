@@ -412,7 +412,7 @@ def test_classify_change_rejects_dotdot_paths():
 
 
 def test_patch_rollback_requests_restart_with_shared_trigger(monkeypatch):
-    from muika.builtin_plugins import patch as patch_plugin
+    from muika.builtin_plugins.commands import patch as patch_plugin
     from muika.core.restart import RestartController
 
     manager = SimpleNamespace(request_rollback=AsyncMock(return_value="20261025_000000_00000042"))
@@ -430,7 +430,7 @@ def test_patch_rollback_requests_restart_with_shared_trigger(monkeypatch):
 
 
 def test_patch_restart_without_supervisor_returns_message_and_sends_nothing():
-    from muika.builtin_plugins import patch as patch_plugin
+    from muika.builtin_plugins.commands import patch as patch_plugin
     from muika.core.restart import RestartController
 
     send = AsyncMock()
@@ -443,7 +443,7 @@ def test_patch_restart_without_supervisor_returns_message_and_sends_nothing():
 
 
 def test_patch_restart_reports_error_without_false_promise():
-    from muika.builtin_plugins import patch as patch_plugin
+    from muika.builtin_plugins.commands import patch as patch_plugin
     from muika.core.restart import RestartController
 
     controller = RestartController()

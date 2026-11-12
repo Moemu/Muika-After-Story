@@ -18,7 +18,7 @@ from muika.ipc.sync_store import SyncStore
 from muika.llm._wrapper import record_plugin_usage
 from muika.models import AdapterInfo
 from muika.plugin.command import on_alconna
-from muika.plugin.loader import load_plugins, unload_plugin
+from muika.plugin.loader import load_plugins, reload_plugin, unload_plugin
 from tests.e2e.harness import ScriptedTurn
 from tests.e2e.harness.scripted_llm import ScriptedLLM
 
@@ -44,6 +44,14 @@ async def test_command_dispatch_bypasses_llm(core_app_factory, builtin_plugins):
     await app.say_command(".help")
     assert app.command_replies[0].startswith("可用命令:")
     assert ".session" in app.command_replies[0]
+    help_text = app.command_replies[0]
+
+    await app.say_command(".plugins")
+    assert "muika_builtin_commands (muika.builtin_plugins.commands) [builtin]" in app.command_replies[-1]
+
+    reload_plugin("muika.builtin_plugins.commands")
+    await app.say_command(".help")
+    assert app.command_replies[-1] == help_text
 
     # 未匹配命令走兜底回复
     await app.say_command(".definitely_not_a_command")
