@@ -29,6 +29,7 @@ def sandbox(tmp_path, monkeypatch):
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(mas_config, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(mas_config, "enable_agent", True)
     yield
 
 

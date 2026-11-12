@@ -1,75 +1,47 @@
-"""``Executor._split_message`` 切分算法与 ``send_message`` 发送行为测试。"""
+"""验证消息分段投递、资源携带和传输回执。"""
 
 import asyncio
-from unittest.mock import AsyncMock
 
 import pytest
 
 from muika.core.executor import Executor, SendReceipt
-
-# ---------------------------------------------------------------------------
-# _split_message —— 纯静态方法
-# ---------------------------------------------------------------------------
+from muika.models import Resource
 
 
-def test_split_paragraphs_stay_separate():
-    assert Executor._split_message("a\n\nb") == ["a", "b"]
-
-
-def test_split_merges_sentences_greedily():
-    result = Executor._split_message("A。B。C。D。E。F。G。", 10)
-    assert result == ["A。B。C。D。E。", "F。G。"]
-
-
-def test_split_oversized_segment_hard_split():
-    content = "x" * 600
-    result = Executor._split_message(content, 250)
-    assert result == ["x" * 250, "x" * 250, "x" * 100]
-
-
-# ---------------------------------------------------------------------------
-# send_message —— 通过假 send_func 观察分段与资源携带
-# ---------------------------------------------------------------------------
-
-
-async def test_send_message_strips_and_delivers(monkeypatch):
+@pytest.mark.parametrize(
+    ("message", "segments"),
+    [
+        pytest.param("  hello  ", ["hello"], id="strip"),
+        pytest.param(("a" * 89 + "。") * 3, [("a" * 89 + "。") * 2, "a" * 89 + "。"], id="sentences"),
+        pytest.param("x" * 600, ["x" * 250, "x" * 250, "x" * 100], id="hard-split"),
+        pytest.param("", [""], id="empty"),
+    ],
+)
+async def test_send_message_delivers_segments(monkeypatch, message, segments):
     sent = []
 
     async def send_func(msg, resources, target):
         sent.append((msg, resources, target))
 
     executor = Executor(asyncio.Queue(), send_func)
-    monkeypatch.setattr("muika.core.executor.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("muika.core.executor.DELAYED_SECOND_PER_PARAGRAPH", 0)
 
-    await executor.send_message("  hello  ")
-    assert len(sent) == 1
-    assert sent[0] == ("hello", None, None)
+    await executor.send_message(message)
+    assert sent == [(segment, None, None) for segment in segments]
 
 
 async def test_send_message_resources_only_last_segment(monkeypatch):
     sent = []
-
-    async def send_func(msg, resources, target):
-        sent.append(resources)
-
-    executor = Executor(asyncio.Queue(), send_func)
-    monkeypatch.setattr("muika.core.executor.asyncio.sleep", AsyncMock())
-
-    await executor.send_message("a\n\nb", resources=["r1"])
-    assert sent == [None, ["r1"]]
-
-
-async def test_send_message_empty_uses_single_segment(monkeypatch):
-    sent = []
+    resources = [Resource(type="image", path="render.png", mimetype="image/png")]
 
     async def send_func(msg, resources, target):
         sent.append((msg, resources, target))
 
     executor = Executor(asyncio.Queue(), send_func)
-    monkeypatch.setattr("muika.core.executor.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("muika.core.executor.DELAYED_SECOND_PER_PARAGRAPH", 0)
 
-    await executor.send_message("")
-    assert sent == [("", None, None)]
+    await executor.send_message("a\n\nb", resources=resources, target="qq")
+    assert sent == [("a", None, "qq"), ("b", resources, "qq")]
 
 
 @pytest.mark.parametrize(
@@ -92,7 +64,7 @@ async def test_send_message_aggregates_segment_receipts(monkeypatch, receipts, e
         return next(deliveries)
 
     executor = Executor(asyncio.Queue(), send_func)
-    monkeypatch.setattr("muika.core.executor.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("muika.core.executor.DELAYED_SECOND_PER_PARAGRAPH", 0)
 
     message = "\n\n".join(f"segment {index}" for index in range(len(receipts)))
     assert await executor.send_message(message) is expected

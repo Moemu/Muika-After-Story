@@ -38,7 +38,7 @@ def test_search_config_defaults_and_dotenv(web_search_plugin, monkeypatch, tmp_p
             "_TAVILY_ENDPOINT",
             "week",
             {"query": "release news", "max_results": 5, "time_range": "week"},
-            {"content": "Search summary", "published_date": "2026-11-12"},
+            {"content": "  Search   summary \n ", "published_date": "2026-11-12"},
         ),
         (
             "perplexity",

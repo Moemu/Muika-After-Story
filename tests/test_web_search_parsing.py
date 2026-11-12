@@ -3,38 +3,6 @@
 import pytest
 
 
-def test_tavily_response_maps_normalized_fields(web_search_plugin):
-    data = {
-        "results": [
-            {
-                "title": "Example",
-                "url": "https://example.com/a",
-                "content": "  hello   world \n next  ",
-                "score": 0.9,
-                "published_date": "2026-09-01",
-            }
-        ]
-    }
-    assert web_search_plugin._parse_tavily_response(data) == [
-        web_search_plugin.SearchResult(
-            title="Example", url="https://example.com/a", snippet="hello world next", date="2026-09-01"
-        )
-    ]
-
-
-def test_perplexity_response_maps_normalized_fields(web_search_plugin):
-    data = {
-        "results": [
-            {"title": "Example", "url": "https://example.com/b", "snippet": "snippet text", "date": "2026-09-27"}
-        ]
-    }
-    assert web_search_plugin._parse_perplexity_response(data) == [
-        web_search_plugin.SearchResult(
-            title="Example", url="https://example.com/b", snippet="snippet text", date="2026-09-27"
-        )
-    ]
-
-
 @pytest.mark.parametrize("data", [None, [], 42, {}, {"results": None}, {"results": "nope"}])
 def test_malformed_payload_raises(data, web_search_plugin):
     with pytest.raises(ValueError):

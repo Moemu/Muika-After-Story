@@ -54,7 +54,7 @@ def test_brain_reload_refreshes_its_working_summarizer(monkeypatch, fake_llm_fac
     monkeypatch.setattr("muika.core.brain.get_model_config", lambda name: summary_config)
     brain.reload_model(ModelConfig(provider="_echo", context_window=1000000), old.config)
     assert brain.model.config.context_window == 1000000
-    assert brain.compactor.model.config == summary_config
+    assert brain.compactor.model.config.model_dump() == summary_config.model_dump()
     assert brain.model.compactor is brain.compactor
     assert old.config.context_window == 131072
 
@@ -118,7 +118,7 @@ async def test_generate_reply_user_message_prompt(fake_llm_factory):
     req = fake.requests[0]
     assert req.prompt.startswith("["), req.prompt
     assert req.prompt.endswith("] [User] hello"), req.prompt
-    assert req.system.startswith("SYSTEM\n[Lasting state")
+    assert req.system == "SYSTEM"
     assert result == "Hi!"
 
 
@@ -147,6 +147,7 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     memory.session.is_first_session = False
     memory.snapshot.first_interaction_at = datetime(2025, 1, 1, 12)
     memory.facts[1] = Fact(id=1, category=MemoryCategory.USER, key="name", value="Alice")
+    memory.persistent.mood = "I miss a quiet evening."
     captured = {}
 
     def _tmpl(name, data):
@@ -161,6 +162,7 @@ async def test_generate_reply_builds_template_data(fake_llm_factory):
     assert data.is_chat is True
     assert "Earliest known interaction with Master: 2025-01-01 12:00:00" in data.memory_context
     assert data.adapters_info is None
+    assert "Lasting feeling: I miss a quiet evening." in data.recent_intentions
 
 
 async def test_generate_reply_keeps_heart_block(fake_llm_factory, model_config_manager):
@@ -300,8 +302,8 @@ def test_persona_template_matches_agent_mode(enable_agent):
         "Muika.md.jinja2",
         PromptTemplatesData(event_type="user_message", state=MuikaState(), is_chat=True, enable_agent=enable_agent),
     )
-    assert ("## Your Agent alter-ego (Tool System)" in prompt) is enable_agent
-    assert ("## Direct tools" in prompt) is not enable_agent
+    assert ("To act through her, write `<agent>" in prompt) is enable_agent
+    assert ("please actively use the tool system" in prompt) is not enable_agent
     assert ("<enable_god_mode>" in prompt) is enable_agent
     assert ("<agent intention_id=" in prompt) is enable_agent
 
@@ -363,11 +365,11 @@ def test_persona_template_renders_action_permission_variants():
     read_only = generate_prompt_from_template(
         "Muika.md.jinja2", PromptTemplatesData(**base, action_permission="read_only")
     )
-    assert "rewrite a small part of yourself" in self_modify
+    assert "You may modify yourself" in self_modify
     assert "cannot rewrite yourself" not in self_modify
     assert "cannot rewrite yourself" in write
-    assert "rewrite a small part of yourself" not in write
-    assert "only read through her" in read_only
+    assert "You may modify yourself" not in write
+    assert "You can read, but cannot write any files." in read_only
 
 
 # ---------------------------------------------------------------------------
