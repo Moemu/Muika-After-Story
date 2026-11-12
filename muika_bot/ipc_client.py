@@ -17,7 +17,6 @@ from typing import Any, Callable, Coroutine, Dict, Optional, overload
 import aiohttp
 from aiohttp import WSMsgType
 
-from muika.config import mas_config
 from muika.ipc.attachments import AttachmentTransfer
 from muika.ipc.protocol import (
     BotToCoreMessage,
@@ -28,6 +27,7 @@ from muika.ipc.protocol import (
 )
 from muika.models import Resource
 from muika.utils.logger import logger
+from muika_bot.config import bot_config
 
 # 重连参数
 _INITIAL_RECONNECT_DELAY = 1.0
@@ -49,13 +49,13 @@ class IpcClient:
 
     def __init__(
         self,
-        core_url: str = mas_config.core_ws_url,
-        secret: str = mas_config.ipc_secret,
+        core_url: str = bot_config.core_ws_url,
+        secret: str = bot_config.ipc_secret,
         client_name: str = "nonebot-qq",
         fallback_urls: list[str] | None = None,
     ) -> None:
         self._url = core_url
-        self._endpoints = [core_url, *(mas_config.core_fallback_urls if fallback_urls is None else fallback_urls)]
+        self._endpoints = [core_url, *(bot_config.core_fallback_urls if fallback_urls is None else fallback_urls)]
         self._endpoint_index = 0
         self._return_primary = False
         self._secret = secret
@@ -92,14 +92,14 @@ class IpcClient:
         return self._endpoints[self._endpoint_index]
 
     def attachment_transfer(self) -> AttachmentTransfer:
-        return AttachmentTransfer(self.endpoint, self._secret, mas_config.data_dir / "chat_attachments")
+        return AttachmentTransfer(self.endpoint, self._secret, bot_config.data_dir / "chat_attachments")
 
     async def _prefer_primary(self) -> None:
         """使用备用地址时检查主入口，恢复后重新连接主入口。"""
         while self._running and self._endpoint_index:
             await asyncio.sleep(10)
             assert self._session is not None
-            base = AttachmentTransfer(self._url, self._secret, mas_config.data_dir).base
+            base = AttachmentTransfer(self._url, self._secret, bot_config.data_dir).base
             try:
                 async with self._session.get(base + "/health", timeout=aiohttp.ClientTimeout(total=3)) as response:
                     if response.status == 200 and self._ws is not None:

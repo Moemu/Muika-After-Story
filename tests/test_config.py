@@ -8,7 +8,16 @@ from muika.llm import ModelConfig
 
 
 def _make(**kwargs) -> MASConfig:
-    return MASConfig(master_id="test", ipc_secret="test", _env_file=None, **kwargs)
+    return MASConfig(ipc_secret="test", _env_file=None, **kwargs)
+
+
+def test_core_does_not_validate_bot_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv("MASTER_ID", raising=False)
+    monkeypatch.delenv("SUPERUSERS", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("MASTER_ID=\nCORE_FALLBACK_URLS=invalid-json\nINPUT_TIMEOUT=not-a-number\n", encoding="utf-8")
+    config = MASConfig(ipc_secret="test", _env_file=env)
+    assert config.action_permission == "write"
 
 
 def test_telegram_proxy_migrates_to_proxy(monkeypatch):

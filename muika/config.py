@@ -42,8 +42,6 @@ _model_config_lock = threading.Lock()
 
 class MASConfig(BaseSettings):
 
-    master_id: str = ""
-    """对话目标ID。"""
     persona_template: str = "Muika.md.jinja2"
     """默认人格模板"""
     enable_agent: bool = True
@@ -51,17 +49,13 @@ class MASConfig(BaseSettings):
     agent_template: str = "Muika.agent.jinja2"
     """行动半身（Agent）模板：Muika 执行 <agent>...</agent> 内联命令时的系统提示"""
 
-    agent_model: Optional[str] = Field(None, validation_alias=AliasChoices("agent_model", "butler_model"))
+    agent_model: Optional[str] = Field(default=None, validation_alias=AliasChoices("agent_model", "butler_model"))
     """分身 Agent 所用模型的配置名。留空则与核心模型共享 default 配置"""
     session_summarize_model: Optional[str] = None
     """工作上下文压缩和日记整理所用模型；留空则使用分身模型。"""
     load_user_skills: bool = False
     """是否加载用户文件夹中的技能（~/.agents/skills 与 ~/.claude/skills）"""
 
-    core_ws_url: str = "ws://127.0.0.1:8765/ws"
-    """Core 进程的 WebSocket 地址。Bot 通过此地址连接 Core。"""
-    core_fallback_urls: list[str] = Field(default_factory=list)
-    """Bot 的备用连接地址；主入口恢复后自动返回。"""
     gateway_url: str = ""
     """常驻入口的 /cores 地址；留空时继续单机运行。"""
     core_node_name: str = "pc"
@@ -74,14 +68,9 @@ class MASConfig(BaseSettings):
     """IPC 通信的预共享密钥。Bot 连接 Core 时需携带此 Token。
     留空时 Core 启动会自动生成并写入 .env 文件。"""
 
-    input_timeout: int = 0
-    """输入等待时间"""
     proxy: Optional[str] = None
     """通用出站代理地址（如 ``http://127.0.0.1:7890``）。Core 的联网工具与 Bot 文件下载会经过它；
     LLM 供应商 SDK 流量不在此列，继续遵循标准 HTTP_PROXY/HTTPS_PROXY 环境变量。"""
-    client_name: str = ""
-    """适配器唯一名称。用于多适配器场景下标识当前 Bot 实例的身份。
-    例如 ``"qq-desktop"``, ``"qq-phone"``。留空时自动分配。"""
 
     log_level: str = "INFO"
     """日志等级"""
@@ -191,22 +180,6 @@ class MASConfig(BaseSettings):
     def can_self_modify(self) -> bool:
         """返回是否允许修改自身。"""
         return self.action_permission == "self_modify"
-
-    @field_validator("master_id")
-    def validate_master_id(cls, v):
-        if v:
-            return v
-
-        superusers = os.getenv("SUPERUSERS")
-        if not superusers:
-            raise ValueError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
-
-        try:
-            v = str(list(superusers)[0])
-            return v
-        except Exception as exc:
-            logger.error(exc)
-            raise ValueError("未设置 master_id，Muika 将无法正常工作！请在配置文件中设置 master_id")
 
     @staticmethod
     def generate_ipc_secret() -> str:

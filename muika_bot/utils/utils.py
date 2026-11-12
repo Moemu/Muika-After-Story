@@ -8,12 +8,12 @@ import httpx
 from nonebot import get_bot
 from nonebot.adapters import Event, MessageSegment
 
-from muika.config import mas_config
 from muika.utils.logger import logger
+from muika_bot.config import bot_config
 
 from .adapters import ADAPTER_CLASSES
 
-FILES_DIR = mas_config.data_dir / "downloads"
+FILES_DIR = bot_config.data_dir / "downloads"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 User_Agent = (
@@ -88,6 +88,6 @@ async def get_file_via_adapter(message: MessageSegment, event: Event) -> Optiona
 
         url = f"https://api.telegram.org/file/bot{bot.bot_config.token}/{file.file_path}"  # type: ignore
         # filename = file.file_path.split("/")[1]
-        return await download_file(url, proxy=mas_config.proxy)
+        return await download_file(url, proxy=bot_config.proxy)
 
     return None

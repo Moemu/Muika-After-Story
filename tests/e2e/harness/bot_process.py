@@ -10,8 +10,8 @@ with contextlib.redirect_stdout(sys.stderr):
     import nonebot
 
     nonebot.init(log_level="ERROR")
-    from muika.config import mas_config
     from muika_bot import ipc_client
+    from muika_bot.config import bot_config
     from muika_bot.ipc_client import IpcClient
 
     ipc_client._INITIAL_RECONNECT_DELAY = 0.05
@@ -20,7 +20,7 @@ with contextlib.redirect_stdout(sys.stderr):
 
 async def main():
     primary, fallback, directory = sys.argv[1:]
-    mas_config.data_dir = Path(directory)
+    bot_config.data_dir = Path(directory)
     client = IpcClient(primary, "test-ipc-secret", "endpoint-bot", fallback_urls=[fallback] if fallback else [])
     outputs = []
 

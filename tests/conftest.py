@@ -1,8 +1,7 @@
 """共享 fixtures。
 
-注意：环境变量必须在任何 ``import muika`` 之前设置——``mas_config`` 在 import 期
-即实例化，``master_id`` 为空时会读 ``SUPERUSERS`` 环境变量、``ipc_secret`` 为空时
-会把新密钥写回仓库 ``.env``。这里用 ``setdefault`` 兜底，保证 CI 无 ``.env`` 也能跑。
+环境变量必须在导入配置之前设置。Core 缺少 IPC_SECRET 时会生成密钥并写入 .env；
+Bot 单独读取 MASTER_ID 和 SUPERUSERS。这里用测试值避免读取或改写本机配置。
 """
 
 from __future__ import annotations

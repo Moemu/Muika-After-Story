@@ -13,7 +13,6 @@ from typing import Any
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from muika.config import mas_config
 from muika.core.events import (
     SessionBootstrapEvent,
     SessionEndEvent,
@@ -63,7 +62,7 @@ class IpcWire:
             assert self.app.muika is not None, "call start() first"
             self.app.recorder.record("event_in", type="user_message", summary=payload.get("message", ""))
             message = Message(
-                userid=mas_config.master_id,
+                userid="test_master",
                 message=payload.get("message", ""),
                 resources=[Resource(**item) for item in payload.get("resources", [])],
             )

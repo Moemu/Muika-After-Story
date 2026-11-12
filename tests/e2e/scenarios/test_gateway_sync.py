@@ -1573,12 +1573,12 @@ async def test_disconnected_callback_failure_classifies_fallback(live_gateway, c
 
 @pytest.mark.parametrize("shutdown", ["remote", "disconnect", "cancel", "disconnect_cancel"])
 async def test_bot_slow_send_keeps_reading_and_finishes_received_messages(recorder, monkeypatch, shutdown):
-    import runpy
-
+    import nonebot
     from aiohttp import WSMsgType, web
     from aiohttp.test_utils import TestServer
 
-    IpcClient = runpy.run_path(str(ROOT / "muika_bot/ipc_client.py"))["IpcClient"]
+    nonebot.init(log_level="ERROR")
+    from muika_bot.ipc_client import IpcClient
 
     sockets = asyncio.Queue()
     entered, release, pong, drained = [asyncio.Event() for _ in range(4)]

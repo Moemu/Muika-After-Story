@@ -252,7 +252,7 @@ class CoreApp:
     async def user_says(self, text: str) -> None:
         """投递一条用户消息事件。"""
         assert self.muika is not None, "call start() first"
-        message = Message(userid=mas_config.master_id, message=text)
+        message = Message(userid="test_master", message=text)
         await self.muika.create_event(UserMessageEvent(payload=UserMessagePayload(message=message)))
 
     async def say_command(self, raw: str) -> None:

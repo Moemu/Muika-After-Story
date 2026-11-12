@@ -35,22 +35,20 @@ from muika.plugin.func_call.context import tool_context
     ],
 )
 def test_legacy_flags_do_not_expand_permissions(legacy):
-    config = MASConfig(master_id="test", ipc_secret="test", _env_file=None, **{legacy: True})
+    config = MASConfig(ipc_secret="test", _env_file=None, **{legacy: True})
     assert config.action_permission == "read_only"
-    explicit = MASConfig(
-        master_id="test", ipc_secret="test", _env_file=None, action_permission="write", **{legacy: True}
-    )
+    explicit = MASConfig(ipc_secret="test", _env_file=None, action_permission="write", **{legacy: True})
     assert explicit.action_permission == "write"
     assert legacy not in explicit.model_dump()
 
 
 def test_new_defaults_and_legacy_dotenv(tmp_path):
-    config = MASConfig(master_id="test", ipc_secret="test", _env_file=None)
+    config = MASConfig(ipc_secret="test", _env_file=None)
     assert config.action_permission == "write"
     assert config.code_review_mode == "auto"
     env = tmp_path / "old.env"
     env.write_text("ENABLE_CODE_EXECUTION=false\n", encoding="utf-8")
-    assert MASConfig(master_id="test", ipc_secret="test", _env_file=env).action_permission == "read_only"
+    assert MASConfig(ipc_secret="test", _env_file=env).action_permission == "read_only"
     assert env.read_text(encoding="utf-8") == "ENABLE_CODE_EXECUTION=false\n"
 
 
