@@ -134,16 +134,22 @@ class MemoryReasoner:
             if item.status not in {"resolved", "abandoned"}
         ]
         intention_block = "Open intentions:\n" + ("\n".join(open_intentions) if open_intentions else "None.")
-        capacity = (
-            int(input_budget(model.config) * 0.6) - request_tokens(request) - 128 - estimate_tokens(intention_block)
-        )
         through = await memory.dream_coverage(day)
         coverage = f"Previous coverage: experience IDs <= {through}. Tension changes must cite newer experiences."
-        fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
-        if estimate_tokens(fixed) > capacity // 3:
+        prefix = f"Day: {day}\n{coverage}\nRelated memories:\n"
+        source_header = "\nDated experiences:\n"
+        request.prompt = prefix + source_header + "\n" + intention_block
+        budget = input_budget(model.config)
+        fixed_tokens = request_tokens(request)
+        if fixed_tokens > budget:
+            raise ValueError(
+                "Dream persona and open intentions exceed the context budget; material remains pending. "
+                "Use a model with a larger context window."
+            )
+        capacity = min(budget - fixed_tokens, max(128, int(budget * 0.6) - fixed_tokens))
+        if related.strip() and estimate_tokens(related) > capacity // 3:
             related = await compactor.summarize(related, max(128, capacity // 4)) or related
-            fixed = f"Day: {day}\n{coverage}\nRelated memories:\n{related}"
-        remaining = capacity - estimate_tokens(fixed)
+        remaining = capacity - estimate_tokens(related)
         source_tokens = estimate_tokens(source_text)
         if source_tokens > max(remaining, 0):
             if remaining >= 128:
@@ -155,9 +161,11 @@ class MemoryReasoner:
                     stacklevel=2,
                 )
                 source_text = await compactor.summarize(source_text, 128) or source_text
-        request.prompt = fixed + "\nDated experiences:\n" + source_text
+        request.prompt = prefix + related + source_header + source_text
         refs &= set(re.findall(r"(?:experience|fact|diary):\d+", request.prompt))
         request.prompt += "\n" + intention_block
+        if request_tokens(request) > budget:
+            raise ValueError("Dream request exceeds the context budget; material remains pending")
         for attempt in range(2):
             response = await model.ask(request)
             content = strip_json_fence(response.require_content())
