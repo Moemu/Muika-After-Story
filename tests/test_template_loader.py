@@ -45,6 +45,31 @@ def test_template_configuration_fails_before_startup(tmp_path: Path, monkeypatch
         loader.validate_template_configuration(["missing.jinja2"])
 
 
+def test_medium_heartbeat_renders_relaxed_direct_question_rule():
+    """合并回归：两个 medium 分支时，后一个（放宽必答句）成为死代码。"""
+    data = PromptTemplatesData(
+        event_type="user_message",
+        state=MuikaState(),
+        is_chat=True,
+        heartbeat_intensity="medium",
+    )
+
+    prompt = loader.generate_prompt_from_template("Muika.md.jinja2", data)
+
+    assert "A direct question is normally answered." in prompt
+    assert "A direct question from the user is always answered." not in prompt
+    # 精简：medium 与 low/high 同构，只描述思考方式，不重复总述里的 heart/do_nothing 规则。
+    assert "Let the introspection improve the reply" not in prompt
+    assert "The <heart> block is strictly private" not in prompt
+
+
+def test_persona_template_has_single_medium_heartbeat_branch():
+    """结构回归：同一模板里不应出现两个 medium 分支。"""
+    template = (loader._BUILTIN_TEMPLATES_DIR / "Muika.md.jinja2").read_text(encoding="utf-8")
+
+    assert template.count('heartbeat_intensity == "medium"') == 1
+
+
 @pytest.mark.asyncio
 async def test_persona_switch_respects_self_modification_switch(tmp_path: Path, monkeypatch):
     original_template = mas_config.persona_template
