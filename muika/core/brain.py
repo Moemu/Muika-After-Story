@@ -460,8 +460,12 @@ class MuikaBrain:
                 "time apart color the greeting; do not open by reporting how long it was. Leave him room to "
                 "answer — a question, a pause, or an unfinished feeling; you do not have to fill the silence for him."
             )
-            if event.last_chat_time is not None and not memory.session.is_first_session:
-                absence_lines = await _absence_facts(memory, current_time, event.last_chat_time)
+            if (
+                event.last_chat_time is not None
+                and not memory.session.is_first_session
+                and event.timestamp - event.last_chat_time > RESIDENT_ABSENCE_GAP
+            ):
+                absence_lines = await _absence_facts(memory, event.timestamp, event.last_chat_time)
                 prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)

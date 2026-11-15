@@ -153,3 +153,24 @@ async def test_last_user_message_at_tracks_player_not_her(core_app_factory):
     await app.muika.memory.add_context("muika", "我等你。")
     assert await app.muika.memory.last_user_message_at() == old
     app.recorder.record("last_user_message_at", tracked=True)
+
+
+async def test_short_restart_does_not_inject_absence_facts(core_app_factory, absence_clock):
+    """关闭后很快重启：不足 12 小时不应注入久别事实，和 short bucket 的模板保持一致。"""
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(text="第一次见面的问候。"),
+            ScriptedTurn(text="晚安。"),
+            ScriptedTurn(text="你回来了。"),
+        ]
+    )
+    start = absence_clock["now"]
+    await _history_then_bootstrap(app, absence_clock, days=0)
+
+    absence_clock["now"] = start + timedelta(hours=2)
+    await app.bootstrap(last_chat_time=start)
+    assert await app.next_reply() == "你回来了。"
+
+    call = next(call for call in reversed(app.scripted.calls) if "A new session has begun" in call.get("prompt", ""))
+    assert "[Private facts]" not in call["prompt"]
+    app.recorder.record("short_restart", gap_injected=False)
