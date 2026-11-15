@@ -94,7 +94,7 @@ class ParsedReply:
     def context_reply(self) -> str:
         """保留内心连续性与可见正文，避免再次回送动作指令。"""
         thoughts = "".join(f"<heart>{text}</heart>" for text in self.heart_cot or [])
-        return thoughts + ("<do_nothing>" if self.do_nothing or not self.clean_reply else self.clean_reply)
+        return thoughts + ("<do_nothing>" if self.do_nothing else self.clean_reply)
 
 
 class Muika:

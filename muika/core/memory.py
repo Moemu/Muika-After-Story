@@ -409,9 +409,10 @@ class MemoryManager:
         now = local_time((timestamp or datetime.now()).isoformat())
         spoken = public_text(content) if kind == "muika" else content
         if kind == "muika":
+            explicit_silence = "<do_nothing>" in content
             hearts = re.findall(r"<heart\s*>(.*?)</heart\s*>", content, flags=re.S | re.I)
             content = "".join(f"<heart>{text}</heart>" for text in hearts) + spoken
-            if not spoken:
+            if explicit_silence and not spoken:
                 content += "<do_nothing>"
                 source = source or f"silence:reply:{uuid4().hex}"
         elif kind in {"agent", "note"}:
@@ -784,6 +785,7 @@ class MemoryManager:
                         and_(
                             ExperienceORM.source.not_like("silence:%"),
                             ExperienceORM.source.not_like("ipc:%"),
+                            ExperienceORM.source.not_like("plugin-reload:%"),
                         ),
                     ),
                 )

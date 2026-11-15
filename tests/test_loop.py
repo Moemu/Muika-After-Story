@@ -454,6 +454,14 @@ def test_history_preserves_heart_without_replaying_controls():
     assert parsed.context_reply == "<heart>Keep thinking.</heart>Hello"
 
 
+def test_empty_reply_is_not_recorded_as_silence():
+    """只有 <do_nothing> 才是沉默；标签-only 的空回复不能冒充沉默。"""
+    parsed = Muika._parse_reply_tags("<heart>Only a thought.</heart><agent>Look it up.</agent>")
+
+    assert parsed.clean_reply == ""
+    assert "<do_nothing>" not in parsed.context_reply
+
+
 async def test_failed_topic_delivery_does_not_consume_budget(engine):
     from muika.core.executor import SendReceipt
     from muika.core.topic_manager import EventTopic

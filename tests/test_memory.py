@@ -804,3 +804,22 @@ async def test_absence_interval_excludes_return_message():
     await memory.add_context("muika", "Still waiting.", timestamp=before + timedelta(days=1))
     await memory.add_context("user", "I am back.", timestamp=now)
     assert await memory.absence_activity(before, now) == (1, 0)
+
+
+async def test_empty_muika_reply_is_not_marked_as_silence():
+    """标签-only 的空回复只保留内心，不应写入 <do_nothing> 或沉默来源。"""
+    memory = MemoryManager()
+    await memory.load()
+    await memory.add_context("muika", "<heart>Only a thought.</heart>")
+
+    assert "<do_nothing>" not in memory.recent_turns[-1].content
+
+
+async def test_recent_notes_skip_system_plugin_reload_notes():
+    """插件热重载的系统笔记不是她写给未来的话。"""
+    memory = MemoryManager()
+    await memory.load()
+    await memory.add_material("note", "Master unloaded my plugin X.", source="plugin-reload:pkg:digest")
+    await memory.add_material("note", "I want to ask him about the dream.")
+
+    assert await memory.recent_notes() == ["I want to ask him about the dream."]
