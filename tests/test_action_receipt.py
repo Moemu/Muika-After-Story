@@ -82,6 +82,8 @@ async def test_review_failure_parks_pending(monkeypatch) -> None:
         await reviewer.authorize("execution", {"command": "read"})
     record = reviewer.records()[-1]
     assert record.status == "pending"
-    assert ".review approve" in record.error
-    reviewer.decide(record.id, True)
-    assert reviewer.load(record.id).status == "approved"
+    assert record.parked and record.require_player
+    assert "needs a new review" in record.error
+    with pytest.raises(ReviewError, match="cannot be approved"):
+        reviewer.decide(record.id, True)
+    assert reviewer.load(record.id).status == "pending"

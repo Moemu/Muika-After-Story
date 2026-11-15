@@ -50,6 +50,16 @@ class ReviewError(ValueError):
     """审查未通过或证据失效。"""
 
 
+_PERMANENT_REVIEW_ERROR_MARKERS = ("exceeds the context budget", "Split the action")
+
+
+def _is_permanent_review_failure(exc: Exception) -> bool:
+    """审查失败是否无法靠重试解决：证据超预算或输出格式非法，应原样交回调用方。"""
+    if isinstance(exc, ValidationError):
+        return True
+    return isinstance(exc, ReviewError) and any(marker in str(exc) for marker in _PERMANENT_REVIEW_ERROR_MARKERS)
+
+
 class ReviewDecision(BaseModel):
     """保存独立审查结论。"""
 
@@ -77,6 +87,8 @@ class ReviewRecord(BaseModel):
     error: str = ""
     human: bool = False
     require_player: bool = False
+    parked: bool = False
+    """审查未完成、等待重新审查；没有效果结论，不能被玩家直接放行。"""
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
 
@@ -279,10 +291,17 @@ class CodeReviewer:
                             )
                             request.error = request.decision.reason + " " + "; ".join(request.decision.suggestions)
                     except Exception as exc:
+                        if _is_permanent_review_failure(exc):
+                            request.status = "unavailable"
+                            request.error = f"Review could not complete: {exc}"
+                            self.save(request)
+                            raise ReviewError(request.error) from exc
                         request.status = "pending"
+                        request.parked = True
+                        request.require_player = True
                         request.error = (
-                            "Review is temporarily unavailable; the action is parked for the player's confirmation. "
-                            f"Use .review approve {request.id} to allow it."
+                            "Review is temporarily unavailable; the action is parked for the player's confirmation "
+                            "and needs a new review before approval. Deny it and retry the action."
                         )
                         logger.warning(
                             f"[ActionApproval] {kind} review unavailable; parked 1 request for player: "
@@ -301,10 +320,17 @@ class CodeReviewer:
             if timed_out_record is not None and timed_out_record.human:
                 self.check(timed_out_record)
                 return timed_out_record
+            if timed_out_record is not None and timed_out_record.status != "pending":
+                raise ReviewError(
+                    f"Review finished as {timed_out_record.status} after the deadline; retry the action."
+                ) from exc
             request.status = "pending"
+            request.parked = True
+            request.require_player = True
             request.error = (
                 f"Action approval exceeded {REVIEW_TIMEOUT_SECONDS} seconds; "
-                f"the proposal is parked for the player. Use .review approve {request.id} to allow it."
+                "the proposal is parked for the player and needs a new review before approval. "
+                "Deny it and retry the action."
             )
             self.save(request)
             if isinstance(context, ToolContext):
@@ -323,6 +349,10 @@ class CodeReviewer:
             record.human = True
             self.save(record)
             raise ReviewError(record.error)
+        if approve and record.parked:
+            raise ReviewError(
+                "Review did not complete; this parked action cannot be approved. Deny it and retry the action."
+            )
         if approve:
             levels = {"read_only": 0, "write": 1, "self_modify": 2}
             if record.kind == "execution" and record.decision is not None and record.decision.effect == "self_modify":
