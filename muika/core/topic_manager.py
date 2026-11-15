@@ -326,7 +326,10 @@ class TopicManager:
         self._occasion_rules = load_occasion_rules()
 
     def enqueue_event(self, topic: EventTopic) -> None:
-        """从外部（如 DigestAgent / 分身）注入动态新闻。"""
+        """从外部（如 DigestAgent / 分身）注入动态新闻；同一话题不重复排队。"""
+        if any(queued.id == topic.id for queued in self._event_queue):
+            logger.debug(f"[TopicManager] Event topic already queued: {topic.id}")
+            return
         self._event_queue.append(topic)
 
     async def _get_available_candidates(self) -> dict[str, list[tuple[StaticTopic, float]]]:
