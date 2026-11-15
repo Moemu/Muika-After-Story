@@ -51,6 +51,8 @@ class TaskRecord(BaseModel):
     resources: list[MediaReference] = Field(default_factory=list)
     file_versions: dict[str, str] = Field(default_factory=dict)
     pending_review_id: str | None = None
+    read_only: bool = False
+    """任务期间只暴露只读工具（主动调查等无人值守场景）。"""
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
 

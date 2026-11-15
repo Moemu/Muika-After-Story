@@ -48,7 +48,13 @@ from .reflection import ReflectionAgent
 from .restart import RestartController
 from .self_change import SelfChangeDispatcher
 from .state import ActiveTopicState, MuikaState
-from .topic_manager import EventTopic, TopicManager
+from .topic_manager import (
+    GREETING_QUIET_SECONDS,
+    EventTopic,
+    TopicKind,
+    TopicManager,
+    greeting_slot_at,
+)
 
 TaskResult = TypeVar("TaskResult")
 
@@ -76,13 +82,19 @@ class ParsedReply:
     """是否请求接手当前行动任务（<enable_god_mode>）。"""
     heart_cot: Optional[list[str]] = None
     do_nothing: bool = False
-    """模型选择本轮沉默（<do_nothing>），不发消息不写 memory。"""
+    """模型选择本轮沉默（<do_nothing>），不发消息，保留私有上下文。"""
     agent_controls: list[AgentControl] = field(default_factory=list)
     agent_errors: list[str] = field(default_factory=list)
     state_updates: list[StateUpdate] = field(default_factory=list)
     intention_ids: list[str | None] = field(default_factory=list)
     restart_workspace_id: str | None = None
     restart_requested: bool = False
+
+    @property
+    def context_reply(self) -> str:
+        """保留内心连续性与可见正文，避免再次回送动作指令。"""
+        thoughts = "".join(f"<heart>{text}</heart>" for text in self.heart_cot or [])
+        return thoughts + ("<do_nothing>" if self.do_nothing or not self.clean_reply else self.clean_reply)
 
 
 class Muika:
@@ -194,6 +206,17 @@ class Muika:
             logger.debug("TimeTick: curiosity drive fired -- topic pipeline.")
             return "topic"
 
+        # 时段问候：与 boredom/curiosity 解耦；玩家安静足够久且该时段有历史活动才触发
+        now = datetime.now()
+        slot = greeting_slot_at(now)
+        if (
+            slot is not None
+            and (now - self.state.last_interaction).total_seconds() >= GREETING_QUIET_SECONDS
+            and self.memory.hour_active_rate(now.hour)
+        ):
+            logger.debug(f"TimeTick: greeting window {slot} -- topic pipeline.")
+            return "topic"
+
         return None
 
     async def loop(self) -> None:
@@ -226,6 +249,7 @@ class Muika:
         :param dt: 距上次循环的秒数
         """
         self._log_event(event)
+        previous_chat: datetime | None = None
         if event.type in {"user_message", "adapter_online"}:
             await self.agent_tasks.notify_pending()
         if isinstance(event, AgentTaskEvent):
@@ -262,6 +286,9 @@ class Muika:
         if event.type == "user_message":
             if event.payload.source and await self.memory.contains_source(event.payload.source):
                 return
+            # 常驻核心的久别判定要取"玩家上次发言"（DB 跨会话）；
+            # memory.last_dialogue_at 会被会话结束清空、也会被她自己的发言更新。
+            previous_chat = await self.memory.last_user_message_at()
             await self.memory.add_context(
                 "user",
                 event.payload.message.message,
@@ -318,7 +345,16 @@ class Muika:
                 await self.after_activity()
             return
 
-        await self._run_brain_pipeline(event)
+        persistent = self.memory.persistent
+        dissonance_tick = persistent.dissonance >= 0.6 and any(item.status == "open" for item in persistent.intentions)
+        if think_mode == "emotional" and event.type == "time_tick" and not dissonance_tick:
+            blocked = await self.topic_manager.kind_budget_block(TopicKind.REFLECTION, datetime.now())
+            if blocked is not None:
+                logger.debug(f"[Initiative] suppressed | kind=reflection | reason={blocked}")
+                await self._tick_idle(event, dt)
+                return
+
+        await self._run_brain_pipeline(event, last_chat_time=previous_chat)
         if isinstance(event, AgentTaskEvent) and event.task_id != "control-error":
             await self.agent_tasks.delivered(event)
         if self.after_activity is not None:
@@ -490,11 +526,18 @@ class Muika:
     async def _run_topic_pipeline(self) -> None:
         """boredom / curiosity 驱动的话题管线，完全绕开主 Brain。"""
         last_dialogue_at = self.memory.last_dialogue_at
-        topic = await self.topic_manager.get_next_topic(self.state)
+        topic = await self.topic_manager.get_next_topic(self.state, now=datetime.now())
         if not topic:
             logger.debug("[Topic] No available seed -- skipping topic pipeline this tick.")
             return
-        expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
+        blocked = await self.topic_manager.kind_budget_block(topic.kind, datetime.now())
+        if blocked is not None:
+            if isinstance(topic, EventTopic):
+                self.topic_manager.enqueue_event(topic)
+            logger.debug(f"[Topic] Suppressed by budget | kind={topic.kind.value} | reason={blocked}")
+            return
+        with tool_context(self.state, self.executor, review_context=f"Investigation: {topic.content}"):
+            expanded = await self.brain.expand_topic(topic, self.state, self.memory, self.current_adapters)
         if (
             not self.event_queue.empty()
             or self.memory.last_dialogue_at != last_dialogue_at
@@ -510,8 +553,25 @@ class Muika:
             await self.memory.update_state(update)
         if parsed.memory_contents:
             await self._store_memories(parsed.memory_contents)
+        if parsed.agent_commands and mas_config.enable_agent:
+            # 调查任务带上素材语境，回执后才接得上"我在说战争"
+            title = topic.title if isinstance(topic, EventTopic) else topic.category
+            task_seed = f"Reading notes: {topic.content}\n\nInvestigation: {title}"
+            for command in parsed.agent_commands:
+                await self.agent_tasks.submit(command, task_seed, read_only=True)
+            await self.memory.add_context("muika", parsed.context_reply)
+            await self.topic_manager.record_topic_used(topic.dedupe_key or topic.id, user_engaged=False)
+            logger.info(
+                f"[Topic] Muika chose to investigate before speaking ({len(parsed.agent_commands)} command(s))."
+            )
+            return
         if parsed.do_nothing:
             logger.info("[Topic] Muika chose silence -- skipping topic pipeline this tick.")
+            await self.memory.record_silence("topic")
+            await self.memory.add_context("muika", parsed.context_reply)
+            await self.topic_manager.record_topic_used(topic.dedupe_key or topic.id, user_engaged=False)
+            return
+        if not parsed.clean_reply:
             return
         if parsed.target:
             logger.debug(f"[Topic] Routing to target={parsed.target!r}")
@@ -523,22 +583,31 @@ class Muika:
             if isinstance(topic, EventTopic):
                 self.topic_manager.enqueue_event(topic)
             return
+        receipt = await self.executor.send_message(parsed.clean_reply, target=parsed.target)
+        if receipt == SendReceipt.FAILED:
+            if isinstance(topic, EventTopic):
+                self.topic_manager.enqueue_event(topic)
+            return
         if parsed.timeout is not None:
             self._arm_timeout(parsed.timeout)
-        await self.executor.send_message(parsed.clean_reply, target=parsed.target)
         logger.info(f"Muika: {parsed.clean_reply}")
-        await self.memory.add_context("muika", parsed.clean_reply)
+        await self.memory.add_context("muika", parsed.context_reply)
         self.state.active_topic = ActiveTopicState(
             topic_id=topic.id,
             topic_seed=topic.content,
             topic_type=topic.category,
         )
         self.state.boredom = 0.0
+        await self.topic_manager.record_topic_used(topic.dedupe_key or topic.id, user_engaged=False)
+        self.state.last_proactive_at = datetime.now()
+        logger.info(f"[Initiative] sent | pipeline=topic | kind={topic.kind.value} | topic={topic.id}")
         logger.debug(f"[Topic] Initiated: {topic.id!r} (category={topic.category})")
 
     async def _run_brain_pipeline(
         self,
         event: Event,
+        *,
+        last_chat_time: datetime | None = None,
     ) -> None:
         """迭代式主人格 ↔ Agent 分身管线（情绪驱动路径）。"""
         dispatcher = self.self_change
@@ -577,6 +646,7 @@ class Muika:
                             (self.agent_tasks.describe() if mas_config.enable_agent else "", self.restart.describe()),
                         )
                     ),
+                    last_chat_time=last_chat_time,
                 )
                 resources = context.resources
             if event.type == "time_tick" and (
@@ -597,6 +667,11 @@ class Muika:
             silent_turn = parsed.do_nothing
             if silent_turn:
                 logger.info("[Turn] silent (do_nothing)")
+                await self.memory.record_silence(event.type)
+                try:
+                    await self.memory.add_context("muika", parsed.context_reply)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[Turn] Silent reply not stored: {type(exc).__name__}")
             receipt: Optional[SendReceipt] = None
             if not silent_turn:
                 if parsed.clean_reply:
@@ -606,7 +681,7 @@ class Muika:
                     )
                 else:
                     logger.info("[Turn] empty reply (tags only)")
-                await self.memory.add_context("muika", parsed.clean_reply, resources=resources)
+                await self.memory.add_context("muika", parsed.context_reply, resources=resources)
                 if parsed.timeout is not None:
                     self._arm_timeout(parsed.timeout)
         except (Exception, asyncio.CancelledError):
@@ -674,9 +749,13 @@ class Muika:
         # 主动发言（孤独驱动）后的情感释放
         # 说出来会好一点，但孤独本身不会因为说了一句话就消失
         if event.type == "time_tick":
-            if not silent_turn:
+            if not silent_turn and receipt in {SendReceipt.WRITTEN, SendReceipt.QUEUED}:
                 prev = self.state.loneliness
                 self.state.loneliness = max(0.0, self.state.loneliness - LONELINESS_PROACTIVE_RELIEF)
+                await self.topic_manager.record_topic_used(
+                    f"reflection:{datetime.now():%Y-%m-%d}:{uuid4().hex[:12]}", user_engaged=False
+                )
+                logger.info("[Initiative] sent | pipeline=emotional | kind=reflection")
                 logger.debug(
                     f"[State] Proactive relief -- loneliness {prev:.2f} -> {self.state.loneliness:.2f} "
                     f"(cooldown {PROACTIVE_COOLDOWN / 60:.0f} min)"
@@ -749,12 +828,10 @@ class Muika:
 
     async def _handle_session_end(self) -> None:
         """结束工作会话；素材继续等待按自然日整理。"""
-        # 话题使用记录：Session 结束时与 TopicHistory 同步
+        # 主动话题在发送时已记录 use_count；会话结束只补充互动计数
         if self.state.active_topic is not None:
-            await self.topic_manager.record_topic_used(
-                self.state.active_topic.topic_id,
-                user_engaged=self.state.active_topic.user_engaged,
-            )
+            if self.state.active_topic.user_engaged:
+                await self.topic_manager.mark_engaged(self.state.active_topic.topic_id)
             logger.debug(
                 f"[Topic] Recorded topic {self.state.active_topic.topic_id!r} "
                 f"at session end (engaged={self.state.active_topic.user_engaged})"

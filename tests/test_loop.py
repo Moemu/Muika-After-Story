@@ -223,12 +223,38 @@ def _tick() -> TimeTickEvent:
 )
 def test_think_mode(changes, event, expected):
     engine = _engine()
+    # 主动发言新增"玩家安静"门槛：默认刚说过话的 state 不能触发主动管线。
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=30)
     for name, value in changes.items():
         setattr(engine.state, name, value)
     with patch("muika.core.loop.random", return_value=0.0):
         assert engine.get_think_mode(event) == expected
     if "curiosity" in changes:
         assert engine.state.curiosity == 0.0
+
+
+def test_think_mode_greeting_window_fires(monkeypatch):
+    engine = _engine()
+    engine.state.last_interaction = datetime.now() - timedelta(hours=2)
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {"always": (0, 24)})
+    monkeypatch.setattr(engine.memory, "hour_active_rate", lambda hour: True)
+    assert engine.get_think_mode(_tick()) == "topic"
+
+
+def test_think_mode_greeting_requires_quiet(monkeypatch):
+    engine = _engine()
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=30)
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {"always": (0, 24)})
+    monkeypatch.setattr(engine.memory, "hour_active_rate", lambda hour: True)
+    assert engine.get_think_mode(_tick()) is None
+
+
+def test_think_mode_greeting_requires_active_hour(monkeypatch):
+    engine = _engine()
+    engine.state.last_interaction = datetime.now() - timedelta(hours=2)
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {"always": (0, 24)})
+    monkeypatch.setattr(engine.memory, "hour_active_rate", lambda hour: False)
+    assert engine.get_think_mode(_tick()) is None
 
 
 @pytest.mark.parametrize("opening", ["<heart>", "<HEART>"])
@@ -245,6 +271,9 @@ def engine(monkeypatch, redirect_get_session):
     for name in ("MuikaBrain", "Agent", "TopicManager", "DigestAgent", "ReflectionAgent"):
         monkeypatch.setattr(f"muika.core.loop.{name}", MagicMock())
     engine = Muika(MagicMock(send_message=AsyncMock()), asyncio.Queue())
+    engine.topic_manager.record_topic_used = AsyncMock()
+    engine.topic_manager.mark_engaged = AsyncMock()
+    engine.topic_manager.kind_budget_block = AsyncMock(return_value=None)
     engine.reflection.maybe_reflect = AsyncMock()
     engine.agent.model.config = ModelConfig(provider="_echo")
     engine.agent.model.ask = AsyncMock(return_value=ModelCompletions(text="We talked about a small personal detail."))
@@ -298,7 +327,7 @@ async def test_chat_and_session_end_keep_background_task(engine):
         return ModelCompletions(text='<agent_result status="completed">Verified.</agent_result>')
 
     engine.agent.action_lock = asyncio.Lock()
-    engine.agent.build_request = lambda command, state=None: ModelRequest(command, tools=[])
+    engine.agent.build_request = lambda command, state=None, *, read_only=False: ModelRequest(command, tools=[])
     engine.agent.model.step = step
     engine.brain.generate_reply = AsyncMock(side_effect=["我去看看。<agent>Develop Daily</agent>", "我在呢。"])
     worker = asyncio.create_task(engine.agent_tasks.run())
@@ -363,10 +392,14 @@ async def test_shutdown_waits_for_background_cleanup(engine):
 
 async def test_failed_memory_does_not_discard_following_silent_notes(engine):
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing><memory>first</memory><memory>second</memory>")
-    engine.memory.add_material = AsyncMock(side_effect=[RuntimeError("offline"), None])
+    engine.memory.record_silence = AsyncMock()
+    # 第一次是沉默轮原始输出的回写（辅助行为），之后才是 memory 内容；
+    # 第 2 次（first）失败时，后续 second 不能被丢弃。
+    engine.memory.add_material = AsyncMock(side_effect=[None, RuntimeError("offline"), None])
     await engine._run_brain_pipeline(TimeTickEvent())
     await asyncio.gather(*list(engine._tasks))
-    assert [call.args[1] for call in engine.memory.add_material.await_args_list] == ["first", "second"]
+    contents = [call.args[1] for call in engine.memory.add_material.await_args_list]
+    assert contents[1:3] == ["first", "second"]
     engine.executor.send_message.assert_not_awaited()
 
 
@@ -401,7 +434,8 @@ async def test_dissonance_initiative_allows_silence_and_uses_cooldown(engine):
 
     engine.memory.persistent.dissonance = 0.7
     engine.memory.persistent.intentions = [Intention(id="poem", description="Read a poem")]
-    engine.state.last_interaction = datetime.now() - timedelta(minutes=5)
+    # 主动发言新增"玩家安静"门槛（10 分钟），此处用安静 30 分钟的玩家。
+    engine.state.last_interaction = datetime.now() - timedelta(minutes=30)
     assert engine.get_think_mode(TimeTickEvent()) == "emotional"
     engine.brain.generate_reply = AsyncMock(return_value="<do_nothing>")
     await engine._run_brain_pipeline(TimeTickEvent())
@@ -410,3 +444,26 @@ async def test_dissonance_initiative_allows_silence_and_uses_cooldown(engine):
     engine.memory.persistent.last_considered_at = datetime.now() - timedelta(days=1)
     engine.state.last_proactive_at = datetime.now()
     assert engine.get_think_mode(TimeTickEvent()) is None
+
+
+def test_history_preserves_heart_without_replaying_controls():
+    parsed = Muika._parse_reply_tags(
+        "<heart>Keep thinking.</heart>Hello<memory>A note.</memory>"
+        '<agent>Read.</agent><state>{"mood":"happy"}</state><restart>'
+    )
+    assert parsed.context_reply == "<heart>Keep thinking.</heart>Hello"
+
+
+async def test_failed_topic_delivery_does_not_consume_budget(engine):
+    from muika.core.executor import SendReceipt
+    from muika.core.topic_manager import EventTopic
+
+    topic = EventTopic(id="test-delivery", title="A thought", content="A detail", category="test", source="test")
+    engine.topic_manager.get_next_topic = AsyncMock(return_value=topic)
+    engine.brain.expand_topic = AsyncMock(return_value="A detail worth sharing.<timeout: 10min>")
+    engine.executor.send_message.return_value = SendReceipt.FAILED
+    await engine._run_topic_pipeline()
+    engine.topic_manager.record_topic_used.assert_not_awaited()
+    assert engine.state.active_topic is None
+    engine.topic_manager.enqueue_event.assert_called_once_with(topic)
+    assert engine._timeout_task is None

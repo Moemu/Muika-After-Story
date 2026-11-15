@@ -44,11 +44,12 @@ def web_search_plugin():
 
 @pytest.fixture
 def daytime_initiative(monkeypatch):
-    """将非时段场景的主动开场判断固定在本地正午。"""
+    """将非时段场景的主动开场判断固定在本地正午，并关闭时段问候。"""
     from muika.core.memory import MemoryManager
 
     original = MemoryManager.can_initiate_at
     monkeypatch.setattr(MemoryManager, "can_initiate_at", lambda memory, now: original(memory, now.replace(hour=12)))
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {})
 
 
 @pytest.fixture

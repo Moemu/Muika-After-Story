@@ -416,14 +416,14 @@ async def test_self_mod_approval_survives_error_conversion(core_app_factory, rec
         result = await dispatch_call(call, {tool.name: tool for tool in get_tool_list()})
     assert result.is_error and result.review_id
     record = CodeReviewer().load(result.review_id)
-    assert record.kind == kind and record.status == "unavailable"
+    assert record.kind == kind and record.status == "pending"
     assert not target.exists()
     recorder.record("self_mod_approval", action_kind=kind, review_id=record.id, formal_file_changed=False)
 
 
 @pytest.mark.parametrize("waiting", ["lock", "model"])
 async def test_approval_deadline_preserves_request(core_app_factory, recorder, monkeypatch, waiting):
-    """排队和模型等待到期均保存不可用请求，迟到结果不获批准。"""
+    """排队和模型等待到期均挂起请求，保留玩家批准入口。"""
     app = await core_app_factory()
     limit = 0.1
     monkeypatch.setattr(code_review, "REVIEW_TIMEOUT_SECONDS", limit)
@@ -442,12 +442,14 @@ async def test_approval_deadline_preserves_request(core_app_factory, recorder, m
                 await reviewer.authorize("execution", {"command": "print(1)"})
             assert context.review_id
             record = reviewer.load(context.review_id)
-            assert record.status == "unavailable"
+            assert record.status == "pending"
     finally:
         if gate.locked():
             gate.release()
     elapsed = perf_counter() - started
-    # 超时契约已由 record.status == "unavailable" 证明；这里只排除「等到迟到模型结果」。
+    reviewer.decide(record.id, True)
+    assert reviewer.load(record.id).status == "approved"
+    # 超时契约已由 record.status == "pending" 证明；这里只排除「等到迟到模型结果」。
     assert elapsed < 1.0
     recorder.record("approval_deadline", waiting=waiting, seconds=elapsed, status=record.status)
 

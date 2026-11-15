@@ -479,7 +479,7 @@ async def test_resources_are_immutable_and_private_tags_never_recalled(tmp_path)
     assert memory.recent_turns[-1].resources[0].path != str(path)
     assert "private" not in await memory.read_source(f"experience:{ref}")
     assert "<state>" not in await memory.read_source(f"experience:{ref}")
-    assert memory.recent_turns[-1].content == "Hello"
+    assert memory.recent_turns[-1].content == "<heart>private</heart>Hello"
 
 
 async def test_context_summary_commits_before_replacing_history(monkeypatch):
@@ -778,3 +778,29 @@ async def test_prepare_context_compaction_clips_system_while_preserving_full_wor
     # 核心约束：snapshot.working_summary 保存的是 compactor 的完整生成文本，绝不被截断回写
     assert memory.snapshot.working_summary == full_compactor_output
     assert len(memory.snapshot.working_summary) > PROMPT_WORKING_SUMMARY_CHARS
+
+
+async def test_silent_context_survives_without_counting_as_speech():
+    memory = MemoryManager()
+    await memory.load()
+    now = datetime.now()
+    await memory.add_context("user", "Good night.", timestamp=now - timedelta(minutes=30))
+    previous = memory.last_dialogue_at
+    await memory.add_context("muika", "<heart>Let him rest.</heart><do_nothing>", timestamp=now)
+    assert "Let him rest." in memory.recent_turns[-1].content
+    assert memory.last_dialogue_at == previous
+    assert await memory.absence_activity(previous, now + timedelta(seconds=1)) == (0, 0)
+    restored = MemoryManager()
+    await restored.load()
+    assert not any(role == "muika" for _, role in restored._dialogue_times)
+
+
+async def test_absence_interval_excludes_return_message():
+    memory = MemoryManager()
+    await memory.load()
+    now = datetime.now()
+    before = now - timedelta(days=2)
+    await memory.add_context("user", "See you.", timestamp=before)
+    await memory.add_context("muika", "Still waiting.", timestamp=before + timedelta(days=1))
+    await memory.add_context("user", "I am back.", timestamp=now)
+    assert await memory.absence_activity(before, now) == (1, 0)

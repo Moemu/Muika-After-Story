@@ -5,6 +5,8 @@
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from muika.core.events import SessionBootstrapEvent
 
 
@@ -26,3 +28,18 @@ def test_absence_bucket_under_one_day_medium():
 
 def test_absence_bucket_over_one_day_long():
     assert _boot(datetime.now() - timedelta(days=2)).absence_bucket == "long"
+
+
+@pytest.mark.parametrize(
+    "gap, expected",
+    [
+        (timedelta(hours=1), "short"),
+        (timedelta(hours=3), "medium"),
+        (timedelta(days=1) - timedelta(microseconds=1), "medium"),
+        (timedelta(days=1), "long"),
+    ],
+)
+def test_historical_bootstrap_uses_event_timestamp(gap, expected):
+    timestamp = datetime(2020, 1, 2)
+    event = SessionBootstrapEvent(timestamp=timestamp, last_chat_time=timestamp - gap)
+    assert event.absence_bucket == expected

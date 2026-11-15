@@ -132,6 +132,29 @@ class TaskContextPreparer:
         return request, compacted
 
 
+def _notification_body(task: TaskRecord) -> str:
+    """把任务终态转成给她看的一句事实；技术错误保留在 task.error 供排查。"""
+    if task.report:
+        return task.report.summary
+    if task.status == "cancelled":
+        return "You stopped this action."
+    if task.status in {"blocked", "failed"}:
+        reason = (task.error or task.report_error or "").lower()
+        if task.pending_review_id:
+            try:
+                review = get_code_reviewer().load(task.pending_review_id)
+            except (OSError, ValueError):
+                review = None
+            if review is not None and review.status in {"pending", "ask_user"}:
+                return "The action did not go through; it is waiting for the player's confirmation."
+            if review is not None and review.status == "denied":
+                return "The player declined this action; it did not go through."
+        if "permission" in reason or "not allowed" in reason or "denied" in reason:
+            return "The action did not go through; the player has not given the needed permission."
+        return "The action did not go through; it can be tried again with a different approach."
+    return task.error or task.report_error or "Task cancelled."
+
+
 class AgentTasks:
     """拥有单一执行任务、等待队列和恢复检查点。"""
 
@@ -216,7 +239,9 @@ class AgentTasks:
         if removed:
             logger.info(f"[AgentTask] Cleaned {removed} expired scratch dir(s).")
 
-    async def submit(self, instruction: str, original_request: str, *, intention_id: str | None = None) -> TaskRecord:
+    async def submit(
+        self, instruction: str, original_request: str, *, intention_id: str | None = None, read_only: bool = False
+    ) -> TaskRecord:
         """保存新任务，执行工作由后台循环负责。"""
         await self.initialize()
         async with self._lock:
@@ -237,7 +262,12 @@ class AgentTasks:
                     intention = next((i for i in self.state.memory.persistent.intentions if i.id == intention_id), None)
                     if intention is None or intention.task_id is not None or intention.status != "open":
                         raise ValueError("The intention is missing, resolved or already linked to a task")
-            task = TaskRecord(instruction=instruction, original_request=original_request, intention_id=intention_id)
+            task = TaskRecord(
+                instruction=instruction,
+                original_request=original_request,
+                intention_id=intention_id,
+                read_only=read_only,
+            )
             await self._save(task)
             self.tasks[task.id] = task
             if intention_id and self.state.memory is not None:
@@ -387,6 +417,7 @@ class AgentTasks:
             request = self.agent.build_request(
                 f"{task.instruction}\n\nOriginal request:\n{task.original_request}\n\nAcceptance:\n{task.acceptance}",
                 self.state,
+                read_only=task.read_only,
             )
             if uncertain:
                 safe = {name for name, caller in get_function_calls().items() if caller.read_only}
@@ -745,7 +776,7 @@ class AgentTasks:
         if key in self._notifications:
             return
         self._notifications.add(key)
-        body = task.report.summary if task.report else task.error or task.report_error or "Task cancelled."
+        body = _notification_body(task)
         completed_at = datetime.fromisoformat(task.updated_at).astimezone().replace(tzinfo=None)
         await self.events.put(AgentTaskEvent(task.id, task.revision, task.status, body, timestamp=completed_at))
 
@@ -755,8 +786,7 @@ class AgentTasks:
             task
             and task.revision == event.revision
             and task.status == event.status
-            and event.report
-            == (task.report.summary if task.report else task.error or task.report_error or "Task cancelled.")
+            and event.report == _notification_body(task)
             and not (task.notified_revision == event.revision and task.notified_status == event.status)
         )
 

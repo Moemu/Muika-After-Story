@@ -66,7 +66,9 @@ def factory(monkeypatch):
         agent.action_lock = asyncio.Lock()
         agent.model = StepModel(script)
         agent.memory_reasoner.compactor = ContextCompactor(agent.model)
-        agent.build_request = lambda command, state=None: ModelRequest(command, tools=get_tool_list())
+        agent.build_request = lambda command, state=None, read_only=False: ModelRequest(
+            command, tools=get_tool_list("read_only" if read_only else None)
+        )
         return AgentTasks(agent, MuikaState(), MagicMock(), queue if queue is not None else asyncio.Queue())
 
     return create
@@ -383,7 +385,10 @@ async def test_failed_checkpoint_prevents_action(factory, monkeypatch):
         event = await _event(manager)
         assert event.status == "failed"
         assert performed == []
-        assert "disk full" in event.report
+        # 事件回执给玩家侧人格化事实；技术错误保留在任务记录里
+        assert "The action did not go through" in event.report
+        assert "disk full" not in event.report
+        assert "disk full" in (manager.tasks[event.task_id].error or "")
     finally:
         await _stop(manager, worker)
 

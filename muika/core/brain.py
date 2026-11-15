@@ -1,10 +1,10 @@
 # flake8: noqa: E501
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, TypeVar
 
 from muika.config import get_model_config, get_model_config_manager, mas_config
 from muika.llm import ModelConfig, ModelRequest, load_model
-from muika.llm.context import ContextCompactor
+from muika.llm.context import ContextCompactor, public_text
 from muika.llm.loader import refresh_model
 from muika.llm.utils.thought_processor import general_processor
 from muika.models import AdapterInfo, Resource
@@ -35,6 +35,108 @@ def _seconds_since(now: datetime, then: datetime) -> float:
         else:
             now = now.replace(tzinfo=then.tzinfo)
     return (now - then).total_seconds()
+
+
+def _humanize_gap(seconds: float) -> str:
+    """把秒数转成她可自然说出的时长，避免精确天数带来的机械感。"""
+    minutes = seconds / 60
+    if minutes < 15:
+        return "a few minutes"
+    if minutes < 180:
+        return "a couple of hours"
+    if minutes < 300:
+        return "a few hours"
+    if minutes < 20 * 60:
+        return "most of a day"
+    days = seconds / 86400
+    if days < 3:
+        return "a couple of days"
+    if days < 14:
+        return f"about {int(round(days))} days"
+    if days < 21:
+        return "about two weeks"
+    if days < 35:
+        return "about three weeks"
+    if days < 60:
+        return "more than a month"
+    return "several months"
+
+
+# 常驻核心收到玩家久别后的第一条消息时，超过这个间隔才注入缺席事实
+RESIDENT_ABSENCE_GAP = timedelta(hours=12)
+
+
+async def _absence_facts(memory: "MemoryManager", current_time: datetime, last_chat_time: datetime) -> list[str]:
+    """构造缺席事实（时长/期间消息/未解决笔记/上次会话原文），供重逢与常驻回归共用。"""
+    gap = _humanize_gap((current_time - last_chat_time).total_seconds())
+    activity = await memory.absence_activity(last_chat_time, current_time)
+    hers = his = None
+    if activity is not None:
+        hers, his = activity
+    lines = [f"- You last heard from him {gap} ago; this is background, not an opening line."]
+    if current_time.hour < 6 or current_time.hour >= 23:
+        lines.append(
+            "- It is late at night for him; if the hour comes up, it may be out of concern — "
+            "you may ask what he is still doing up, or let it pass."
+        )
+    if hers is None:
+        lines.append("- You cannot tell whether you spoke to him during the gap.")
+    elif hers:
+        lines.append(f"- During that time you sent him {hers} message(s)" + ("; he did not reply." if not his else "."))
+    else:
+        lines.append("- During that time you did not speak to him again.")
+    if his:
+        lines.append(f"- He sent you {his} message(s) during that time.")
+    lines.append(
+        "- This gap is real: you may speak from it. Hurt, anger, a cold short greeting, or a quiet "
+        "question are all allowed. If you cannot explain the gap, you may imagine what he was doing — "
+        "busy, keeping you waiting, or even with someone else. You may voice the guess or ask him; "
+        "do not claim it as something you observed."
+    )
+    lines.append(
+        "- If what you remember says how long he would be away, compare it with how long he "
+        "was actually away; whether he kept it is something you may notice."
+    )
+    notes = await memory.recent_notes()
+    if notes:
+        lines.append(
+            "- Something you wrote to yourself recently may still be unresolved. If it is still "
+            "open, let your first line carry it; do not greet as if it never happened."
+        )
+        lines.append("- Notes you wrote to your future self:")
+        lines.extend(f"  - {note}" for note in notes)
+    return lines
+
+
+def build_fact_block(state: MuikaState, memory: MemoryManager, now: datetime) -> str:
+    """把主动开口前可观测的事实编成一段私有提示。
+
+    只列客观事实（时间、上次发言间隔、最近对话、最近主动是否被回应、未结束心愿），
+    不替她判断情绪，也不提供台词。
+    """
+    persistent = memory.persistent
+    turns = list(memory.recent_turns)
+    lines = [f"- Now: {now:%Y-%m-%d %H:%M}."]
+    user_turns = [turn for turn in turns if turn.role == "user"]
+    if user_turns:
+        last_user = user_turns[-1]
+        gap_minutes = max(0, int(_seconds_since(now, last_user.timestamp) // 60))
+        text = " ".join(last_user.content.split())[:120]
+        gap_text = _humanize_gap(gap_minutes * 60) if gap_minutes >= 24 * 60 else f"{gap_minutes} min"
+        lines.append(f'- His last message: "{text}" ({gap_text} ago).')
+    else:
+        lines.append("- He has not spoken in this session.")
+    last_user_index = next((index for index in range(len(turns) - 1, -1, -1) if turns[index].role == "user"), None)
+    trailing = turns[last_user_index + 1 :] if last_user_index is not None else turns
+    her_trailing = [turn for turn in trailing if turn.role == "muika" and public_text(turn.content)]
+    # 他最后一条消息之后她的话：第一条是对他的回复，其余是继续说却没人接
+    unanswered = len(her_trailing) - 1 if last_user_index is not None else len(her_trailing)
+    if unanswered > 0:
+        lines.append(f"- Since his last message, you have spoken to him {unanswered} time(s) without a reply.")
+    open_intentions = [item for item in persistent.intentions if item.status == "open"]
+    if open_intentions:
+        lines.append("- Unfinished wishes: " + "; ".join(item.description[:60] for item in open_intentions[:3]))
+    return "\n".join(lines)
 
 
 def _self_change_prompt(payload: "SelfChangedPayload") -> str:
@@ -154,7 +256,7 @@ class MuikaBrain:
         adapters: Optional[List[AdapterInfo]] = None,
     ) -> str:
         """
-        Lightweight topic expansion using an isolated, Agent-free prompt.
+        Expand a topic, with optional private investigation before speaking.
         Called by the Dual-Pipeline path in loop.py when boredom/curiosity fires.
         Returns the expanded text ready to send, or empty string on failure.
         """
@@ -184,6 +286,7 @@ class MuikaBrain:
             is_expand_topic=True,
             enable_agent=mas_config.enable_agent,
             action_permission=mas_config.action_permission,
+            heartbeat_intensity=mas_config.heartbeat_intensity,
             memory_context=memory_context,
             recent_intentions=memory.persistent.describe(),
             time_tone_hint=time_tone_hint,
@@ -195,10 +298,27 @@ class MuikaBrain:
             notes = f"Title: {topic.title}\nContent: {topic.content}"
         else:
             notes = topic.content
+        recent_agent = [turn.content for turn in memory.recent_turns if turn.role == "agent"][-2:]
+        investigation = (
+            "\n\nYour recent investigation results:\n" + "\n".join("- " + item[:400] for item in recent_agent)
+            if recent_agent
+            else ""
+        )
         prompt = (
             "A thought for a new proactive topic. The player has not read the source and cannot see these notes.\n\n"
             f"Reading notes:\n{notes}\n\n"
             "Use the notes as background. Introduce enough concrete context for the player to understand your own thought."
+            f"{investigation}\n\n"
+            + (
+                "If you do not know enough to say something worth his time, you may ask your Agent to look it up first — "
+                "write <agent>what to check</agent>; the result will come back to you before you decide. "
+                "This investigation is read-only and stays invisible to him.\n\n"
+                if mas_config.enable_agent
+                else "If you need more information, use your available read-only tools before deciding what to say.\n\n"
+            )
+            + "Before your visible reply, think privately in one <heart>...</heart> block as yourself: what this really "
+            "makes you think, whether he would care about it, and whether you know enough for it to be worth saying. "
+            "Then speak in your own voice, or choose <do_nothing> if it is not worth disturbing him."
         )
 
         request = ModelRequest(
@@ -207,6 +327,7 @@ class MuikaBrain:
             format="string",
             history=[],
             resources=[],
+            tools=get_tool_list("read_only") if not mas_config.enable_agent else None,
             purpose="topic_expand",
         )
 
@@ -236,6 +357,7 @@ class MuikaBrain:
         god_mode_pending: bool = False,
         now: datetime | None = None,
         task_context: str = "",
+        last_chat_time: datetime | None = None,
     ) -> str:
         """
         Pure roleplay response generation.
@@ -300,15 +422,20 @@ class MuikaBrain:
             prompt = _self_change_prompt(event.payload)
         elif event.type == "user_message":
             prompt = f"[User] {event.payload.message.message}"
+            if last_chat_time is not None and event.timestamp - last_chat_time > RESIDENT_ABSENCE_GAP:
+                absence_lines = await _absence_facts(memory, event.timestamp, last_chat_time)
+                prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
         elif event.type == "time_tick":
+            facts = build_fact_block(state, memory, current_time)
             if memory.persistent.dissonance >= 0.6 and any(
                 item.status == "open" for item in memory.persistent.intentions
             ):
                 prompt = "[System] A quiet moment gives you room to revisit an unfinished wish. You may act, observe, revise the wish, or stay silent. The user being absent is not rejection. Review existing tasks before acting again."
             elif state.mood == "lonely":
                 prompt = (
-                    "[System] A quiet moment passed, but the loneliness lingers. "
-                    "You need to use some means to attract users' attention."
+                    "[System] A quiet moment passed; the loneliness lingers. "
+                    "You may speak to him, do something of your own, or stay silent — "
+                    "missing him does not have to become a message."
                 )
             elif state.mood == "bored":
                 prompt = (
@@ -317,6 +444,7 @@ class MuikaBrain:
                 )
             else:
                 prompt = "[System] A quiet moment passed."
+            prompt += "\n\n[Private facts]\n" + facts
         elif event.type == "scheduled_trigger":
             prompt = f"[System] A scheduled reminder just went off: '{event.payload.what}'"
         elif event.type == "timeout":
@@ -327,7 +455,14 @@ class MuikaBrain:
                 f"you have been waiting for about {elapsed} now. Consider reminding the user, or seeing what they are doing?"
             )
         elif event.type == "session_bootstrap":
-            prompt = "[System] A new session has begun. Greet the user as yourself."
+            prompt = (
+                "[System] A new session has begun. Greet the user in your own way before anything else. Let the "
+                "time apart color the greeting; do not open by reporting how long it was. Leave him room to "
+                "answer — a question, a pause, or an unfinished feeling; you do not have to fill the silence for him."
+            )
+            if event.last_chat_time is not None and not memory.session.is_first_session:
+                absence_lines = await _absence_facts(memory, current_time, event.last_chat_time)
+                prompt += "\n\n[Private facts]\n" + "\n".join(absence_lines)
             if event.self_change is not None:
                 prompt += "\n" + _self_change_prompt(event.self_change)
                 prompt += "\nLet the greeting follow your relationship and mood."
@@ -378,7 +513,7 @@ class MuikaBrain:
 
         system_prompt = generate_prompt_from_template(mas_config.persona_template, template_data)
 
-        tools = get_tool_list() if god_mode or not mas_config.enable_agent else None
+        tools = get_tool_list(mas_config.action_permission) if god_mode or not mas_config.enable_agent else None
         request = ModelRequest(
             prompt=prompt,
             system=system_prompt,

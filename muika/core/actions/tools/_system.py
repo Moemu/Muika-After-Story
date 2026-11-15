@@ -32,7 +32,7 @@ except ImportError:
     pyperclip = None
 
 
-@on_function_call("Get the title and process of the currently focused window.")
+@on_function_call("Get the title and process of the currently focused window.", read_only=True)
 async def get_focused_window() -> str:
     """读取当前窗口信息，依赖不可用时返回明确提示。"""
     if sys.platform != "win32":
@@ -58,7 +58,7 @@ async def get_focused_window() -> str:
         return ToolError(f"Error getting focused window: {e}")
 
 
-@on_function_call("Get system load indicators such as CPU, memory, and battery.")
+@on_function_call("Get system load indicators such as CPU, memory, and battery.", read_only=True)
 async def get_system_status():
 
     try:
@@ -108,7 +108,7 @@ async def send_desktop_notification(title: str, message: str, timeout: int = 5) 
         return ToolError(f"Failed to send desktop notification: {e}")
 
 
-@on_function_call("Read the current text content of the system clipboard.")
+@on_function_call("Read the current text content of the system clipboard.", read_only=True)
 async def read_clipboard():
     if pyperclip is None:
         return ToolError("pyperclip is not installed. Run: pip install pyperclip")

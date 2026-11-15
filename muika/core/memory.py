@@ -112,6 +112,14 @@ DIALOGUE_KINDS = ("user", "muika")
 """可进入对话摘要的经历类型；行动回执属于运行记录，不参与关系摘要。"""
 
 
+def _dialogue_activity_filter() -> ColumnElement[bool]:
+    """筛选实际对话消息，排除仅供私有连续性使用的沉默记录。"""
+    return and_(
+        ExperienceORM.kind.in_(DIALOGUE_KINDS),
+        or_(ExperienceORM.source.is_(None), ~ExperienceORM.source.startswith("silence:reply:")),
+    )
+
+
 def _visible_working_summary(summary: str) -> str:
     """按段落倒序保留最新上下文并限制在预算字符内，只作为读取投影不写回。
 
@@ -226,6 +234,13 @@ class MemoryManager:
             previous = stamp
         return len(active_days) >= ACTIVITY_MIN_DAYS and len(matching_days) >= ACTIVITY_MIN_MATCHING_DAYS
 
+    def hour_active_rate(self, hour: int, days: int = ACTIVITY_HISTORY_DAYS) -> bool:
+        """判断玩家在最近 *days* 天的该小时是否活跃；无历史记录时允许问候。"""
+        if not self._dialogue_times:
+            return True
+        since = datetime.now() - timedelta(days=days)
+        return any(kind == "user" and stamp >= since and stamp.hour == hour for stamp, kind in self._dialogue_times)
+
     async def _save_snapshot(self, db: AsyncSession, snapshot: MemorySnapshot) -> None:
         await db.merge(MemoryRuntimeORM(id=1, payload=snapshot.model_dump_json()))
 
@@ -248,7 +263,7 @@ class MemoryManager:
                 last_dialogue_at = await db.scalar(
                     select(func.max(ExperienceORM.occurred_at)).where(
                         ExperienceORM.session_id.in_([snapshot.session.session_id, *snapshot.resume_sessions]),
-                        ExperienceORM.kind.in_(DIALOGUE_KINDS),
+                        _dialogue_activity_filter(),
                     )
                 )
                 cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
@@ -259,7 +274,7 @@ class MemoryManager:
                         (local_time(stamp), kind)
                         for stamp, kind in await db.execute(
                             select(ExperienceORM.occurred_at, ExperienceORM.kind).where(
-                                ExperienceORM.kind.in_(DIALOGUE_KINDS), ExperienceORM.occurred_at >= cutoff.isoformat()
+                                _dialogue_activity_filter(), ExperienceORM.occurred_at >= cutoff.isoformat()
                             )
                         )
                     }
@@ -392,7 +407,14 @@ class MemoryManager:
     ) -> int:
         """追加素材；来源标识防止事件重投产生重复记录。"""
         now = local_time((timestamp or datetime.now()).isoformat())
-        if kind in {"muika", "agent", "note"}:
+        spoken = public_text(content) if kind == "muika" else content
+        if kind == "muika":
+            hearts = re.findall(r"<heart\s*>(.*?)</heart\s*>", content, flags=re.S | re.I)
+            content = "".join(f"<heart>{text}</heart>" for text in hearts) + spoken
+            if not spoken:
+                content += "<do_nothing>"
+                source = source or f"silence:reply:{uuid4().hex}"
+        elif kind in {"agent", "note"}:
             content = public_text(content)
         async with self._lock:
             snapshot = self.snapshot.model_copy(deep=True)
@@ -412,13 +434,13 @@ class MemoryManager:
                 )
                 db.add(row)
                 await db.flush()
-                if kind in {"user", "muika"} and snapshot.first_interaction_at is None:
+                if kind in DIALOGUE_KINDS and spoken and snapshot.first_interaction_at is None:
                     snapshot.first_interaction_at = now
                 await self._save_snapshot(db, snapshot)
                 turn = self._turn(row) if kind in {"user", "muika", "agent"} else None
                 row_id = row.id
             self.snapshot = snapshot
-            if kind in DIALOGUE_KINDS:
+            if kind in DIALOGUE_KINDS and spoken:
                 self.last_dialogue_at = max(self.last_dialogue_at, now) if self.last_dialogue_at else now
                 cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
                     days=ACTIVITY_HISTORY_DAYS, seconds=SESSION_IDLE_TIMEOUT
@@ -704,6 +726,97 @@ class MemoryManager:
             if (date.fromisoformat(day) <= cutoff if include_today else date.fromisoformat(day) < cutoff)
             and latest > diaries.get(day, 0)
         )
+
+    async def absence_activity(self, since: datetime, until: datetime) -> tuple[int, int] | None:
+        """统计 (since, until) 之间她发出与玩家发来的消息数；查询失败返回 None（未知，不伪造事实）。"""
+        try:
+            return await self._absence_activity(since, until)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Memory] Absence activity unavailable: {type(exc).__name__}")
+            return None
+
+    async def _absence_activity(self, since: datetime, until: datetime) -> tuple[int, int]:
+        # occurred_at 是 T 分隔的 ISO 文本；必须用同一格式的字符串比较，绑定 datetime 会错位一天
+        start = since.isoformat()
+        end = until.isoformat()
+        async with get_session() as db:
+            hers = await db.scalar(
+                select(func.count(ExperienceORM.id)).where(
+                    ExperienceORM.kind == "muika",
+                    _dialogue_activity_filter(),
+                    ExperienceORM.occurred_at > start,
+                    ExperienceORM.occurred_at < end,
+                )
+            )
+            his = await db.scalar(
+                select(func.count(ExperienceORM.id)).where(
+                    ExperienceORM.kind == "user",
+                    ExperienceORM.occurred_at > start,
+                    ExperienceORM.occurred_at < end,
+                )
+            )
+        return int(hers or 0), int(his or 0)
+
+    async def last_user_message_at(self) -> datetime | None:
+        """返回玩家最近一条消息的时间（跨会话，含已结束的会话）。"""
+        async with get_session(record_activity=False) as db:
+            stamp = await db.scalar(select(func.max(ExperienceORM.occurred_at)).where(ExperienceORM.kind == "user"))
+        return local_time(stamp) if stamp else None
+
+    async def recent_notes(self, limit: int = 2, days: int = 14) -> list[str]:
+        """返回最近她在 <memory> 里写给自己的笔记（截断），用于跨会话的情绪残留。"""
+        try:
+            return await self._recent_notes(limit, days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Memory] Recent notes unavailable: {type(exc).__name__}")
+            return []
+
+    async def _recent_notes(self, limit: int, days: int) -> list[str]:
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        async with get_session() as db:
+            rows = await db.scalars(
+                select(ExperienceORM)
+                .where(
+                    ExperienceORM.kind == "note",
+                    ExperienceORM.occurred_at >= since,
+                    or_(
+                        ExperienceORM.source.is_(None),
+                        and_(
+                            ExperienceORM.source.not_like("silence:%"),
+                            ExperienceORM.source.not_like("ipc:%"),
+                        ),
+                    ),
+                )
+                .order_by(ExperienceORM.occurred_at.desc(), ExperienceORM.id.desc())
+                .limit(limit)
+            )
+            return [" ".join(row.content.split())[:160] for row in rows if row.content.strip()]
+
+    async def record_silence(self, event_type: str) -> None:
+        """记录一次主动选择的沉默（供复算）；不作为她的笔记注入上下文。"""
+        try:
+            await self.add_material(
+                "note",
+                f"Muika chose silence on {event_type}.",
+                source=f"silence:{event_type}:{uuid4().hex[:8]}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Memory] Silence record unavailable: {type(exc).__name__}")
+
+    async def silence_count(self, since: datetime | None = None) -> int:
+        """统计已记录的沉默次数（可按起始时间过滤）。"""
+        start = (since or datetime.min).isoformat()
+        async with get_session() as db:
+            return int(
+                await db.scalar(
+                    select(func.count(ExperienceORM.id)).where(
+                        ExperienceORM.kind == "note",
+                        ExperienceORM.source.like("silence:%"),
+                        ExperienceORM.occurred_at >= start,
+                    )
+                )
+                or 0
+            )
 
     async def day_material(self, day: date) -> list[Experience]:
         async with get_session() as db:
