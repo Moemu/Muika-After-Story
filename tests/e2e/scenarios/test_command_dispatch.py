@@ -155,7 +155,7 @@ async def test_background_reading_keeps_commands_and_messages_available(
                 history = await TopicHistoryCRUD.get_by_topic_id(db, topic.id)
             assert usage and sum(row.input_tokens for row in usage) > 0
             assert cached is not None and cached.keep == 1
-            assert history is not None
+            assert history is None
             app.recorder.record(
                 "reading_and_conversation_completed", waiting_at=waiting_at, usage_rows=len(usage), topic=topic.id
             )

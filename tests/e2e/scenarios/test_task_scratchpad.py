@@ -423,7 +423,7 @@ async def test_self_mod_approval_survives_error_conversion(core_app_factory, rec
 
 @pytest.mark.parametrize("waiting", ["lock", "model"])
 async def test_approval_deadline_preserves_request(core_app_factory, recorder, monkeypatch, waiting):
-    """排队和模型等待到期均挂起请求，保留玩家批准入口。"""
+    """排队和模型等待到期均保留挂起记录，未完成审查的请求只能拒绝。"""
     app = await core_app_factory()
     limit = 0.1
     monkeypatch.setattr(code_review, "REVIEW_TIMEOUT_SECONDS", limit)
@@ -447,8 +447,12 @@ async def test_approval_deadline_preserves_request(core_app_factory, recorder, m
         if gate.locked():
             gate.release()
     elapsed = perf_counter() - started
-    reviewer.decide(record.id, True)
-    assert reviewer.load(record.id).status == "approved"
+    assert record.parked
+    with pytest.raises(ReviewError, match="parked action cannot be approved"):
+        reviewer.decide(record.id, True)
+    assert reviewer.load(record.id).status == "pending"
+    reviewer.decide(record.id, False)
+    assert reviewer.load(record.id).status == "denied"
     # 超时契约已由 record.status == "pending" 证明；这里只排除「等到迟到模型结果」。
     assert elapsed < 1.0
     recorder.record("approval_deadline", waiting=waiting, seconds=elapsed, status=record.status)
