@@ -28,9 +28,9 @@ from nonebot_plugin_alconna import (
 )
 from nonebot_plugin_alconna.builtins.extensions import ReplyRecordExtension
 
-from muika.config import mas_config
 from muika.models import Resource
 from muika.utils.logger import logger
+from muika_bot.config import bot_config
 
 from .first_run import require_user_agreement
 from .ipc_client import IpcClient
@@ -43,11 +43,11 @@ driver = get_driver()
 session_manager = SessionManager()
 
 _ipc_client: IpcClient = IpcClient(
-    core_url=mas_config.core_ws_url,
-    secret=mas_config.ipc_secret,
-    client_name=mas_config.client_name or "nonebot-qq",
+    core_url=bot_config.core_ws_url,
+    secret=bot_config.ipc_secret,
+    client_name=bot_config.client_name or "nonebot-qq",
 )
-_message_target = Target(id=mas_config.master_id, private=True)
+_message_target = Target(id=bot_config.master_id, private=True)
 
 
 async def _is_master(event: Event) -> bool:
@@ -55,7 +55,7 @@ async def _is_master(event: Event) -> bool:
     if event.get_type() != "message":
         return False
     try:
-        return event.get_user_id() == mas_config.master_id
+        return event.get_user_id() == bot_config.master_id
     except (AttributeError, NotImplementedError, ValueError):
         return False
 
@@ -177,7 +177,7 @@ async def startup() -> None:
     logger.info("Starting chat service...")
     require_user_agreement()
 
-    logger.debug(f"Connecting to Core ({mas_config.core_ws_url})...")
+    logger.debug(f"Connecting to Core ({bot_config.core_ws_url})...")
     client = _init_ipc_client()
     asyncio.create_task(client.connect())
     connected = await client.wait_connected(timeout=10.0)
@@ -193,7 +193,7 @@ def _detect_adapter_type() -> str:
     """
     从 NoneBot adapter 元数据推断适配器名称和类型。
     """
-    configured_name = mas_config.client_name
+    configured_name = bot_config.client_name
     if configured_name:
         return configured_name
 

@@ -35,22 +35,20 @@ from muika.plugin.func_call.context import tool_context
     ],
 )
 def test_legacy_flags_do_not_expand_permissions(legacy):
-    config = MASConfig(master_id="test", ipc_secret="test", _env_file=None, **{legacy: True})
+    config = MASConfig(ipc_secret="test", _env_file=None, **{legacy: True})
     assert config.action_permission == "read_only"
-    explicit = MASConfig(
-        master_id="test", ipc_secret="test", _env_file=None, action_permission="write", **{legacy: True}
-    )
+    explicit = MASConfig(ipc_secret="test", _env_file=None, action_permission="write", **{legacy: True})
     assert explicit.action_permission == "write"
     assert legacy not in explicit.model_dump()
 
 
 def test_new_defaults_and_legacy_dotenv(tmp_path):
-    config = MASConfig(master_id="test", ipc_secret="test", _env_file=None)
+    config = MASConfig(ipc_secret="test", _env_file=None)
     assert config.action_permission == "write"
     assert config.code_review_mode == "auto"
     env = tmp_path / "old.env"
     env.write_text("ENABLE_CODE_EXECUTION=false\n", encoding="utf-8")
-    assert MASConfig(master_id="test", ipc_secret="test", _env_file=env).action_permission == "read_only"
+    assert MASConfig(ipc_secret="test", _env_file=env).action_permission == "read_only"
     assert env.read_text(encoding="utf-8") == "ENABLE_CODE_EXECUTION=false\n"
 
 
@@ -100,7 +98,10 @@ async def test_review_failure_and_permission_mismatch_never_start_code(monkeypat
         reviewer.decide(reviewer.records()[0].id, True)
     monkeypatch.setattr(CodeReviewer, "assess", AsyncMock(side_effect=ValueError("invalid model response")))
     result = await _executor.execute_python("print('two')")
-    assert result.is_error and "invalid model response" in result.text
+    assert result.is_error and "parked for the player's confirmation" in result.text
+    parked = next(record for record in CodeReviewer().records() if record.status == "pending")
+    assert "needs a new review" in parked.error
+    assert parked.parked and parked.require_player
     manager.start.assert_not_awaited()
 
 
@@ -227,3 +228,39 @@ async def test_assess_tolerates_markdown_fenced_json(monkeypatch):
     )
     decision = await CodeReviewer().assess(record)
     assert decision.decision == "approve" and decision.effect == "write"
+
+
+async def test_permanent_review_error_is_not_parked(monkeypatch):
+    """证据超预算这类可操作错误必须原样交回，不能变成可批准的人工挂起。"""
+    manager = AsyncMock()
+    monkeypatch.setattr(_executor, "get_process_manager", lambda: manager)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
+    monkeypatch.setattr(mas_config, "code_review_mode", "auto")
+    monkeypatch.setattr(
+        CodeReviewer,
+        "assess",
+        AsyncMock(side_effect=ReviewError("Approval evidence exceeds the context budget. Split the action.")),
+    )
+
+    result = await _executor.execute_python("print('split me')")
+
+    assert result.is_error and "Split the action" in result.text
+    assert not any(record.parked for record in CodeReviewer().records())
+
+
+async def test_parked_review_cannot_be_approved(monkeypatch):
+    """审查未完成的挂起记录没有效果结论，不能被玩家直接放行。"""
+    manager = AsyncMock()
+    monkeypatch.setattr(_executor, "get_process_manager", lambda: manager)
+    monkeypatch.setattr(mas_config, "action_permission", "write")
+    monkeypatch.setattr(mas_config, "code_review_mode", "auto")
+    monkeypatch.setattr(CodeReviewer, "assess", AsyncMock(side_effect=RuntimeError("review service down")))
+
+    result = await _executor.execute_python("print('park me')")
+
+    assert result.is_error
+    parked = next(record for record in CodeReviewer().records() if record.parked)
+    assert parked.require_player is True
+    with pytest.raises(ReviewError, match="cannot be approved"):
+        CodeReviewer().decide(parked.id, True)
+    assert CodeReviewer().load(parked.id).status == "pending"

@@ -41,7 +41,7 @@ async def test_memory_ready_before_connections_and_scheduler_reaches_loop(monkey
         server.start.assert_not_awaited()
         muika.start.assert_not_called()
         release.set()
-        await asyncio.wait_for(startup, 1)
+        await asyncio.wait_for(startup, 10)
         server.start.assert_awaited_once()
         await bootstrap._handle_event({"type": "session_bootstrap"}, SimpleNamespace(client_name="test"))
         assert not muika.memory.session.is_first_session

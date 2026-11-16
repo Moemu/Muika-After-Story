@@ -18,7 +18,7 @@ from muika.ipc.sync_store import SyncStore
 from muika.llm._wrapper import record_plugin_usage
 from muika.models import AdapterInfo
 from muika.plugin.command import on_alconna
-from muika.plugin.loader import load_plugins, unload_plugin
+from muika.plugin.loader import load_plugins, reload_plugin, unload_plugin
 from tests.e2e.harness import ScriptedTurn
 from tests.e2e.harness.scripted_llm import ScriptedLLM
 
@@ -44,6 +44,15 @@ async def test_command_dispatch_bypasses_llm(core_app_factory, builtin_plugins):
     await app.say_command(".help")
     assert app.command_replies[0].startswith("可用命令:")
     assert ".session" in app.command_replies[0]
+    help_text = app.command_replies[0]
+
+    await app.say_command(".plugins")
+    assert "muika_builtin_commands (muika.builtin_plugins.commands) [builtin]" in app.command_replies[-1]
+    assert "web_search (muika.builtin_plugins.web_search) [builtin] — cmds: 0, tools: 1" in app.command_replies[-1]
+
+    reload_plugin("muika.builtin_plugins.commands")
+    await app.say_command(".help")
+    assert app.command_replies[-1] == help_text
 
     # 未匹配命令走兜底回复
     await app.say_command(".definitely_not_a_command")
@@ -146,7 +155,7 @@ async def test_background_reading_keeps_commands_and_messages_available(
                 history = await TopicHistoryCRUD.get_by_topic_id(db, topic.id)
             assert usage and sum(row.input_tokens for row in usage) > 0
             assert cached is not None and cached.keep == 1
-            assert history is not None
+            assert history is None
             app.recorder.record(
                 "reading_and_conversation_completed", waiting_at=waiting_at, usage_rows=len(usage), topic=topic.id
             )

@@ -1,8 +1,7 @@
 """共享 fixtures。
 
-注意：环境变量必须在任何 ``import muika`` 之前设置——``mas_config`` 在 import 期
-即实例化，``master_id`` 为空时会读 ``SUPERUSERS`` 环境变量、``ipc_secret`` 为空时
-会把新密钥写回仓库 ``.env``。这里用 ``setdefault`` 兜底，保证 CI 无 ``.env`` 也能跑。
+环境变量必须在导入配置之前设置。Core 缺少 IPC_SECRET 时会生成密钥并写入 .env；
+Bot 单独读取 MASTER_ID 和 SUPERUSERS。这里用测试值避免读取或改写本机配置。
 """
 
 from __future__ import annotations
@@ -30,16 +29,27 @@ def sandbox(tmp_path, monkeypatch):
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(mas_config, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(mas_config, "enable_agent", True)
     yield
 
 
 @pytest.fixture
+def web_search_plugin():
+    from muika.plugin.loader import load_plugin, unload_plugin
+
+    plugin = load_plugin("muika.builtin_plugins.web_search")
+    yield plugin.module
+    unload_plugin(plugin.package_name)
+
+
+@pytest.fixture
 def daytime_initiative(monkeypatch):
-    """将非时段场景的主动开场判断固定在本地正午。"""
+    """将非时段场景的主动开场判断固定在本地正午，并关闭时段问候。"""
     from muika.core.memory import MemoryManager
 
     original = MemoryManager.can_initiate_at
     monkeypatch.setattr(MemoryManager, "can_initiate_at", lambda memory, now: original(memory, now.replace(hour=12)))
+    monkeypatch.setattr("muika.core.topic_manager.GREETING_SLOTS", {})
 
 
 @pytest.fixture

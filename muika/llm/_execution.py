@@ -42,6 +42,7 @@ async def _timed_model_step(
     status = "interrupted"
     model_name = model.config.model_name or model.config.provider
     error_reason = ""
+    provider_request_id = ""
     logger.debug(
         f"[Model] request submitted - {request.purpose} | request={request_id} model={model_name} "
         f"messages={len(messages)} estimated_input={request_tokens(request, messages)} stream={stream}"
@@ -51,6 +52,7 @@ async def _timed_model_step(
             if first_chunk is None:
                 first_chunk = perf_counter() - started
             usage = chunk.usage
+            provider_request_id = chunk.provider_request_id or provider_request_id
             status = chunk.stop_reason if chunk.succeed else "error"
             if not chunk.succeed and not error_reason:
                 error_reason = chunk.chunk
@@ -62,11 +64,12 @@ async def _timed_model_step(
     finally:
         first = f"{first_chunk:.3f}" if first_chunk is not None else "none"
         detail = f" error={error_reason[:120]}" if status == "error" and error_reason else ""
+        provider = f" provider_request_id={provider_request_id}" if provider_request_id else ""
         secs = perf_counter() - started
         logger.debug(
             f"[Model] request completed - {request.purpose} | request={request_id} seconds={secs:.2f} "
             f"first_chunk_seconds={first} status={status} input_tokens={usage.input_tokens} "
-            f"output_tokens={usage.output_tokens} cached_tokens={usage.cached_tokens}{detail}"
+            f"output_tokens={usage.output_tokens} cached_tokens={usage.cached_tokens}{provider}{detail}"
         )
 
 

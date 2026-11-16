@@ -3,13 +3,6 @@
 from arclet.alconna import Alconna
 
 from muika.plugin.command import get_commands, on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="help",
-    description="列出所有可用命令",
-    usage=".help",
-)
 
 alc = Alconna("help")
 help_cmd = on_alconna(alc)

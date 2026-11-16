@@ -4,9 +4,7 @@ from arclet.alconna import Alconna, Args, Subcommand
 
 from muika.core.state import MuikaState
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
 
-metadata = PluginMetadata(name="nodes", description="活动设备管理", usage=".nodes <list|handoff 设备名|help>")
 nodes_cmd = on_alconna(
     Alconna("nodes", Subcommand("list"), Subcommand("help"), Subcommand("handoff", Args["target", str]))
 )

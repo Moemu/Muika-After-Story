@@ -223,10 +223,10 @@ async def test_boot_request_queued_before_check_is_enriched_when_consumed(
     entered, release = asyncio.Event(), asyncio.Event()
     pipeline = app.muika._run_brain_pipeline
 
-    async def hold_greeting(event):
+    async def hold_greeting(event, **kwargs):
         entered.set()
         await release.wait()
-        await pipeline(event)
+        await pipeline(event, **kwargs)
 
     monkeypatch.setattr(app.muika, "_run_brain_pipeline", hold_greeting)
     await app.bootstrap()
@@ -331,11 +331,11 @@ async def test_repeated_channel_does_not_steal_queued_boot_change(
     entered, release = asyncio.Event(), asyncio.Event()
     pipeline = app.muika._run_brain_pipeline
 
-    async def hold_greeting(event):
+    async def hold_greeting(event, **kwargs):
         if event.type == "session_bootstrap":
             entered.set()
             await release.wait()
-        await pipeline(event)
+        await pipeline(event, **kwargs)
 
     monkeypatch.setattr(app.muika, "_run_brain_pipeline", hold_greeting)
     await core._handle_event({"type": "session_bootstrap", "id": "first"}, AdapterInfo(client_name="qq"))

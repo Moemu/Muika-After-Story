@@ -8,7 +8,6 @@ import pytest
 from harness import ScriptedTurn, assert_clean_visible
 
 from muika.config import mas_config
-from muika.core.actions.tools import _search
 from muika.core.agent import task_store
 from muika.core.agent.task_store import TaskStore
 from muika.llm._schema import ToolCall
@@ -145,7 +144,9 @@ async def test_restart_retains_resumable_and_recent_task_work(
 
 
 @pytest.mark.parametrize("outcome", ["timeout", "unconfigured", "invalid_range", "empty_query", "unknown", "empty"])
-async def test_search_failure_status_and_retry_guidance(core_app_factory, recorder, monkeypatch, outcome):
+async def test_search_failure_status_and_retry_guidance(
+    core_app_factory, recorder, monkeypatch, outcome, web_search_plugin
+):
     """搜索失败必须保留错误标记并触发重复失败引导，正常空结果不能触发引导。"""
 
     async def search(query, time_range):
@@ -153,14 +154,14 @@ async def test_search_failure_status_and_retry_guidance(core_app_factory, record
             raise TimeoutError("simulated timeout")
         return []
 
-    monkeypatch.setattr(mas_config, "web_search_provider", "tavily")
-    monkeypatch.setattr(mas_config, "web_search_api_key", "test-key")
-    monkeypatch.setitem(_search.SEARCH_BACKENDS, "tavily", search)
+    monkeypatch.setattr(web_search_plugin.plugin_config, "provider", "tavily")
+    monkeypatch.setattr(web_search_plugin.plugin_config, "api_key", "test-key")
+    monkeypatch.setitem(web_search_plugin.SEARCH_BACKENDS, "tavily", search)
     arguments = {"query": "release news"}
     if outcome == "unconfigured":
-        monkeypatch.setattr(mas_config, "web_search_api_key", "")
+        monkeypatch.setattr(web_search_plugin.plugin_config, "api_key", "")
     elif outcome == "unknown":
-        monkeypatch.setattr(mas_config, "web_search_provider", "unknown")
+        monkeypatch.setattr(web_search_plugin.plugin_config, "provider", "unknown")
     elif outcome == "invalid_range":
         arguments["time_range"] = "invalid"
     elif outcome == "empty_query":

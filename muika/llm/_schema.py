@@ -193,3 +193,5 @@ class ModelStreamCompletions:
     """调用成功（如不成功会在 `chunk` 中输出错误信息）"""
     message: ModelMessage | None = None
     stop_reason: StopReason = "stop"
+    provider_request_id: str = ""
+    """提供者侧请求标识（如 DashScope request_id），用于与提供者日志对账"""

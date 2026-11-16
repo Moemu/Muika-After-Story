@@ -302,8 +302,8 @@ class DigestAgent:
                     cooldown_days=7,
                     tags=["news", source.id, chosen.primary_theme],
                 )
-                async with get_session() as db_session:
-                    await TopicHistoryCRUD.record(db_session, topic_id=chosen.topic_id, user_engaged=False)
+                # 使用记录在真正发送后由 TopicManager 统一写入；入队不预写，
+                # 否则出队时的冷却复查会把刚入队的素材判成"已用"而丢弃。
                 self.topic_manager.enqueue_event(topic)
 
                 logger.info(f"[DigestAgent] Reading note ready: {chosen.entry.title}")

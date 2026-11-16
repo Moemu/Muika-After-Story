@@ -9,7 +9,7 @@ from muika.core.memory_models import DreamResult, IntentionUpdate, StateUpdate
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.database.orm_models import DiaryORM
 from muika.llm import ModelCompletions, ModelConfig
-from muika.llm.context import ContextOverflowWarning, input_budget, request_tokens
+from muika.llm.context import input_budget, request_tokens
 
 
 async def test_long_day_is_chunked_then_committed_as_one_diary(fake_llm_factory, redirect_get_session):
@@ -38,7 +38,7 @@ async def test_long_day_is_chunked_then_committed_as_one_diary(fake_llm_factory,
 async def test_open_intentions_keep_their_text_and_source_yields_budget(fake_llm_factory, redirect_get_session):
     memory = MemoryManager()
     day = date(2026, 9, 1)
-    await memory.add_context("muika", "I read a poem and thought of him. " * 160, timestamp=datetime(2026, 9, 1, 12))
+    await memory.add_context("muika", "I read a poem and thought of him. " * 1600, timestamp=datetime(2026, 9, 1, 12))
     description = "remember this wish. " * 53
     await memory.update_state(
         StateUpdate(
@@ -57,9 +57,41 @@ async def test_open_intentions_keep_their_text_and_source_yields_budget(fake_llm
         return ModelCompletions(text="A short source summary.")
 
     model = fake_llm_factory(side_effect=respond)
+    model.config = ModelConfig(provider="_echo", context_window=32768, max_tokens=2048)
+    assert await MemoryReasoner(model).dream(day, memory)
+
+
+@pytest.mark.parametrize("fixed_overflow", [True, False], ids=["fixed-input", "summary-unavailable"])
+async def test_over_budget_dream_keeps_material_pending(fake_llm_factory, redirect_get_session, fixed_overflow):
+    memory = MemoryManager()
+    day = date(2026, 9, 1)
+    original = "I read a poem. " * (1 if fixed_overflow else 6000) + "End."
+    await memory.add_context("muika", original, timestamp=datetime(2026, 9, 1, 12))
+    if fixed_overflow:
+        await memory.update_state(
+            StateUpdate(
+                reason="The wishes are still open.",
+                intentions=[
+                    IntentionUpdate(id=f"wish-{index}", description="remember this wish. " * 53) for index in range(15)
+                ],
+            )
+        )
+
+    def respond(request):
+        return ModelCompletions(
+            text=DreamResult(diary="Must not be saved.").model_dump_json() if request.format == "json" else ""
+        )
+
+    model = fake_llm_factory(side_effect=respond)
     model.config = ModelConfig(provider="_echo", context_window=16384, max_tokens=2048)
-    with pytest.warns(ContextOverflowWarning):
-        assert await MemoryReasoner(model).dream(day, memory)
+    with pytest.raises(ValueError, match="Dream .*context budget; material remains pending"):
+        await MemoryReasoner(model).dream(day, memory)
+    assert not any(request.purpose == "memory_dream" for request in model.requests)
+    restored = MemoryManager()
+    await restored.load()
+    assert await restored.pending_days(datetime(2026, 9, 2, 12)) == [day]
+    assert await restored.recent_diaries(day) == []
+    assert (await restored.day_material(day))[0].content == original
 
 
 async def test_dream_continues_from_best_synced_coverage(fake_llm_factory, redirect_get_session):

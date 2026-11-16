@@ -1219,6 +1219,12 @@ wheels = [
 ]
 
 [[package]]
+name = "lunar-python"
+version = "1.4.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/45/5154c95ae7feaab7ca508e71c3288692c09952dfe33b03b7c2f18a32e2cd/lunar_python-1.4.8.tar.gz", hash = "sha256:3aa11cc73c25e70ddf0ba5bdac7398c03acc9491a3aa512a91c9642973b669d6", size = 105862, upload-time = "2025-11-05T12:31:53.353Z" }
+
+[[package]]
 name = "lxml"
 version = "6.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1506,6 +1512,7 @@ dependencies = [
     { name = "fleep" },
     { name = "jinja2" },
     { name = "loguru" },
+    { name = "lunar-python" },
     { name = "mcp", extra = ["cli"] },
     { name = "openai" },
     { name = "opencv-python" },
@@ -1557,6 +1564,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'standard'", specifier = ">=1.8.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "loguru", specifier = ">=0.7.0" },
+    { name = "lunar-python", specifier = ">=1.3.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.26.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15.0" },
     { name = "nonebot-adapter-onebot", marker = "extra == 'nonebot'", specifier = ">=2.4.6" },

@@ -12,18 +12,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from muika.builtin_plugins import plugins as plugins_command
 from muika.config import mas_config
 from muika.core.actions.tools._plugin import plugin_load
 from muika.core.memory_reasoning import MemoryReasoner
 from muika.core.self_mod import SelfModError
 from muika.core.self_mod.plugin_deployer import PluginDeployer
 from muika.plugin.exceptions import PluginImportError
-from muika.plugin.loader import get_plugins, unload_plugin
+from muika.plugin.loader import get_plugins, load_plugin, unload_plugin
 from muika.plugin.manager import PluginManager
 from muika.plugin.watcher import PluginFileHandler
 
 pytestmark = pytest.mark.usefixtures("approved_review")
+
+
+@pytest.fixture
+def plugins_command():
+    plugin = load_plugin("muika.builtin_plugins.commands")
+    yield plugin.module.plugins
+    unload_plugin(plugin.package_name)
 
 
 async def test_review_rejection_happens_before_plugin_probe(deploy_env, monkeypatch):
@@ -358,7 +364,7 @@ async def test_activation_rechecks_candidate_before_probe(deploy_env, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_quarantine_restore_response_hides_internal_tool_name(monkeypatch):
+async def test_quarantine_restore_response_hides_internal_tool_name(monkeypatch, plugins_command):
     """经真实命令派发：恢复成功的玩家可见文案是固定句子，deployer 内部报告被丢弃。"""
     from muika.plugin.command import CommandDispatcher
 

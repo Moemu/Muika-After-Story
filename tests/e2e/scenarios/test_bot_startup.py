@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from muika.ipc.server import CoreWsServer
+from muika.ipc import CoreWsServer
 from muika.utils.first_run import UserAgreement, load_agreement_content
 
 pytestmark = pytest.mark.e2e
@@ -22,7 +22,12 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
-async def bot_process(request, tmp_path, recorder, unused_tcp_port_factory):
+def bot_master_settings(request):
+    return getattr(request, "param", ["MASTER_ID=startup-test-master", 'SUPERUSERS=["startup-test-master"]'])
+
+
+@pytest.fixture
+async def bot_process(request, tmp_path, recorder, unused_tcp_port_factory, bot_master_settings):
     """用临时配置启动真实入口，保存输出并清理子进程。"""
     core_port = unused_tcp_port_factory()
     server = CoreWsServer(port=core_port, secret="startup-test-secret")
@@ -39,8 +44,8 @@ async def bot_process(request, tmp_path, recorder, unused_tcp_port_factory):
         "DRIVER=~fastapi+~httpx+~websockets",
         "HOST=127.0.0.1",
         f"PORT={unused_tcp_port_factory()}",
-        "MASTER_ID=startup-test-master",
-        'SUPERUSERS=["startup-test-master"]',
+        *bot_master_settings,
+        "ACTION_PERMISSION=not-a-core-permission",
         "IPC_SECRET=startup-test-secret",
         f"CORE_WS_URL=ws://127.0.0.1:{core_port}/ws",
         "CLIENT_NAME=startup-test-bot",
@@ -117,6 +122,11 @@ async def test_adapter_import_errors_identify_cause(bot_process, request, diagno
 
 
 @pytest.mark.parametrize(
+    "bot_master_settings",
+    [["MASTER_ID=startup-test-master"], ["MASTER_ID=", 'SUPERUSERS=["startup-test-master"]']],
+    indirect=True,
+)
+@pytest.mark.parametrize(
     "bot_process,adapter_name",
     [
         (None, "OneBot V11"),
@@ -140,6 +150,7 @@ async def test_selected_adapter_loads_mas_and_connects_core(bot_process, adapter
                 break
             await asyncio.sleep(0.1)
         assert server.has_connection
+        assert server.get_adapter_names() == ["startup-test-bot"]
     finally:
         if process.returncode is None:
             process.terminate()

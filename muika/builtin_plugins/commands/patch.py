@@ -8,13 +8,6 @@ from muika.core.loop import Muika
 from muika.core.self_mod.workspace import SelfWorkspaceError, get_self_workspace_manager
 from muika.ipc import supervisor
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="patch",
-    description="查看与回滚 Core 工作区版本",
-    usage=".patch <list|show|rollback|restart>",
-)
 
 alc = Alconna(
     "patch",

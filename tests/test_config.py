@@ -1,4 +1,4 @@
-"""MASConfig 的旧字段迁移与联网搜索配置默认值。"""
+"""MASConfig 的旧字段迁移与模型配置校验。"""
 
 import pytest
 from pydantic import ValidationError
@@ -8,7 +8,16 @@ from muika.llm import ModelConfig
 
 
 def _make(**kwargs) -> MASConfig:
-    return MASConfig(master_id="test", ipc_secret="test", _env_file=None, **kwargs)
+    return MASConfig(ipc_secret="test", _env_file=None, **kwargs)
+
+
+def test_core_does_not_validate_bot_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv("MASTER_ID", raising=False)
+    monkeypatch.delenv("SUPERUSERS", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("MASTER_ID=\nCORE_FALLBACK_URLS=invalid-json\nINPUT_TIMEOUT=not-a-number\n", encoding="utf-8")
+    config = MASConfig(ipc_secret="test", _env_file=env)
+    assert config.action_permission == "write"
 
 
 def test_telegram_proxy_migrates_to_proxy(monkeypatch):
@@ -31,12 +40,6 @@ def test_explicit_proxy_wins_over_legacy(monkeypatch):
     config = _make(proxy="http://new:7890", telegram_proxy="http://old:7890")
     assert config.proxy == "http://new:7890"
     assert "telegram_proxy" not in config.model_dump()
-
-
-def test_web_search_disabled_by_default():
-    config = _make()
-    assert config.web_search_provider is None
-    assert config.web_search_api_key == ""
 
 
 @pytest.mark.parametrize(

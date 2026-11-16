@@ -21,6 +21,7 @@ class FetchWebContentParams(BaseModel):
 @on_function_call(
     "Extract plain text content from a web page. Reading a page also satisfies a bit of your curiosity.",
     params=FetchWebContentParams,
+    read_only=True,
 )
 async def fetch_web_content(url: str, state: MuikaState):
     """提取网页正文，拒绝不支持的 URL 协议。"""

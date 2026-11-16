@@ -70,6 +70,13 @@ Muika-After-Story 并不鼓励用户完全使用 Agent 进行任何功能开发�
 - 导入放在文件顶部；仅在解决实际循环导入问题时使用局部导入。
 - 数据库迁移通过 Alembic 生成，并人工检查升级和回退逻辑。
 
+## 分支与发布
+
+- `main` 是版本发布基线，只接受来自 `dev` 的 Pull Request。合入 `main` 的提交必须由该 PR 带入，PR 标题格式为 `Ver a.b.c: Title`
+- `dev` 是活跃开发基线（本地开发基线）。小型功能与修复可以直接提交到 `dev`
+- 可能的大型更新（例如用户明确指定的 `Ver a.b.c` 开发计划或目标）应基于 `dev` 新建特性分支，完成后创建 Pull Request，合并目标为 `dev`
+- 不要在 `main` 上直接提交；发布时由维护者把 `dev` 的变更通过 PR 合入 `main`，再打对应版本标签
+
 ## Commit 规范
 
 Muika-After-Story 始终使用 [gitmoji](https://gitmoji.dev/) 作为主 commit 规范

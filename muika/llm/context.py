@@ -101,7 +101,9 @@ def public_text(text: str) -> str:
     """移除模型私有思考与控制标签，保留可见正文。"""
     text = re.sub(r"<(?:heart|think)\b[^>]*>.*?(?:</(?:heart|think)\s*>|$)", "", text, flags=re.S | re.I)
     text = re.sub(r"<(?:memory|state|agent)\b[^>]*>.*?(?:</(?:memory|state|agent)\s*>|$)", "", text, flags=re.S | re.I)
-    return re.sub(r"<(?:timeout\s*:|target\s*:|enable_god_mode|do_nothing)[^>]*>", "", text, flags=re.I).strip()
+    return re.sub(
+        r"<(?:timeout\s*:|target\s*:|enable_god_mode|do_nothing|restart\b)[^>]*>", "", text, flags=re.I
+    ).strip()
 
 
 def strip_json_fence(text: str) -> str:

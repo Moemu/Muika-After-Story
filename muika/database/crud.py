@@ -317,6 +317,31 @@ class TopicHistoryCRUD:
         return entry
 
     @staticmethod
+    async def mark_engaged(
+        session: AsyncSession,
+        topic_id: str,
+    ) -> Optional[TopicHistoryORM]:
+        """给已有话题记录增加一次互动计数；记录不存在时返回 None。"""
+        stmt = await session.execute(select(TopicHistoryORM).where(TopicHistoryORM.topic_id == topic_id).limit(1))
+        existing = stmt.scalar_one_or_none()
+        if existing is not None:
+            existing.engaged_count += 1
+        return existing
+
+    @staticmethod
+    async def list_recent(
+        session: AsyncSession,
+        since: str,
+    ) -> list[TopicHistoryORM]:
+        """返回 last_used_at 不早于 *since*（ISO 字符串）的话题记录。"""
+        result = await session.execute(
+            select(TopicHistoryORM)
+            .where(TopicHistoryORM.last_used_at >= since)
+            .order_by(TopicHistoryORM.last_used_at.desc())
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
     async def list_all(
         session: AsyncSession,
         limit: int = 20,

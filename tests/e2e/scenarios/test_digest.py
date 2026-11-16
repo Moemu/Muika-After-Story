@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import web
@@ -17,6 +19,21 @@ from muika.core.actions.tools.rss._schema import RSSSource
 from tests.e2e.harness import ScriptedTurn
 
 pytestmark = pytest.mark.e2e
+
+
+def _initiative_clock(monkeypatch):
+    """固定在非问候时段，隔离时段问候对主动话题链路的抢占。"""
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 11, 7, 15, 0)
+    for target in (
+        "muika.core.loop.datetime",
+        "muika.core.memory.datetime",
+        "muika.core.topic_manager.datetime",
+        "muika.database.crud.datetime",
+    ):
+        monkeypatch.setattr(target, clock)
+    return clock
+
 
 KEEP_ASSESSMENT = (
     '{"score":85,"keep":true,"reason":"Shared curiosity","primary_theme":"culture",'
@@ -121,7 +138,7 @@ async def test_long_article_is_truncated_in_assessment_prompt(core_app_factory, 
 
     cached = app.db_query("SELECT source_id, keep, score FROM rss_digest_cache")
     assert cached == [{"source_id": "reading", "keep": 1, "score": 85}]
-    assert app.db_query("SELECT topic_id FROM topic_history") == [{"topic_id": queued[0].id}]
+    assert app.db_query("SELECT topic_id FROM topic_history") == []
     assert app.sent == []
     app.recorder.record(
         "digest_truncation",
@@ -130,6 +147,48 @@ async def test_long_article_is_truncated_in_assessment_prompt(core_app_factory, 
         queued_topics=len(queued),
         cache_rows=len(cached),
     )
+
+
+async def test_queued_digest_topic_is_delivered_on_next_tick(core_app_factory, monkeypatch):
+    """RSS 素材入队后必须能在下一次主动 tick 真正送达。
+
+    回归：DigestAgent 入队前预写 TopicHistory，素材出队时被误判为"已用"而丢弃。
+    """
+    clock = _initiative_clock(monkeypatch)
+    app = await core_app_factory(
+        turns=[
+            ScriptedTurn(
+                text=KEEP_ASSESSMENT,
+                when=lambda request: request.purpose == "digest_topic_fit",
+                name="delivered_reading",
+            ),
+            ScriptedTurn(
+                text="我读到一条新闻，想和你说说。",
+                when=lambda request: request.purpose == "topic_expand",
+                name="delivered_topic",
+            ),
+        ]
+    )
+    await app.start()
+    assert app.muika is not None
+
+    application = web.Application()
+    application.router.add_get("/rss", _rss_handler("Delivered reading", "/article"))
+    application.router.add_get("/article", _article_handler("word " * 800))
+    async with TestClient(TestServer(application)) as client:
+        _patch_sources(monkeypatch, client, {"reading": "/rss"})
+        await asyncio.wait_for(app.muika.digest_agent.fetch_and_digest(), 10)
+
+    queued = list(app.muika.topic_manager._event_queue)
+    assert len(queued) == 1, "digest 应把素材放进事件队列"
+
+    app.muika.state.boredom = 0.9
+    app.muika.state.last_interaction = clock.now() - timedelta(minutes=30)
+    await app.advance_time()
+    await app.wait_processed("time_tick")
+
+    assert app.sent, "入队的素材必须能在主动 tick 送达"
+    app.recorder.record("digest_topic_delivered", queued=len(queued), sent=len(app.sent))
 
 
 async def test_short_entry_skips_assessment_model(core_app_factory, monkeypatch):
@@ -208,7 +267,7 @@ async def test_assessment_failure_does_not_block_other_sources(core_app_factory,
     assert len(queued) == 1
     assert queued[0].id.startswith("event_rss_second_")
     assert queued[0].title == "Second reading"
-    assert app.db_query("SELECT topic_id FROM topic_history") == [{"topic_id": queued[0].id}]
+    assert app.db_query("SELECT topic_id FROM topic_history") == []
     app.recorder.record(
         "digest_assessment_failure",
         assessment_attempts=len(attempts),

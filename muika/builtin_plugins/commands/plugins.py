@@ -7,13 +7,6 @@ from arclet.alconna import Alconna, Args, CommandMeta, Subcommand
 from muika.core.self_mod.plugin_deployer import get_plugin_deployer
 from muika.plugin.command import on_alconna
 from muika.plugin.manager import PluginManager
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="plugins",
-    description="查看 / 重载 / 卸载已加载插件",
-    usage=".plugins [reload [name] | unload <name>]",
-)
 
 alc = Alconna(
     "plugins",

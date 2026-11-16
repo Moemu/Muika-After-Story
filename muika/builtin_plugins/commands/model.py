@@ -4,13 +4,6 @@ from arclet.alconna import Alconna, Args, Subcommand
 
 from muika.config import get_model_config_manager
 from muika.plugin.command import on_alconna
-from muika.plugin.models import PluginMetadata
-
-metadata = PluginMetadata(
-    name="model",
-    description="Muika 模型配置管理",
-    usage=".model <help|load|reload|list>",
-)
 
 alc = Alconna(
     "model",

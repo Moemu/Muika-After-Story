@@ -185,6 +185,7 @@ class Dashscope(BaseLLM):
                 usage=usage,
                 stop_reason=reason,
                 succeed=reason != "filtered",
+                provider_request_id=response.request_id or "",
             )
             return
 
@@ -193,7 +194,9 @@ class Dashscope(BaseLLM):
         reasoning = ""
         thinking = False
         finish = None
+        provider_request_id = ""
         async for chunk in RequestRetry[Any](self.config).stream(send_request):
+            provider_request_id = provider_request_id or chunk.request_id or ""
             usage = self._usage(chunk)
             if not chunk.output["choices"]:
                 continue
@@ -221,7 +224,13 @@ class Dashscope(BaseLLM):
             yield ModelStreamCompletions(chunk="</think>")
         message = ModelMessage(role="assistant", content=content, reasoning=reasoning, tool_calls=buffer.finish())
         reason = stop_reason(finish, has_tools=bool(message.tool_calls))
-        yield ModelStreamCompletions(message=message, usage=usage, stop_reason=reason, succeed=reason != "filtered")
+        yield ModelStreamCompletions(
+            message=message,
+            usage=usage,
+            stop_reason=reason,
+            succeed=reason != "filtered",
+            provider_request_id=provider_request_id,
+        )
 
     @staticmethod
     def _validate_response(response: GenerationResponse | MultiModalConversationResponse) -> None:

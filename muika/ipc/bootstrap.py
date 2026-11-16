@@ -457,7 +457,7 @@ async def run_core(
     port: int = DEFAULT_PORT,
 ) -> None:
     """初始化核心进程，并在退出或启动失败后清理资源。"""
-    init_logger()
+    init_logger(mas_config.log_level, mas_config.mas_log_only)
 
     logger.info(f"Muika-After-Story version: {get_version()}")
     logger.debug(f"Muika-After-Story data directory: {mas_config.data_dir.resolve()}")
